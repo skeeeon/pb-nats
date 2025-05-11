@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 
 	"github.com/pocketbase/pocketbase"
+	"github.com/pocketbase/pocketbase/core"
 )
 
 // Setup initializes the NATS synchronization for a PocketBase instance.
@@ -70,15 +71,13 @@ func Setup(app *pocketbase.PocketBase, options Options) error {
 	// Register hooks and set up event handling after app is bootstrapped
 	app.OnBeforeServe().Add(func(e *core.ServeEvent) error {
 		if err := syncManager.Setup(app); err != nil {
-			return fmt.Errorf("failed to setup sync manager: %w", err)
+			// Log error but don't fail startup if collections don't exist
+			if options.LogToConsole {
+				log.Printf("NATS sync setup warning: %v", err)
+			}
 		}
 		return nil
 	})
-	
-	// No need to check for an error return from the outer syncManager.Setup call
-	// since we're now registering it to run later via the hook
-		return fmt.Errorf("failed to setup sync manager: %w", err)
-	}
 
 	if options.LogToConsole {
 		log.Printf("PocketBase NATS sync initialized successfully")

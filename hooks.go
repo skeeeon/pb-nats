@@ -53,74 +53,110 @@ func (sm *SyncManager) Setup(app *pocketbase.PocketBase) error {
 }
 
 // setupUserHooks sets up hooks for the user collection
-func (sm *SyncManager) setupUserHooks(app *core.PocketBase) {
+func (sm *SyncManager) setupUserHooks(app *pocketbase.PocketBase) {
 	// Handle user creation
-	app.OnRecordAfterCreateRequest(sm.options.UserCollectionName).BindFunc(func(e *core.RecordCreateEvent) error {
+	app.OnModelAfterCreate().Add(func(e *core.ModelEvent) error {
+		// Skip non-record events or wrong collections
+		record, ok := e.Model.(*core.Record)
+		if !ok || record.Collection().Name != sm.options.UserCollectionName {
+			return nil
+		}
+		
 		if sm.shouldHandleEvent(sm.options.UserCollectionName, EventTypeUserCreate) {
 			if sm.options.LogToConsole {
-				log.Printf("User created: %s", e.Record.Id)
+				log.Printf("User created: %s", record.Id)
 			}
 			sm.scheduleSync()
 		}
-		return e.Next()
+		return nil
 	})
 
 	// Handle user update
-	app.OnRecordAfterUpdateRequest(sm.options.UserCollectionName).BindFunc(func(e *core.RecordUpdateEvent) error {
+	app.OnModelAfterUpdate().Add(func(e *core.ModelEvent) error {
+		// Skip non-record events or wrong collections
+		record, ok := e.Model.(*core.Record)
+		if !ok || record.Collection().Name != sm.options.UserCollectionName {
+			return nil
+		}
+		
 		if sm.shouldHandleEvent(sm.options.UserCollectionName, EventTypeUserUpdate) {
 			if sm.options.LogToConsole {
-				log.Printf("User updated: %s", e.Record.Id)
+				log.Printf("User updated: %s", record.Id)
 			}
 			sm.scheduleSync()
 		}
-		return e.Next()
+		return nil
 	})
 
 	// Handle user deletion
-	app.OnRecordAfterDeleteRequest(sm.options.UserCollectionName).BindFunc(func(e *core.RecordDeleteEvent) error {
+	app.OnModelAfterDelete().Add(func(e *core.ModelEvent) error {
+		// Skip non-record events or wrong collections
+		record, ok := e.Model.(*core.Record)
+		if !ok || record.Collection().Name != sm.options.UserCollectionName {
+			return nil
+		}
+		
 		if sm.shouldHandleEvent(sm.options.UserCollectionName, EventTypeUserDelete) {
 			if sm.options.LogToConsole {
-				log.Printf("User deleted: %s", e.Record.Id)
+				log.Printf("User deleted: %s", record.Id)
 			}
 			sm.scheduleSync()
 		}
-		return e.Next()
+		return nil
 	})
 }
 
 // setupRoleHooks sets up hooks for the role collection
-func (sm *SyncManager) setupRoleHooks(app *core.PocketBase) {
+func (sm *SyncManager) setupRoleHooks(app *pocketbase.PocketBase) {
 	// Handle role creation
-	app.OnRecordAfterCreateRequest(sm.options.RoleCollectionName).BindFunc(func(e *core.RecordCreateEvent) error {
+	app.OnModelAfterCreate().Add(func(e *core.ModelEvent) error {
+		// Skip non-record events or wrong collections
+		record, ok := e.Model.(*core.Record)
+		if !ok || record.Collection().Name != sm.options.RoleCollectionName {
+			return nil
+		}
+		
 		if sm.shouldHandleEvent(sm.options.RoleCollectionName, EventTypeRoleCreate) {
 			if sm.options.LogToConsole {
-				log.Printf("Role created: %s", e.Record.Id)
+				log.Printf("Role created: %s", record.Id)
 			}
 			sm.scheduleSync()
 		}
-		return e.Next()
+		return nil
 	})
 
 	// Handle role update
-	app.OnRecordAfterUpdateRequest(sm.options.RoleCollectionName).BindFunc(func(e *core.RecordUpdateEvent) error {
+	app.OnModelAfterUpdate().Add(func(e *core.ModelEvent) error {
+		// Skip non-record events or wrong collections
+		record, ok := e.Model.(*core.Record)
+		if !ok || record.Collection().Name != sm.options.RoleCollectionName {
+			return nil
+		}
+		
 		if sm.shouldHandleEvent(sm.options.RoleCollectionName, EventTypeRoleUpdate) {
 			if sm.options.LogToConsole {
-				log.Printf("Role updated: %s", e.Record.Id)
+				log.Printf("Role updated: %s", record.Id)
 			}
 			sm.scheduleSync()
 		}
-		return e.Next()
+		return nil
 	})
 
 	// Handle role deletion
-	app.OnRecordAfterDeleteRequest(sm.options.RoleCollectionName).BindFunc(func(e *core.RecordDeleteEvent) error {
+	app.OnModelAfterDelete().Add(func(e *core.ModelEvent) error {
+		// Skip non-record events or wrong collections
+		record, ok := e.Model.(*core.Record)
+		if !ok || record.Collection().Name != sm.options.RoleCollectionName {
+			return nil
+		}
+		
 		if sm.shouldHandleEvent(sm.options.RoleCollectionName, EventTypeRoleDelete) {
 			if sm.options.LogToConsole {
-				log.Printf("Role deleted: %s", e.Record.Id)
+				log.Printf("Role deleted: %s", record.Id)
 			}
 			sm.scheduleSync()
 		}
-		return e.Next()
+		return nil
 	})
 }
 
@@ -170,15 +206,21 @@ func (sm *SyncManager) triggerSync() error {
 		sm.generatingMutex.Unlock()
 	}()
 
-	// Generate configuration
+	// Generate configuration - handle failures gracefully
 	config, err := sm.generator.GenerateConfig()
 	if err != nil {
+		if sm.options.LogToConsole {
+			log.Printf("Warning: Failed to generate config: %v", err)
+		}
 		return err
 	}
 
 	// Check if config has changed
 	changed, err := sm.fileManager.HasConfigChanged(config)
 	if err != nil {
+		if sm.options.LogToConsole {
+			log.Printf("Warning: Failed to check if config changed: %v", err)
+		}
 		return err
 	}
 
@@ -186,11 +228,17 @@ func (sm *SyncManager) triggerSync() error {
 	if changed {
 		// Write config file
 		if err := sm.fileManager.WriteConfigFile(config); err != nil {
+			if sm.options.LogToConsole {
+				log.Printf("Warning: Failed to write config file: %v", err)
+			}
 			return err
 		}
 
 		// Reload NATS
 		if err := sm.reloader.ReloadConfig(); err != nil {
+			if sm.options.LogToConsole {
+				log.Printf("Warning: Failed to reload NATS: %v", err)
+			}
 			return err
 		}
 	}

@@ -7,6 +7,7 @@ import (
 	"log"
 	"text/template"
 
+	"github.com/pocketbase/dbx"
 	"github.com/pocketbase/pocketbase"
 	"github.com/pocketbase/pocketbase/core"
 )
@@ -36,20 +37,47 @@ func NewGenerator(app *pocketbase.PocketBase, userCollection, roleCollection str
 
 // GenerateConfig generates a NATS configuration file
 func (g *Generator) GenerateConfig() (string, error) {
+	// Detect if collections exist and handle gracefully
+	isFirstRun, err := g.isFirstRun()
+	if err != nil {
+		return "", fmt.Errorf("failed to check if collections exist: %w", err)
+	}
+
+	// First run detection - generate empty but valid config
+	if isFirstRun {
+		if g.logToConsole {
+			log.Printf("First run detected: Either user or role collections don't exist yet, generating minimal config")
+		}
+		// Create empty data with just default permissions
+		configData := PrepareConfigData([]UserRecord{}, map[string]RoleRecord{}, g.defaultPublish, g.defaultSubscribe)
+		return g.renderConfig(configData)
+	}
+
 	// Get all users
 	users, err := g.getAllUsers()
 	if err != nil {
-		return "", fmt.Errorf("failed to get users: %w", err)
+		// If we can't get users, don't fail hard - log and continue with empty user set
+		if g.logToConsole {
+			log.Printf("Warning: Failed to get users: %v", err)
+		}
+		users = []UserRecord{}
 	}
 
 	// Get all roles
 	roles, err := g.getAllRoles()
 	if err != nil {
-		return "", fmt.Errorf("failed to get roles: %w", err)
+		// If we can't get roles, don't fail hard - log and continue with empty role set
+		if g.logToConsole {
+			log.Printf("Warning: Failed to get roles: %v", err)
+		}
+		roles = map[string]RoleRecord{}
 	}
 
+	// Clean up the data - skip empty roles or users without roles
+	cleanedRoles := g.pruneEmptyRoles(roles, users)
+
 	// Prepare configuration data
-	configData := PrepareConfigData(users, roles, g.defaultPublish, g.defaultSubscribe)
+	configData := PrepareConfigData(users, cleanedRoles, g.defaultPublish, g.defaultSubscribe)
 
 	// Generate configuration
 	config, err := g.renderConfig(configData)
@@ -65,6 +93,41 @@ func (g *Generator) GenerateConfig() (string, error) {
 	return config, nil
 }
 
+// isFirstRun checks if this is the first run by checking if collections exist
+func (g *Generator) isFirstRun() (bool, error) {
+	// Check if user collection exists
+	_, userErr := g.app.FindCollectionByNameOrId(g.userCollection)
+	
+	// Check if role collection exists
+	_, roleErr := g.app.FindCollectionByNameOrId(g.roleCollection)
+
+	// If either collection doesn't exist, it's a first run
+	return (userErr != nil || roleErr != nil), nil
+}
+
+// pruneEmptyRoles removes roles that don't have any active users
+func (g *Generator) pruneEmptyRoles(roles map[string]RoleRecord, users []UserRecord) map[string]RoleRecord {
+	// First, find which roles have active users
+	activeRoles := make(map[string]bool)
+	for _, user := range users {
+		if user.Active {
+			activeRoles[user.RoleID] = true
+		}
+	}
+
+	// Create a new map with only the roles that have active users
+	result := make(map[string]RoleRecord)
+	for roleID, role := range roles {
+		if activeRoles[roleID] {
+			result[roleID] = role
+		} else if g.logToConsole {
+			log.Printf("Skipping role '%s' as it has no active users", role.Name)
+		}
+	}
+
+	return result
+}
+
 // getAllUsers gets all users from the user collection
 func (g *Generator) getAllUsers() ([]UserRecord, error) {
 	// Get the user collection
@@ -73,27 +136,37 @@ func (g *Generator) getAllUsers() ([]UserRecord, error) {
 		return nil, fmt.Errorf("user collection not found: %w", err)
 	}
 
-	// Use filter expression with API directly
-	filter := fmt.Sprintf("%s = true", UserFields.Active)
-	recordsData, err := g.app.DAL().RecordQuery(collection).AndFilter(filter).All()
+	// Query active users using direct DB query
+	users := []struct {
+		ID       string `db:"id"`
+		Username string `db:"username"`
+		Password string `db:"password"`
+		RoleID   string `db:"role_id"`
+		Active   bool   `db:"active"`
+	}{}
+
+	err = g.app.DB().
+		Select("id", UserFields.Username, UserFields.Password, UserFields.RoleID, UserFields.Active).
+		From(collection.Name).
+		AndWhere(dbx.HashExp{UserFields.Active: true}).
+		All(&users)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query users: %w", err)
 	}
 
 	// Convert to UserRecords
-	users := make([]UserRecord, 0, len(recordsData))
-	for _, record := range recordsData {
-		user := UserRecord{
-			ID:       record.Id,
-			Username: record.GetString(UserFields.Username),
-			Password: record.GetString(UserFields.Password),
-			RoleID:   record.GetString(UserFields.RoleID),
-			Active:   record.GetBool(UserFields.Active),
+	result := make([]UserRecord, len(users))
+	for i, user := range users {
+		result[i] = UserRecord{
+			ID:       user.ID,
+			Username: user.Username,
+			Password: user.Password,
+			RoleID:   user.RoleID,
+			Active:   user.Active,
 		}
-		users = append(users, user)
 	}
 
-	return users, nil
+	return result, nil
 }
 
 // getAllRoles gets all roles from the role collection
@@ -104,44 +177,53 @@ func (g *Generator) getAllRoles() (map[string]RoleRecord, error) {
 		return nil, fmt.Errorf("role collection not found: %w", err)
 	}
 
-	// Query all roles using direct API
-	recordsData, err := g.app.DAL().RecordQuery(collection).All()
+	// Query all roles
+	roles := []struct {
+		ID                   string `db:"id"`
+		Name                 string `db:"name"`
+		PublishPermissions   string `db:"publish_permissions"`
+		SubscribePermissions string `db:"subscribe_permissions"`
+	}{}
+
+	err = g.app.DB().
+		Select("id", RoleFields.Name, RoleFields.PublishPermissions, RoleFields.SubscribePermissions).
+		From(collection.Name).
+		All(&roles)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query roles: %w", err)
 	}
 
 	// Convert to RoleRecords
-	roles := make(map[string]RoleRecord, len(recordsData))
-	for _, record := range recordsData {
-		// Get raw JSON fields
-		publishPerms, err := g.getRawJSONField(record, RoleFields.PublishPermissions)
+	result := make(map[string]RoleRecord, len(roles))
+	for _, role := range roles {
+		// Parse JSON fields
+		publishPerms, err := g.parseJSONField(role.PublishPermissions)
 		if err != nil {
 			log.Printf("Warning: Failed to parse publish permissions for role %s: %v", 
-				record.Id, err)
+				role.ID, err)
+			publishPerms = json.RawMessage("[]")
 		}
 
-		subscribePerms, err := g.getRawJSONField(record, RoleFields.SubscribePermissions)
+		subscribePerms, err := g.parseJSONField(role.SubscribePermissions)
 		if err != nil {
 			log.Printf("Warning: Failed to parse subscribe permissions for role %s: %v", 
-				record.Id, err)
+				role.ID, err)
+			subscribePerms = json.RawMessage("[]")
 		}
 
-		role := RoleRecord{
-			ID:                   record.Id,
-			Name:                 record.GetString(RoleFields.Name),
+		result[role.ID] = RoleRecord{
+			ID:                   role.ID,
+			Name:                 role.Name,
 			PublishPermissions:   publishPerms,
 			SubscribePermissions: subscribePerms,
 		}
-		roles[record.Id] = role
 	}
 
-	return roles, nil
+	return result, nil
 }
 
-// getRawJSONField extracts a JSON field from a record
-func (g *Generator) getRawJSONField(record *core.Record, fieldName string) (json.RawMessage, error) {
-	// Get the field value as a string
-	jsonStr := record.GetString(fieldName)
+// parseJSONField parses a JSON string into a json.RawMessage
+func (g *Generator) parseJSONField(jsonStr string) (json.RawMessage, error) {
 	if jsonStr == "" {
 		return json.RawMessage("[]"), nil
 	}
@@ -149,10 +231,17 @@ func (g *Generator) getRawJSONField(record *core.Record, fieldName string) (json
 	// Validate that it's valid JSON
 	var result json.RawMessage
 	if err := json.Unmarshal([]byte(jsonStr), &result); err != nil {
-		return nil, fmt.Errorf("invalid JSON in field %s: %w", fieldName, err)
+		return nil, fmt.Errorf("invalid JSON: %w", err)
 	}
 
 	return result, nil
+}
+
+// getRawJSONField extracts a JSON field from a record
+func (g *Generator) getRawJSONField(record *core.Record, fieldName string) (json.RawMessage, error) {
+	// Get the field value as a string
+	jsonStr := record.GetString(fieldName)
+	return g.parseJSONField(jsonStr)
 }
 
 // renderConfig renders the NATS configuration using the template

@@ -248,12 +248,14 @@ func PrepareConfigData(users []UserRecord, roles map[string]RoleRecord, defaultP
 		})
 	}
 
-	// Add users (only active ones)
+	// Add users (only active ones with valid roles)
 	for _, user := range users {
+		// Skip inactive users
 		if !user.Active {
 			continue
 		}
 
+		// Skip users with missing or invalid roles
 		role, ok := roles[user.RoleID]
 		if !ok {
 			continue // Skip users with unknown roles
