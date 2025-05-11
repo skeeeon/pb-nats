@@ -55,108 +55,102 @@ func (sm *SyncManager) Setup(app *pocketbase.PocketBase) error {
 // setupUserHooks sets up hooks for the user collection
 func (sm *SyncManager) setupUserHooks(app *pocketbase.PocketBase) {
 	// Handle user creation
-	app.OnModelAfterCreate().Add(func(e *core.ModelEvent) error {
-		// Skip non-record events or wrong collections
-		record, ok := e.Model.(*core.Record)
-		if !ok || record.Collection().Name != sm.options.UserCollectionName {
-			return nil
+	app.OnRecordAfterCreateRequest().BindFunc(func(e *core.RecordCreateEvent) error {
+		// Skip wrong collections
+		if e.Collection.Name != sm.options.UserCollectionName {
+			return e.Next()
 		}
 		
 		if sm.shouldHandleEvent(sm.options.UserCollectionName, EventTypeUserCreate) {
 			if sm.options.LogToConsole {
-				log.Printf("User created: %s", record.Id)
+				log.Printf("User created: %s", e.Record.Id)
 			}
 			sm.scheduleSync()
 		}
-		return nil
+		return e.Next()
 	})
 
 	// Handle user update
-	app.OnModelAfterUpdate().Add(func(e *core.ModelEvent) error {
-		// Skip non-record events or wrong collections
-		record, ok := e.Model.(*core.Record)
-		if !ok || record.Collection().Name != sm.options.UserCollectionName {
-			return nil
+	app.OnRecordAfterUpdateRequest().BindFunc(func(e *core.RecordUpdateEvent) error {
+		// Skip wrong collections
+		if e.Collection.Name != sm.options.UserCollectionName {
+			return e.Next()
 		}
 		
 		if sm.shouldHandleEvent(sm.options.UserCollectionName, EventTypeUserUpdate) {
 			if sm.options.LogToConsole {
-				log.Printf("User updated: %s", record.Id)
+				log.Printf("User updated: %s", e.Record.Id)
 			}
 			sm.scheduleSync()
 		}
-		return nil
+		return e.Next()
 	})
 
 	// Handle user deletion
-	app.OnModelAfterDelete().Add(func(e *core.ModelEvent) error {
-		// Skip non-record events or wrong collections
-		record, ok := e.Model.(*core.Record)
-		if !ok || record.Collection().Name != sm.options.UserCollectionName {
-			return nil
+	app.OnRecordAfterDeleteRequest().BindFunc(func(e *core.RecordDeleteEvent) error {
+		// Skip wrong collections
+		if e.Collection.Name != sm.options.UserCollectionName {
+			return e.Next()
 		}
 		
 		if sm.shouldHandleEvent(sm.options.UserCollectionName, EventTypeUserDelete) {
 			if sm.options.LogToConsole {
-				log.Printf("User deleted: %s", record.Id)
+				log.Printf("User deleted: %s", e.Record.Id)
 			}
 			sm.scheduleSync()
 		}
-		return nil
+		return e.Next()
 	})
 }
 
 // setupRoleHooks sets up hooks for the role collection
 func (sm *SyncManager) setupRoleHooks(app *pocketbase.PocketBase) {
 	// Handle role creation
-	app.OnModelAfterCreate().Add(func(e *core.ModelEvent) error {
-		// Skip non-record events or wrong collections
-		record, ok := e.Model.(*core.Record)
-		if !ok || record.Collection().Name != sm.options.RoleCollectionName {
-			return nil
+	app.OnRecordAfterCreateRequest().BindFunc(func(e *core.RecordCreateEvent) error {
+		// Skip wrong collections
+		if e.Collection.Name != sm.options.RoleCollectionName {
+			return e.Next()
 		}
 		
 		if sm.shouldHandleEvent(sm.options.RoleCollectionName, EventTypeRoleCreate) {
 			if sm.options.LogToConsole {
-				log.Printf("Role created: %s", record.Id)
+				log.Printf("Role created: %s", e.Record.Id)
 			}
 			sm.scheduleSync()
 		}
-		return nil
+		return e.Next()
 	})
 
 	// Handle role update
-	app.OnModelAfterUpdate().Add(func(e *core.ModelEvent) error {
-		// Skip non-record events or wrong collections
-		record, ok := e.Model.(*core.Record)
-		if !ok || record.Collection().Name != sm.options.RoleCollectionName {
-			return nil
+	app.OnRecordAfterUpdateRequest().BindFunc(func(e *core.RecordUpdateEvent) error {
+		// Skip wrong collections
+		if e.Collection.Name != sm.options.RoleCollectionName {
+			return e.Next()
 		}
 		
 		if sm.shouldHandleEvent(sm.options.RoleCollectionName, EventTypeRoleUpdate) {
 			if sm.options.LogToConsole {
-				log.Printf("Role updated: %s", record.Id)
+				log.Printf("Role updated: %s", e.Record.Id)
 			}
 			sm.scheduleSync()
 		}
-		return nil
+		return e.Next()
 	})
 
 	// Handle role deletion
-	app.OnModelAfterDelete().Add(func(e *core.ModelEvent) error {
-		// Skip non-record events or wrong collections
-		record, ok := e.Model.(*core.Record)
-		if !ok || record.Collection().Name != sm.options.RoleCollectionName {
-			return nil
+	app.OnRecordAfterDeleteRequest().BindFunc(func(e *core.RecordDeleteEvent) error {
+		// Skip wrong collections
+		if e.Collection.Name != sm.options.RoleCollectionName {
+			return e.Next()
 		}
 		
 		if sm.shouldHandleEvent(sm.options.RoleCollectionName, EventTypeRoleDelete) {
 			if sm.options.LogToConsole {
-				log.Printf("Role deleted: %s", record.Id)
+				log.Printf("Role deleted: %s", e.Record.Id)
 			}
 			sm.scheduleSync()
 		}
-		return nil
+		return e.Next()
 	})
 }
 

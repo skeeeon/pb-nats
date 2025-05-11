@@ -69,7 +69,12 @@ func Setup(app *pocketbase.PocketBase, options Options) error {
 	syncManager := NewSyncManager(generator, fileManager, reloader, options)
 
 	// Register hooks and set up event handling after app is bootstrapped
-	app.OnBeforeServe().Add(func(e *core.ServeEvent) error {
+	app.OnBootstrap().BindFunc(func(e *core.BootstrapEvent) error {
+		// Wait for bootstrap to complete
+		if err := e.Next(); err != nil {
+			return err
+		}
+		
 		if err := syncManager.Setup(app); err != nil {
 			// Log error but don't fail startup if collections don't exist
 			if options.LogToConsole {
