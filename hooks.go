@@ -55,9 +55,9 @@ func (sm *SyncManager) Setup(app *pocketbase.PocketBase) error {
 // setupUserHooks sets up hooks for the user collection
 func (sm *SyncManager) setupUserHooks(app *pocketbase.PocketBase) {
 	// Handle user creation
-	app.OnRecordAfterCreateRequest().BindFunc(func(e *core.RecordCreateEvent) error {
+	app.OnRecordAfterCreateSuccess().BindFunc(func(e *core.RecordEvent) error {
 		// Skip wrong collections
-		if e.Collection.Name != sm.options.UserCollectionName {
+		if e.Record.Collection().Name != sm.options.UserCollectionName {
 			return e.Next()
 		}
 		
@@ -71,9 +71,9 @@ func (sm *SyncManager) setupUserHooks(app *pocketbase.PocketBase) {
 	})
 
 	// Handle user update
-	app.OnRecordAfterUpdateRequest().BindFunc(func(e *core.RecordUpdateEvent) error {
+	app.OnRecordAfterUpdateSuccess().BindFunc(func(e *core.RecordEvent) error {
 		// Skip wrong collections
-		if e.Collection.Name != sm.options.UserCollectionName {
+		if e.Record.Collection().Name != sm.options.UserCollectionName {
 			return e.Next()
 		}
 		
@@ -87,9 +87,9 @@ func (sm *SyncManager) setupUserHooks(app *pocketbase.PocketBase) {
 	})
 
 	// Handle user deletion
-	app.OnRecordAfterDeleteRequest().BindFunc(func(e *core.RecordDeleteEvent) error {
+	app.OnRecordAfterDeleteSuccess().BindFunc(func(e *core.RecordEvent) error {
 		// Skip wrong collections
-		if e.Collection.Name != sm.options.UserCollectionName {
+		if e.Record.Collection().Name != sm.options.UserCollectionName {
 			return e.Next()
 		}
 		
@@ -106,9 +106,9 @@ func (sm *SyncManager) setupUserHooks(app *pocketbase.PocketBase) {
 // setupRoleHooks sets up hooks for the role collection
 func (sm *SyncManager) setupRoleHooks(app *pocketbase.PocketBase) {
 	// Handle role creation
-	app.OnRecordAfterCreateRequest().BindFunc(func(e *core.RecordCreateEvent) error {
+	app.OnRecordAfterCreateSuccess().BindFunc(func(e *core.RecordEvent) error {
 		// Skip wrong collections
-		if e.Collection.Name != sm.options.RoleCollectionName {
+		if e.Record.Collection().Name != sm.options.RoleCollectionName {
 			return e.Next()
 		}
 		
@@ -122,9 +122,9 @@ func (sm *SyncManager) setupRoleHooks(app *pocketbase.PocketBase) {
 	})
 
 	// Handle role update
-	app.OnRecordAfterUpdateRequest().BindFunc(func(e *core.RecordUpdateEvent) error {
+	app.OnRecordAfterUpdateSuccess().BindFunc(func(e *core.RecordEvent) error {
 		// Skip wrong collections
-		if e.Collection.Name != sm.options.RoleCollectionName {
+		if e.Record.Collection().Name != sm.options.RoleCollectionName {
 			return e.Next()
 		}
 		
@@ -138,9 +138,9 @@ func (sm *SyncManager) setupRoleHooks(app *pocketbase.PocketBase) {
 	})
 
 	// Handle role deletion
-	app.OnRecordAfterDeleteRequest().BindFunc(func(e *core.RecordDeleteEvent) error {
+	app.OnRecordAfterDeleteSuccess().BindFunc(func(e *core.RecordEvent) error {
 		// Skip wrong collections
-		if e.Collection.Name != sm.options.RoleCollectionName {
+		if e.Record.Collection().Name != sm.options.RoleCollectionName {
 			return e.Next()
 		}
 		
