@@ -5,7 +5,6 @@ package pbnats
 import (
 	"fmt"
 	"log"
-	"time"
 
 	"github.com/pocketbase/pocketbase"
 	"github.com/pocketbase/pocketbase/core"

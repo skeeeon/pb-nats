@@ -207,8 +207,8 @@ func SetRecordDefaults(record *core.Record) {
 		record.Set("updated", now)
 	}
 	
-	// Set default active status if not set
-	if !record.Has("active") {
+	// Set default active status if not set (check if field exists)
+	if record.Get("active") == nil {
 		record.Set("active", true)
 	}
 }
@@ -240,10 +240,10 @@ func RecordToMap(record *core.Record) map[string]interface{} {
 		}
 	}
 	
-	// Always include standard fields
+	// Always include standard fields using proper methods
 	result["id"] = record.Id
-	result["created"] = record.Created
-	result["updated"] = record.Updated
+	result["created"] = record.GetDateTime("created")
+	result["updated"] = record.GetDateTime("updated")
 	
 	return result
 }
