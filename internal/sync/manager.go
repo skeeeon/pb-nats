@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pocketbase/dbx"
 	"github.com/pocketbase/pocketbase"
 	"github.com/pocketbase/pocketbase/core"
 	"github.com/skeeeon/pb-nats/internal/jwt"
@@ -94,9 +95,9 @@ func (sm *Manager) initializeSystemComponents() error {
 		}
 	}
 
-	// Check if system account (SYS) exists
+	// Check if system account (SYS) exists using proper dbx query
 	sysAccountRecords, err := sm.app.FindAllRecords(sm.options.OrganizationCollectionName,
-		"account_name = 'SYS'")
+		dbx.HashExp{"account_name": "SYS"})
 	if err != nil {
 		return fmt.Errorf("failed to find system account records: %w", err)
 	}
@@ -250,8 +251,13 @@ func (sm *Manager) createSystemAccount(operator *pbtypes.SystemOperatorRecord) e
 
 // setupOrganizationHooks sets up hooks for organization changes
 func (sm *Manager) setupOrganizationHooks() {
-	// Organization creation - use the correct hook method
-	sm.app.OnRecordCreateRequest(sm.options.OrganizationCollectionName).BindFunc(func(e *core.RecordRequestEvent) error {
+	// Organization creation
+	sm.app.OnRecordCreateRequest().BindFunc(func(e *core.RecordRequestEvent) error {
+		// Only handle organization collection
+		if e.Collection.Name != sm.options.OrganizationCollectionName {
+			return e.Next()
+		}
+
 		// Generate keys and JWT before creation
 		if err := sm.generateOrganizationKeys(e.Record); err != nil {
 			return fmt.Errorf("failed to generate organization keys: %w", err)
@@ -259,7 +265,12 @@ func (sm *Manager) setupOrganizationHooks() {
 		return e.Next()
 	})
 
-	sm.app.OnRecordAfterCreateSuccess(sm.options.OrganizationCollectionName).BindFunc(func(e *core.RecordEvent) error {
+	sm.app.OnRecordAfterCreateSuccess().BindFunc(func(e *core.RecordEvent) error {
+		// Only handle organization collection
+		if e.Record.Collection().Name != sm.options.OrganizationCollectionName {
+			return e.Next()
+		}
+
 		if sm.shouldHandleEvent(sm.options.OrganizationCollectionName, pbtypes.EventTypeOrgCreate) {
 			sm.scheduleSync(e.Record.Id, pbtypes.PublishActionUpsert)
 		}
@@ -267,7 +278,12 @@ func (sm *Manager) setupOrganizationHooks() {
 	})
 
 	// Organization updates
-	sm.app.OnRecordAfterUpdateSuccess(sm.options.OrganizationCollectionName).BindFunc(func(e *core.RecordEvent) error {
+	sm.app.OnRecordAfterUpdateSuccess().BindFunc(func(e *core.RecordEvent) error {
+		// Only handle organization collection
+		if e.Record.Collection().Name != sm.options.OrganizationCollectionName {
+			return e.Next()
+		}
+
 		// Skip system account
 		if e.Record.GetString("account_name") == "SYS" {
 			return e.Next()
@@ -280,7 +296,12 @@ func (sm *Manager) setupOrganizationHooks() {
 	})
 
 	// Organization deletion
-	sm.app.OnRecordDeleteRequest(sm.options.OrganizationCollectionName).BindFunc(func(e *core.RecordRequestEvent) error {
+	sm.app.OnRecordDeleteRequest().BindFunc(func(e *core.RecordRequestEvent) error {
+		// Only handle organization collection
+		if e.Collection.Name != sm.options.OrganizationCollectionName {
+			return e.Next()
+		}
+
 		// Prevent deletion of system account
 		if e.Record.GetString("account_name") == "SYS" {
 			return fmt.Errorf("cannot delete system account")
@@ -296,7 +317,12 @@ func (sm *Manager) setupOrganizationHooks() {
 // setupUserHooks sets up hooks for user changes
 func (sm *Manager) setupUserHooks() {
 	// User creation
-	sm.app.OnRecordCreateRequest(sm.options.UserCollectionName).BindFunc(func(e *core.RecordRequestEvent) error {
+	sm.app.OnRecordCreateRequest().BindFunc(func(e *core.RecordRequestEvent) error {
+		// Only handle user collection
+		if e.Collection.Name != sm.options.UserCollectionName {
+			return e.Next()
+		}
+
 		// Generate user keys and JWT before creation
 		if err := sm.generateUserKeys(e.Record); err != nil {
 			return fmt.Errorf("failed to generate user keys: %w", err)
@@ -304,7 +330,12 @@ func (sm *Manager) setupUserHooks() {
 		return e.Next()
 	})
 
-	sm.app.OnRecordAfterCreateSuccess(sm.options.UserCollectionName).BindFunc(func(e *core.RecordEvent) error {
+	sm.app.OnRecordAfterCreateSuccess().BindFunc(func(e *core.RecordEvent) error {
+		// Only handle user collection
+		if e.Record.Collection().Name != sm.options.UserCollectionName {
+			return e.Next()
+		}
+
 		if sm.shouldHandleEvent(sm.options.UserCollectionName, pbtypes.EventTypeUserCreate) {
 			// User changes trigger organization JWT regeneration
 			orgID := e.Record.GetString("organization_id")
@@ -316,7 +347,12 @@ func (sm *Manager) setupUserHooks() {
 	})
 
 	// User updates
-	sm.app.OnRecordUpdateRequest(sm.options.UserCollectionName).BindFunc(func(e *core.RecordRequestEvent) error {
+	sm.app.OnRecordUpdateRequest().BindFunc(func(e *core.RecordRequestEvent) error {
+		// Only handle user collection
+		if e.Collection.Name != sm.options.UserCollectionName {
+			return e.Next()
+		}
+
 		// Check if role or organization changed
 		// Note: We'll regenerate JWT on any update to be safe since we don't have OriginalCopy
 		if err := sm.regenerateUserJWT(e.Record); err != nil {
@@ -325,7 +361,12 @@ func (sm *Manager) setupUserHooks() {
 		return e.Next()
 	})
 
-	sm.app.OnRecordAfterUpdateSuccess(sm.options.UserCollectionName).BindFunc(func(e *core.RecordEvent) error {
+	sm.app.OnRecordAfterUpdateSuccess().BindFunc(func(e *core.RecordEvent) error {
+		// Only handle user collection
+		if e.Record.Collection().Name != sm.options.UserCollectionName {
+			return e.Next()
+		}
+
 		if sm.shouldHandleEvent(sm.options.UserCollectionName, pbtypes.EventTypeUserUpdate) {
 			// User changes trigger organization JWT regeneration
 			orgID := e.Record.GetString("organization_id")
@@ -337,7 +378,12 @@ func (sm *Manager) setupUserHooks() {
 	})
 
 	// User deletion
-	sm.app.OnRecordAfterDeleteSuccess(sm.options.UserCollectionName).BindFunc(func(e *core.RecordEvent) error {
+	sm.app.OnRecordAfterDeleteSuccess().BindFunc(func(e *core.RecordEvent) error {
+		// Only handle user collection
+		if e.Record.Collection().Name != sm.options.UserCollectionName {
+			return e.Next()
+		}
+
 		if sm.shouldHandleEvent(sm.options.UserCollectionName, pbtypes.EventTypeUserDelete) {
 			// User deletion triggers organization JWT regeneration (to revoke user)
 			orgID := e.Record.GetString("organization_id")
@@ -352,7 +398,12 @@ func (sm *Manager) setupUserHooks() {
 // setupRoleHooks sets up hooks for role changes
 func (sm *Manager) setupRoleHooks() {
 	// Role updates affect all users with that role
-	sm.app.OnRecordAfterUpdateSuccess(sm.options.RoleCollectionName).BindFunc(func(e *core.RecordEvent) error {
+	sm.app.OnRecordAfterUpdateSuccess().BindFunc(func(e *core.RecordEvent) error {
+		// Only handle role collection
+		if e.Record.Collection().Name != sm.options.RoleCollectionName {
+			return e.Next()
+		}
+
 		if sm.shouldHandleEvent(sm.options.RoleCollectionName, pbtypes.EventTypeRoleUpdate) {
 			// Find all users with this role and regenerate their JWTs
 			if err := sm.regenerateUsersWithRole(e.Record.Id); err != nil {
@@ -602,7 +653,7 @@ func (sm *Manager) getSystemOperator() (*pbtypes.SystemOperatorRecord, error) {
 
 // regenerateUsersWithRole regenerates JWTs for all users with a specific role
 func (sm *Manager) regenerateUsersWithRole(roleID string) error {
-	users, err := sm.app.FindAllRecords(sm.options.UserCollectionName, fmt.Sprintf("role_id = '%s'", roleID))
+	users, err := sm.app.FindAllRecords(sm.options.UserCollectionName, dbx.HashExp{"role_id": roleID})
 	if err != nil {
 		return err
 	}
@@ -623,7 +674,7 @@ func (sm *Manager) regenerateUsersWithRole(roleID string) error {
 
 // scheduleOrganizationsWithRole schedules sync for all organizations that have users with a specific role
 func (sm *Manager) scheduleOrganizationsWithRole(roleID string) error {
-	users, err := sm.app.FindAllRecords(sm.options.UserCollectionName, fmt.Sprintf("role_id = '%s'", roleID))
+	users, err := sm.app.FindAllRecords(sm.options.UserCollectionName, dbx.HashExp{"role_id": roleID})
 	if err != nil {
 		return err
 	}

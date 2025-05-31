@@ -84,19 +84,25 @@ func Setup(app *pocketbase.PocketBase, options Options) error {
 	}
 
 	// Initialize all components after the app is bootstrapped
+	// This mirrors the pattern from pb-audit
 	app.OnBootstrap().BindFunc(func(e *core.BootstrapEvent) error {
 		// Wait for bootstrap to complete first
 		if err := e.Next(); err != nil {
 			return err
 		}
 
-		// Initialize components
+		// Initialize components - this is called after PocketBase is ready
 		if err := initializeComponents(app, options); err != nil {
-			// Log error but don't fail startup completely
+			// Log error but don't fail startup completely like in pb-audit
 			if options.LogToConsole {
-				log.Printf("NATS sync initialization warning: %v", err)
+				log.Printf("NATS sync initialization error: %v", err)
 			}
-			return nil // Allow app to continue starting
+			// Return the error to fail startup since NATS is critical
+			return fmt.Errorf("failed to initialize NATS sync: %w", err)
+		}
+
+		if options.LogToConsole {
+			log.Printf("PocketBase NATS JWT sync initialized successfully")
 		}
 
 		return nil
@@ -147,9 +153,10 @@ func initializeComponents(app *pocketbase.PocketBase, options Options) error {
 	}
 
 	// 6. Setup cleanup on app termination
+	// Use OnServe instead of OnTerminate since that's what we see in examples
 	app.OnServe().BindFunc(func(e *core.ServeEvent) error {
-		// Register cleanup handler
-		defer accountPublisher.Stop()
+		// Setup a cleanup handler - this will run when the serve event is processed
+		// We can't easily hook into termination, so we'll let the OS handle cleanup
 		return e.Next()
 	})
 

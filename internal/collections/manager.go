@@ -52,6 +52,13 @@ func (cm *Manager) InitializeCollections() error {
 
 // createSystemOperatorCollection creates the system operator collection (hidden)
 func (cm *Manager) createSystemOperatorCollection() error {
+	// Check if collection already exists
+	_, err := cm.app.FindCollectionByNameOrId(pbtypes.SystemOperatorCollectionName)
+	if err == nil {
+		// Collection already exists
+		return nil
+	}
+
 	collection := core.NewBaseCollection(pbtypes.SystemOperatorCollectionName)
 	
 	// Hidden collection - only system can access
@@ -118,6 +125,13 @@ func (cm *Manager) createSystemOperatorCollection() error {
 
 // createOrganizationsCollection creates the organizations collection
 func (cm *Manager) createOrganizationsCollection() error {
+	// Check if collection already exists
+	_, err := cm.app.FindCollectionByNameOrId(cm.options.OrganizationCollectionName)
+	if err == nil {
+		// Collection already exists
+		return nil
+	}
+
 	collection := core.NewBaseCollection(cm.options.OrganizationCollectionName)
 	
 	// Security rules - authenticated users can list/view active orgs
@@ -185,14 +199,18 @@ func (cm *Manager) createOrganizationsCollection() error {
 		OnUpdate: true,
 	})
 
-	// Note: PocketBase will auto-create basic indexes for unique fields
-	// Custom indexes can be added if needed via migrations
-
 	return cm.app.Save(collection)
 }
 
 // createRolesCollection creates the roles collection
 func (cm *Manager) createRolesCollection() error {
+	// Check if collection already exists
+	_, err := cm.app.FindCollectionByNameOrId(cm.options.RoleCollectionName)
+	if err == nil {
+		// Collection already exists
+		return nil
+	}
+
 	collection := core.NewBaseCollection(cm.options.RoleCollectionName)
 	
 	// Security rules - authenticated users can list/view, authenticated users can modify
@@ -241,14 +259,18 @@ func (cm *Manager) createRolesCollection() error {
 		Min:     types.Pointer(-1.0), // -1 means unlimited
 	})
 
-	// Note: PocketBase will auto-create basic indexes for unique fields
-	// Custom indexes can be added if needed via migrations
-
 	return cm.app.Save(collection)
 }
 
 // createUsersCollection creates the NATS users collection (auth collection)
 func (cm *Manager) createUsersCollection() error {
+	// Check if collection already exists
+	_, err := cm.app.FindCollectionByNameOrId(cm.options.UserCollectionName)
+	if err == nil {
+		// Collection already exists
+		return nil
+	}
+
 	collection := core.NewAuthCollection(cm.options.UserCollectionName)
 	
 	// Security rules - users can only access their own records
@@ -259,17 +281,9 @@ func (cm *Manager) createUsersCollection() error {
 	collection.UpdateRule = types.Pointer("@request.auth.id = id")
 	collection.DeleteRule = types.Pointer("@request.auth.id = id")
 
-	// Get organizations collection for relation
-	orgsCollection, err := cm.app.FindCollectionByNameOrId(cm.options.OrganizationCollectionName)
-	if err != nil {
-		return fmt.Errorf("organizations collection not found: %w", err)
-	}
-
-	// Get roles collection for relation
-	rolesCollection, err := cm.app.FindCollectionByNameOrId(cm.options.RoleCollectionName)
-	if err != nil {
-		return fmt.Errorf("roles collection not found: %w", err)
-	}
+	// We need to get the organizations and roles collections after they're created
+	// This is a bit tricky since we have a dependency chain
+	// We'll handle this by looking up the collections when we save this one
 
 	// Add NATS-specific fields
 	collection.Fields.Add(&core.TextField{
@@ -293,6 +307,24 @@ func (cm *Manager) createUsersCollection() error {
 		Name: "seed",
 		Max:  200,
 	})
+
+	// We need to add the relation fields after we save the collection
+	// because we need the collection IDs
+	if err := cm.app.Save(collection); err != nil {
+		return fmt.Errorf("failed to save user collection: %w", err)
+	}
+
+	// Now add relation fields
+	orgsCollection, err := cm.app.FindCollectionByNameOrId(cm.options.OrganizationCollectionName)
+	if err != nil {
+		return fmt.Errorf("organizations collection not found: %w", err)
+	}
+
+	rolesCollection, err := cm.app.FindCollectionByNameOrId(cm.options.RoleCollectionName)
+	if err != nil {
+		return fmt.Errorf("roles collection not found: %w", err)
+	}
+
 	collection.Fields.Add(&core.RelationField{
 		Name:          "organization_id",
 		Required:      true,
@@ -325,14 +357,19 @@ func (cm *Manager) createUsersCollection() error {
 		Name: "active",
 	})
 
-	// Note: PocketBase will auto-create basic indexes for relation fields
-	// Custom indexes can be added if needed via migrations
-
+	// Save again with the relation fields
 	return cm.app.Save(collection)
 }
 
 // createPublishQueueCollection creates the publish queue collection for reliable publishing
 func (cm *Manager) createPublishQueueCollection() error {
+	// Check if collection already exists
+	_, err := cm.app.FindCollectionByNameOrId(pbtypes.PublishQueueCollectionName)
+	if err == nil {
+		// Collection already exists
+		return nil
+	}
+
 	collection := core.NewBaseCollection(pbtypes.PublishQueueCollectionName)
 	
 	// Hidden collection - only system can access
@@ -341,6 +378,11 @@ func (cm *Manager) createPublishQueueCollection() error {
 	collection.CreateRule = nil // No access
 	collection.UpdateRule = nil // No access
 	collection.DeleteRule = nil // No access
+
+	// First save the collection, then add the relation field
+	if err := cm.app.Save(collection); err != nil {
+		return fmt.Errorf("failed to save publish queue collection: %w", err)
+	}
 
 	// Get organizations collection for relation
 	orgsCollection, err := cm.app.FindCollectionByNameOrId(cm.options.OrganizationCollectionName)
@@ -384,8 +426,6 @@ func (cm *Manager) createPublishQueueCollection() error {
 		OnUpdate: true,
 	})
 
-	// Note: PocketBase will auto-create basic indexes for relation fields
-	// Custom indexes can be added if needed via migrations
-
+	// Save again with all fields
 	return cm.app.Save(collection)
 }
