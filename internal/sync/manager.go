@@ -300,6 +300,13 @@ func (sm *Manager) createSystemUser(sysAccountID string) error {
 		return fmt.Errorf("failed to get system user private key: %w", err)
 	}
 
+	// Generate a secure password for the system user
+	// This is only for PocketBase auth collection requirements - the user authenticates to NATS via JWT
+	systemPassword, err := sm.generateSecurePassword()
+	if err != nil {
+		return fmt.Errorf("failed to generate system user password: %w", err)
+	}
+
 	// Create system user record
 	collection, err := sm.app.FindCollectionByNameOrId(sm.options.UserCollectionName)
 	if err != nil {
@@ -308,6 +315,7 @@ func (sm *Manager) createSystemUser(sysAccountID string) error {
 
 	record := core.NewRecord(collection)
 	record.Set("email", "sys@system.local")
+	record.Set("password", systemPassword)  // Required for auth collection
 	record.Set("nats_username", "sys")
 	record.Set("description", "Automatically created system user for NATS management")
 	record.Set("organization_id", sysAccountID)
@@ -329,7 +337,7 @@ func (sm *Manager) createSystemUser(sysAccountID string) error {
 	}
 
 	if sm.options.LogToConsole {
-		log.Printf("Created system user: sys")
+		log.Printf("Created system user: sys (password set for PocketBase auth collection)")
 	}
 
 	return nil
