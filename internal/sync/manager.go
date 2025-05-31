@@ -3,7 +3,6 @@ package sync
 
 import (
 	"fmt"
-	"log"
 	"sync"
 	"time"
 
@@ -13,6 +12,7 @@ import (
 	"github.com/skeeeon/pb-nats/internal/jwt"
 	"github.com/skeeeon/pb-nats/internal/nkey"
 	"github.com/skeeeon/pb-nats/internal/publisher"
+	"github.com/skeeeon/pb-nats/internal/utils"
 	pbtypes "github.com/skeeeon/pb-nats/internal/types"
 )
 
@@ -23,6 +23,7 @@ type Manager struct {
 	nkeyManager *nkey.Manager
 	publisher   *publisher.Manager
 	options     pbtypes.Options
+	logger      *utils.Logger
 	
 	// Debouncing
 	timer       *time.Timer
@@ -42,24 +43,21 @@ func NewManager(app *pocketbase.PocketBase, jwtGen *jwt.Generator, nkeyManager *
 		nkeyManager: nkeyManager,
 		publisher:   publisher,
 		options:     options,
+		logger:      utils.NewLogger(options.LogToConsole),
 	}
 }
 
 // SetupHooks sets up all the PocketBase hooks for synchronization
 // This is separated from system component initialization to ensure proper order
 func (sm *Manager) SetupHooks() error {
-	if sm.options.LogToConsole {
-		log.Printf("Setting up PocketBase hooks for NATS sync...")
-	}
+	sm.logger.Info("Setting up PocketBase hooks for NATS sync...")
 
 	// Setup hooks for each collection type
 	sm.setupOrganizationHooks()
 	sm.setupUserHooks()
 	sm.setupRoleHooks()
 
-	if sm.options.LogToConsole {
-		log.Printf("✅ PocketBase hooks configured for NATS sync")
-	}
+	sm.logger.Success("PocketBase hooks configured for NATS sync")
 
 	return nil
 }
@@ -73,7 +71,7 @@ func (sm *Manager) setupOrganizationHooks() {
 		}
 
 		if err := sm.generateOrganizationKeys(e.Record); err != nil {
-			return fmt.Errorf("failed to generate organization keys: %w", err)
+			return utils.WrapError(err, "failed to generate organization keys")
 		}
 		return e.Next()
 	})
@@ -114,7 +112,7 @@ func (sm *Manager) setupOrganizationHooks() {
 
 		// Prevent deletion of system account
 		if e.Record.GetString("account_name") == "SYS" {
-			return fmt.Errorf("cannot delete system account")
+			return utils.WrapError(fmt.Errorf("cannot delete system account"), "organization deletion validation failed")
 		}
 
 		if sm.shouldHandleEvent(sm.options.OrganizationCollectionName, pbtypes.EventTypeOrgDelete) {
@@ -133,7 +131,7 @@ func (sm *Manager) setupUserHooks() {
 		}
 
 		if err := sm.generateUserKeys(e.Record); err != nil {
-			return fmt.Errorf("failed to generate user keys: %w", err)
+			return utils.WrapError(err, "failed to generate user keys")
 		}
 		return e.Next()
 	})
@@ -160,7 +158,7 @@ func (sm *Manager) setupUserHooks() {
 
 		// Regenerate JWT on any update to ensure consistency
 		if err := sm.regenerateUserJWT(e.Record); err != nil {
-			return fmt.Errorf("failed to regenerate user JWT: %w", err)
+			return utils.WrapError(err, "failed to regenerate user JWT")
 		}
 		return e.Next()
 	})
@@ -206,16 +204,12 @@ func (sm *Manager) setupRoleHooks() {
 		if sm.shouldHandleEvent(sm.options.RoleCollectionName, pbtypes.EventTypeRoleUpdate) {
 			// Find all users with this role and regenerate their JWTs
 			if err := sm.regenerateUsersWithRole(e.Record.Id); err != nil {
-				if sm.options.LogToConsole {
-					log.Printf("⚠️  Failed to regenerate users with role %s: %v", e.Record.Id, err)
-				}
+				sm.logger.Warning("Failed to regenerate users with role %s: %v", e.Record.Id, err)
 			}
 			
 			// Trigger publish for all affected organizations
 			if err := sm.scheduleOrganizationsWithRole(e.Record.Id); err != nil {
-				if sm.options.LogToConsole {
-					log.Printf("⚠️  Failed to schedule organizations with role %s: %v", e.Record.Id, err)
-				}
+				sm.logger.Warning("Failed to schedule organizations with role %s: %v", e.Record.Id, err)
 			}
 		}
 		return e.Next()
@@ -242,17 +236,13 @@ func (sm *Manager) scheduleSync(orgID, action string) {
 
 	// Queue the operation immediately
 	if err := sm.publisher.QueueAccountUpdate(orgID, action); err != nil {
-		if sm.options.LogToConsole {
-			log.Printf("⚠️  Failed to queue account update for org %s: %v", orgID, err)
-		}
+		sm.logger.Warning("Failed to queue account update for org %s: %v", orgID, err)
 	}
 
 	// Schedule processing after debounce interval
 	sm.timer = time.AfterFunc(sm.options.DebounceInterval, func() {
 		if err := sm.publisher.ProcessPublishQueue(); err != nil {
-			if sm.options.LogToConsole {
-				log.Printf("⚠️  Error processing publish queue: %v", err)
-			}
+			sm.logger.Warning("Error processing publish queue: %v", err)
 		}
 	})
 }
@@ -267,18 +257,18 @@ func (sm *Manager) generateOrganizationKeys(record *core.Record) error {
 	// Generate account keys
 	seed, public, signingKey, signingPublic, err := sm.nkeyManager.GenerateAccountKeyPair()
 	if err != nil {
-		return fmt.Errorf("failed to generate account key pair: %w", err)
+		return utils.WrapError(err, "failed to generate account key pair")
 	}
 
 	// Get private keys
 	privateKey, err := sm.nkeyManager.GetPrivateKeyFromSeed(seed)
 	if err != nil {
-		return fmt.Errorf("failed to get private key from seed: %w", err)
+		return utils.WrapError(err, "failed to get private key from seed")
 	}
 
 	signingPrivateKey, err := sm.nkeyManager.GetPrivateKeyFromSeed(signingKey)
 	if err != nil {
-		return fmt.Errorf("failed to get signing private key from seed: %w", err)
+		return utils.WrapError(err, "failed to get signing private key from seed")
 	}
 
 	// Set the keys
@@ -304,7 +294,7 @@ func (sm *Manager) generateOrganizationJWT(record *core.Record) error {
 	// Get system operator
 	operator, err := sm.getSystemOperator()
 	if err != nil {
-		return fmt.Errorf("failed to get system operator: %w", err)
+		return utils.WrapError(err, "failed to get system operator")
 	}
 
 	// Create organization record
@@ -318,7 +308,7 @@ func (sm *Manager) generateOrganizationJWT(record *core.Record) error {
 	// Generate JWT
 	jwtValue, err := sm.jwtGen.GenerateAccountJWT(org, operator.SigningSeed)
 	if err != nil {
-		return fmt.Errorf("failed to generate account JWT: %w", err)
+		return utils.WrapError(err, "failed to generate account JWT")
 	}
 
 	record.Set("jwt", jwtValue)
@@ -335,13 +325,13 @@ func (sm *Manager) generateUserKeys(record *core.Record) error {
 	// Generate user keys
 	seed, public, err := sm.nkeyManager.GenerateUserKeyPair()
 	if err != nil {
-		return fmt.Errorf("failed to generate user key pair: %w", err)
+		return utils.WrapError(err, "failed to generate user key pair")
 	}
 
 	// Get private key
 	privateKey, err := sm.nkeyManager.GetPrivateKeyFromSeed(seed)
 	if err != nil {
-		return fmt.Errorf("failed to get private key from seed: %w", err)
+		return utils.WrapError(err, "failed to get private key from seed")
 	}
 
 	// Set the keys
@@ -358,12 +348,12 @@ func (sm *Manager) generateUserJWT(record *core.Record) error {
 	// Get organization and role
 	org, err := sm.app.FindRecordById(sm.options.OrganizationCollectionName, record.GetString("organization_id"))
 	if err != nil {
-		return fmt.Errorf("failed to find organization %s: %w", record.GetString("organization_id"), err)
+		return utils.WrapErrorf(err, "failed to find organization %s", record.GetString("organization_id"))
 	}
 
 	role, err := sm.app.FindRecordById(sm.options.RoleCollectionName, record.GetString("role_id"))
 	if err != nil {
-		return fmt.Errorf("failed to find role %s: %w", record.GetString("role_id"), err)
+		return utils.WrapErrorf(err, "failed to find role %s", record.GetString("role_id"))
 	}
 
 	// Convert to models
@@ -374,7 +364,7 @@ func (sm *Manager) generateUserJWT(record *core.Record) error {
 	// Generate JWT
 	jwtValue, err := sm.jwtGen.GenerateUserJWT(user, orgModel, roleModel)
 	if err != nil {
-		return fmt.Errorf("failed to generate user JWT: %w", err)
+		return utils.WrapError(err, "failed to generate user JWT")
 	}
 
 	record.Set("jwt", jwtValue)
@@ -383,7 +373,7 @@ func (sm *Manager) generateUserJWT(record *core.Record) error {
 	// Generate creds file
 	credsFile, err := sm.jwtGen.GenerateCredsFile(user)
 	if err != nil {
-		return fmt.Errorf("failed to generate creds file: %w", err)
+		return utils.WrapError(err, "failed to generate creds file")
 	}
 
 	record.Set("creds_file", credsFile)
@@ -442,41 +432,49 @@ func (sm *Manager) recordToRoleModel(record *core.Record) *pbtypes.RoleRecord {
 func (sm *Manager) getSystemOperator() (*pbtypes.SystemOperatorRecord, error) {
 	records, err := sm.app.FindAllRecords(pbtypes.SystemOperatorCollectionName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to find system operator records: %w", err)
+		return nil, utils.WrapError(err, "failed to find system operator records")
 	}
 	
 	if len(records) == 0 {
-		return nil, fmt.Errorf("system operator not found - ensure Setup() completed successfully")
+		return nil, utils.WrapError(fmt.Errorf("system operator not found - ensure Setup() completed successfully"), 
+			"system operator lookup failed")
 	}
 
 	record := records[0]
-	return &pbtypes.SystemOperatorRecord{
+	operator := &pbtypes.SystemOperatorRecord{
 		ID:                record.Id,
 		Name:              record.GetString("name"),
 		PublicKey:         record.GetString("public_key"),
 		SigningSeed:       record.GetString("signing_seed"),
-	}, nil
+	}
+
+	// Enhanced validation
+	if err := utils.ValidateRequired(operator.PublicKey, "operator public key"); err != nil {
+		return nil, utils.WrapError(err, "invalid system operator")
+	}
+	
+	if err := utils.ValidateRequired(operator.SigningSeed, "operator signing seed"); err != nil {
+		return nil, utils.WrapError(err, "invalid system operator")
+	}
+
+	return operator, nil
 }
 
 // regenerateUsersWithRole regenerates JWTs for all users with a specific role
 func (sm *Manager) regenerateUsersWithRole(roleID string) error {
 	users, err := sm.app.FindAllRecords(sm.options.UserCollectionName, dbx.HashExp{"role_id": roleID})
 	if err != nil {
-		return fmt.Errorf("failed to find users with role %s: %w", roleID, err)
+		return utils.WrapErrorf(err, "failed to find users with role %s", roleID)
 	}
 
 	for _, user := range users {
 		if err := sm.regenerateUserJWT(user); err != nil {
-			if sm.options.LogToConsole {
-				log.Printf("⚠️  Failed to regenerate JWT for user %s: %v", user.Id, err)
-			}
+			sm.logger.Warning("Failed to regenerate JWT for user %s: %v", user.Id, err)
 			continue
 		}
 		
 		if err := sm.app.Save(user); err != nil {
-			if sm.options.LogToConsole {
-				log.Printf("⚠️  Failed to save user %s: %v", user.Id, err)
-			}
+			sm.logger.Warning("Failed to save user %s: %v", user.Id, err)
 		}
 	}
 
@@ -487,7 +485,7 @@ func (sm *Manager) regenerateUsersWithRole(roleID string) error {
 func (sm *Manager) scheduleOrganizationsWithRole(roleID string) error {
 	users, err := sm.app.FindAllRecords(sm.options.UserCollectionName, dbx.HashExp{"role_id": roleID})
 	if err != nil {
-		return fmt.Errorf("failed to find users with role %s: %w", roleID, err)
+		return utils.WrapErrorf(err, "failed to find users with role %s", roleID)
 	}
 
 	// Collect unique organization IDs

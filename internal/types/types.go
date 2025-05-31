@@ -120,7 +120,7 @@ type Options struct {
 
 // Collection names
 const (
-	DefaultOrganizationCollectionName = "organizations"
+	DefaultOrganizationCollectionName = "nats_accounts"
 	DefaultUserCollectionName         = "nats_users"
 	DefaultRoleCollectionName         = "nats_roles"
 	SystemOperatorCollectionName      = "nats_system_operator"
@@ -156,6 +156,16 @@ const (
 	DefaultOrgPublish      = "{org}.>"
 	DefaultUserPublish     = "{org}.user.{user}.>"
 	DefaultInboxSubscribe  = "_INBOX.>"
+)
+
+// Timeout and retry constants to eliminate magic numbers
+const (
+	DefaultNATSTimeout        = 10 * time.Second
+	DefaultNATSConnectTimeout = 5 * time.Second
+	MaxQueueRetries           = 5
+	DefaultJWTCacheSize       = 1000
+	MaxQueueAttempts          = 10
+	DefaultProcessingTimeout  = 30 * time.Second
 )
 
 // Default subscribe permissions

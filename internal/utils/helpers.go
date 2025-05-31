@@ -378,6 +378,53 @@ func ValidateURL(url, fieldName string) error {
 	return nil
 }
 
+// ValidateNATSSubjectPermissions validates an array of NATS subject permissions
+func ValidateNATSSubjectPermissions(permissions []string, fieldName string) error {
+	if len(permissions) == 0 {
+		return nil // Empty is allowed
+	}
+	
+	for i, perm := range permissions {
+		if err := ValidateRequired(perm, fmt.Sprintf("%s[%d]", fieldName, i)); err != nil {
+			return err
+		}
+		
+		if !IsValidNATSSubject(perm) {
+			return fmt.Errorf("invalid NATS subject pattern in %s[%d]: %q", fieldName, i, perm)
+		}
+	}
+	
+	return nil
+}
+
+// ValidateStringLength validates that a string is within length limits
+func ValidateStringLength(value, fieldName string, minLen, maxLen int) error {
+	length := len(value)
+	
+	if minLen > 0 && length < minLen {
+		return fmt.Errorf("%s must be at least %d characters long, got %d", fieldName, minLen, length)
+	}
+	
+	if maxLen > 0 && length > maxLen {
+		return fmt.Errorf("%s must be at most %d characters long, got %d", fieldName, maxLen, length)
+	}
+	
+	return nil
+}
+
+// ValidateIntRange validates that an integer is within the specified range
+func ValidateIntRange(value int64, fieldName string, min, max int64) error {
+	if min != 0 && value < min {
+		return fmt.Errorf("%s must be at least %d, got %d", fieldName, min, value)
+	}
+	
+	if max != 0 && value > max {
+		return fmt.Errorf("%s must be at most %d, got %d", fieldName, max, value)
+	}
+	
+	return nil
+}
+
 // Error utility functions  
 // =======================
 

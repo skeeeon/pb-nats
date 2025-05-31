@@ -4,7 +4,6 @@ package publisher
 import (
 	"context"
 	"fmt"
-	"log"
 	"sync"
 	"time"
 
@@ -22,6 +21,7 @@ import (
 type Manager struct {
 	app       *pocketbase.PocketBase
 	options   pbtypes.Options
+	logger    *utils.Logger
 	mu        sync.Mutex
 	ctx       context.Context
 	cancelCtx context.CancelFunc
@@ -34,6 +34,7 @@ func NewManager(app *pocketbase.PocketBase, options pbtypes.Options) *Manager {
 	return &Manager{
 		app:       app,
 		options:   options,
+		logger:    utils.NewLogger(options.LogToConsole),
 		ctx:       ctx,
 		cancelCtx: cancel,
 	}
@@ -41,37 +42,29 @@ func NewManager(app *pocketbase.PocketBase, options pbtypes.Options) *Manager {
 
 // Start begins the publish queue processor
 func (p *Manager) Start() error {
-	if p.options.LogToConsole {
-		log.Printf("🚀 Starting NATS account publisher...")
-	}
+	p.logger.Start("Starting NATS account publisher...")
 
 	// Start the queue processor as a background goroutine
 	go p.processQueuePeriodically()
 	
-	if p.options.LogToConsole {
-		log.Printf("✅ NATS account publisher started with %v intervals", p.options.PublishQueueInterval)
-	}
+	p.logger.Success("NATS account publisher started with %v intervals", p.options.PublishQueueInterval)
 	
 	return nil
 }
 
 // Stop stops the publish queue processor
 func (p *Manager) Stop() {
-	if p.options.LogToConsole {
-		log.Printf("🛑 Stopping NATS account publisher...")
-	}
+	p.logger.Stop("Stopping NATS account publisher...")
 	
 	p.cancelCtx()
 	
-	if p.options.LogToConsole {
-		log.Printf("✅ NATS account publisher stopped")
-	}
+	p.logger.Success("NATS account publisher stopped")
 }
 
 // PublishAccount publishes an organization's account JWT to NATS
 func (p *Manager) PublishAccount(org *pbtypes.OrganizationRecord) error {
 	if org == nil {
-		return fmt.Errorf("organization record is nil")
+		return utils.WrapError(fmt.Errorf("organization record is nil"), "publish account validation failed")
 	}
 
 	if err := p.validateOrganization(org); err != nil {
@@ -84,7 +77,7 @@ func (p *Manager) PublishAccount(org *pbtypes.OrganizationRecord) error {
 // RemoveAccount removes an organization's account from NATS
 func (p *Manager) RemoveAccount(org *pbtypes.OrganizationRecord) error {
 	if org == nil {
-		return fmt.Errorf("organization record is nil")
+		return utils.WrapError(fmt.Errorf("organization record is nil"), "remove account validation failed")
 	}
 
 	if err := p.validateOrganization(org); err != nil {
@@ -97,12 +90,13 @@ func (p *Manager) RemoveAccount(org *pbtypes.OrganizationRecord) error {
 // QueueAccountUpdate adds an account update to the publish queue with deduplication
 func (p *Manager) QueueAccountUpdate(orgID string, action string) error {
 	if err := utils.ValidateRequired(orgID, "organization ID"); err != nil {
-		return err
+		return utils.WrapError(err, "queue account update validation failed")
 	}
 
 	if action != pbtypes.PublishActionUpsert && action != pbtypes.PublishActionDelete {
-		return fmt.Errorf("invalid action %q, must be %s or %s", 
-			action, pbtypes.PublishActionUpsert, pbtypes.PublishActionDelete)
+		return utils.WrapErrorf(fmt.Errorf("invalid action %q, must be %s or %s", 
+			action, pbtypes.PublishActionUpsert, pbtypes.PublishActionDelete), 
+			"queue account update validation failed")
 	}
 
 	p.mu.Lock()
@@ -126,18 +120,14 @@ func (p *Manager) QueueAccountUpdate(orgID string, action string) error {
 			return utils.WrapErrorf(err, "failed to update queue record for org %s", orgID)
 		}
 		
-		if p.options.LogToConsole {
-			log.Printf("📝 Updated queue record for org %s: action=%s", orgID, action)
-		}
+		p.logger.Info("Updated queue record for org %s: action=%s", orgID, action)
 	} else {
 		// Create new record
 		if err := p.createQueueRecord(orgID, action); err != nil {
 			return utils.WrapErrorf(err, "failed to create queue record for org %s", orgID)
 		}
 		
-		if p.options.LogToConsole {
-			log.Printf("📝 Created queue record for org %s: action=%s", orgID, action)
-		}
+		p.logger.Info("Created queue record for org %s: action=%s", orgID, action)
 	}
 
 	return nil
@@ -157,9 +147,7 @@ func (p *Manager) ProcessPublishQueue() error {
 		return nil // No work to do
 	}
 
-	if p.options.LogToConsole {
-		log.Printf("⚙️  Processing %d queued publish operations...", len(records))
-	}
+	p.logger.Process("Processing %d queued publish operations...", len(records))
 
 	processed := 0
 	failed := 0
@@ -167,17 +155,13 @@ func (p *Manager) ProcessPublishQueue() error {
 	for _, record := range records {
 		if err := p.processQueueRecord(record); err != nil {
 			failed++
-			if p.options.LogToConsole {
-				log.Printf("⚠️  Failed to process queue record %s: %v", record.Id, err)
-			}
+			p.logger.Warning("Failed to process queue record %s: %v", record.Id, err)
 		} else {
 			processed++
 		}
 	}
 
-	if p.options.LogToConsole {
-		log.Printf("✅ Queue processing complete: %d processed, %d failed", processed, failed)
-	}
+	p.logger.Success("Queue processing complete: %d processed, %d failed", processed, failed)
 
 	return nil
 }
@@ -190,13 +174,11 @@ func (p *Manager) processQueuePeriodically() {
 	for {
 		select {
 		case <-ticker.C:
-			if err := p.ProcessPublishQueue(); err != nil && p.options.LogToConsole {
-				log.Printf("⚠️  Queue processing error: %v", err)
+			if err := p.ProcessPublishQueue(); err != nil {
+				p.logger.Warning("Queue processing error: %v", err)
 			}
 		case <-p.ctx.Done():
-			if p.options.LogToConsole {
-				log.Printf("🛑 Queue processor shutting down...")
-			}
+			p.logger.Info("Queue processor shutting down...")
 			return
 		}
 	}
@@ -208,11 +190,8 @@ func (p *Manager) processQueueRecord(record *core.Record) error {
 	action := record.GetString("action")
 	attempts := record.GetInt("attempts")
 
-	const maxAttempts = 5
-	if attempts >= maxAttempts {
-		if p.options.LogToConsole {
-			log.Printf("⚠️  Skipping queue record %s after %d attempts", record.Id, attempts)
-		}
+	if attempts >= pbtypes.MaxQueueAttempts {
+		p.logger.Warning("Skipping queue record %s after %d attempts", record.Id, attempts)
 		return nil // Don't retry further
 	}
 
@@ -220,9 +199,7 @@ func (p *Manager) processQueueRecord(record *core.Record) error {
 	org, err := p.app.FindRecordById(p.options.OrganizationCollectionName, orgID)
 	if err != nil {
 		// Organization might have been deleted - remove queue record
-		if p.options.LogToConsole {
-			log.Printf("🗑️  Organization %s not found, removing queue record", orgID)
-		}
+		p.logger.Delete("Organization %s not found, removing queue record", orgID)
 		return p.app.Delete(record)
 	}
 
@@ -253,9 +230,7 @@ func (p *Manager) processQueueRecord(record *core.Record) error {
 	}
 
 	// Success - remove from queue
-	if p.options.LogToConsole {
-		log.Printf("✅ Successfully processed %s for organization %s", action, orgRecord.Name)
-	}
+	p.logger.Success("Successfully processed %s for organization %s", action, orgRecord.Name)
 	
 	return p.app.Delete(record)
 }
@@ -263,11 +238,11 @@ func (p *Manager) processQueueRecord(record *core.Record) error {
 // publishAccountJWT publishes an account JWT to NATS
 func (p *Manager) publishAccountJWT(accountJWT, accountName string) error {
 	if err := utils.ValidateRequired(accountJWT, "account JWT"); err != nil {
-		return err
+		return utils.WrapError(err, "publish account JWT validation failed")
 	}
 	
 	if err := utils.ValidateRequired(accountName, "account name"); err != nil {
-		return err
+		return utils.WrapError(err, "publish account JWT validation failed")
 	}
 
 	// Get system user for connection
@@ -276,24 +251,22 @@ func (p *Manager) publishAccountJWT(accountJWT, accountName string) error {
 		return utils.WrapError(err, "failed to get system user for NATS connection")
 	}
 
-	// Connect to NATS using system user JWT and seed
+	// Connect to NATS using system user JWT and seed with proper timeouts
 	nc, err := nats.Connect(p.options.NATSServerURL,
 		nats.UserJWTAndSeed(sysUser.JWT, sysUser.Seed),
-		nats.Timeout(10*time.Second))
+		nats.Timeout(pbtypes.DefaultNATSConnectTimeout))
 	if err != nil {
 		return utils.WrapErrorf(err, "failed to connect to NATS server %s", p.options.NATSServerURL)
 	}
 	defer nc.Close()
 
-	// Publish account JWT using NATS system request
-	resp, err := nc.Request("$SYS.REQ.CLAIMS.UPDATE", []byte(accountJWT), 10*time.Second)
+	// Publish account JWT using NATS system request with proper timeout
+	resp, err := nc.Request("$SYS.REQ.CLAIMS.UPDATE", []byte(accountJWT), pbtypes.DefaultNATSTimeout)
 	if err != nil {
 		return utils.WrapErrorf(err, "failed to publish account JWT for %s", accountName)
 	}
 
-	if p.options.LogToConsole {
-		log.Printf("📤 Published account %s to NATS: %s", accountName, utils.TruncateString(string(resp.Data), 100))
-	}
+	p.logger.Publish("Published account %s to NATS: %s", accountName, utils.TruncateString(string(resp.Data), 100))
 
 	return nil
 }
@@ -301,11 +274,11 @@ func (p *Manager) publishAccountJWT(accountJWT, accountName string) error {
 // removeAccountJWT removes an account JWT from NATS
 func (p *Manager) removeAccountJWT(accountPublicKey, accountName string) error {
 	if err := utils.ValidateRequired(accountPublicKey, "account public key"); err != nil {
-		return err
+		return utils.WrapError(err, "remove account JWT validation failed")
 	}
 	
 	if err := utils.ValidateRequired(accountName, "account name"); err != nil {
-		return err
+		return utils.WrapError(err, "remove account JWT validation failed")
 	}
 
 	// Get system operator for signing deletion request
@@ -320,10 +293,10 @@ func (p *Manager) removeAccountJWT(accountPublicKey, accountName string) error {
 		return utils.WrapError(err, "failed to get system user for NATS connection")
 	}
 
-	// Connect to NATS using system user JWT and seed
+	// Connect to NATS using system user JWT and seed with proper timeouts
 	nc, err := nats.Connect(p.options.NATSServerURL,
 		nats.UserJWTAndSeed(sysUser.JWT, sysUser.Seed),
-		nats.Timeout(10*time.Second))
+		nats.Timeout(pbtypes.DefaultNATSConnectTimeout))
 	if err != nil {
 		return utils.WrapErrorf(err, "failed to connect to NATS server %s", p.options.NATSServerURL)
 	}
@@ -344,15 +317,13 @@ func (p *Manager) removeAccountJWT(accountPublicKey, accountName string) error {
 		return utils.WrapError(err, "failed to encode deletion JWT")
 	}
 
-	// Send deletion request
-	resp, err := nc.Request("$SYS.REQ.CLAIMS.DELETE", []byte(deleteJWT), 10*time.Second)
+	// Send deletion request with proper timeout
+	resp, err := nc.Request("$SYS.REQ.CLAIMS.DELETE", []byte(deleteJWT), pbtypes.DefaultNATSTimeout)
 	if err != nil {
 		return utils.WrapErrorf(err, "failed to delete account JWT for %s", accountName)
 	}
 
-	if p.options.LogToConsole {
-		log.Printf("🗑️  Removed account %s from NATS: %s", accountName, utils.TruncateString(string(resp.Data), 100))
-	}
+	p.logger.Delete("Removed account %s from NATS: %s", accountName, utils.TruncateString(string(resp.Data), 100))
 
 	return nil
 }
@@ -379,7 +350,7 @@ func (p *Manager) createQueueRecord(orgID, action string) error {
 	return nil
 }
 
-// validateOrganization validates an organization record
+// validateOrganization validates an organization record with enhanced validation
 func (p *Manager) validateOrganization(org *pbtypes.OrganizationRecord) error {
 	if err := utils.ValidateRequired(org.ID, "organization ID"); err != nil {
 		return err
@@ -393,8 +364,18 @@ func (p *Manager) validateOrganization(org *pbtypes.OrganizationRecord) error {
 		return err
 	}
 
+	if err := utils.ValidateRequired(org.JWT, "organization JWT"); err != nil {
+		return err
+	}
+
 	if !org.Active {
 		return fmt.Errorf("organization %s is inactive", org.Name)
+	}
+
+	// Validate account name format
+	accountName := org.NormalizeAccountName()
+	if accountName == "" {
+		return fmt.Errorf("organization %s has invalid account name", org.Name)
 	}
 
 	return nil
@@ -418,7 +399,7 @@ func (p *Manager) recordToOrgModel(record *core.Record) *pbtypes.OrganizationRec
 	}
 }
 
-// getSystemOperator gets the system operator record with error handling
+// getSystemOperator gets the system operator record with consistent error handling
 func (p *Manager) getSystemOperator() (*pbtypes.SystemOperatorRecord, error) {
 	records, err := p.app.FindAllRecords(pbtypes.SystemOperatorCollectionName)
 	if err != nil {
@@ -426,7 +407,8 @@ func (p *Manager) getSystemOperator() (*pbtypes.SystemOperatorRecord, error) {
 	}
 	
 	if len(records) == 0 {
-		return nil, fmt.Errorf("system operator not found - ensure system is properly initialized")
+		return nil, utils.WrapError(fmt.Errorf("system operator not found - ensure system is properly initialized"), 
+			"system operator lookup failed")
 	}
 
 	record := records[0]
@@ -442,7 +424,7 @@ func (p *Manager) getSystemOperator() (*pbtypes.SystemOperatorRecord, error) {
 		JWT:               record.GetString("jwt"),
 	}
 
-	// Validate critical fields
+	// Enhanced validation for critical fields
 	if err := utils.ValidateRequired(operator.PublicKey, "operator public key"); err != nil {
 		return nil, utils.WrapError(err, "invalid system operator")
 	}
@@ -451,10 +433,14 @@ func (p *Manager) getSystemOperator() (*pbtypes.SystemOperatorRecord, error) {
 		return nil, utils.WrapError(err, "invalid system operator")
 	}
 
+	if err := utils.ValidateRequired(operator.SigningSeed, "operator signing seed"); err != nil {
+		return nil, utils.WrapError(err, "invalid system operator")
+	}
+
 	return operator, nil
 }
 
-// getSystemUser gets the system user record for NATS connections
+// getSystemUser gets the system user record for NATS connections with enhanced validation
 func (p *Manager) getSystemUser() (*pbtypes.NatsUserRecord, error) {
 	// First find the system account
 	sysAccountRecords, err := p.app.FindAllRecords(p.options.OrganizationCollectionName,
@@ -464,7 +450,8 @@ func (p *Manager) getSystemUser() (*pbtypes.NatsUserRecord, error) {
 	}
 	
 	if len(sysAccountRecords) == 0 {
-		return nil, fmt.Errorf("system account (SYS) not found - ensure system is properly initialized")
+		return nil, utils.WrapError(fmt.Errorf("system account (SYS) not found - ensure system is properly initialized"),
+			"system account lookup failed")
 	}
 	
 	sysAccountID := sysAccountRecords[0].Id
@@ -477,7 +464,8 @@ func (p *Manager) getSystemUser() (*pbtypes.NatsUserRecord, error) {
 	}
 	
 	if len(sysUserRecords) == 0 {
-		return nil, fmt.Errorf("system user (sys) not found - ensure system is properly initialized")
+		return nil, utils.WrapError(fmt.Errorf("system user (sys) not found - ensure system is properly initialized"),
+			"system user lookup failed")
 	}
 
 	record := sysUserRecords[0]
@@ -495,7 +483,7 @@ func (p *Manager) getSystemUser() (*pbtypes.NatsUserRecord, error) {
 		Active:         record.GetBool("active"),
 	}
 
-	// Validate critical fields
+	// Enhanced validation for critical fields
 	if err := utils.ValidateRequired(user.JWT, "system user JWT"); err != nil {
 		return nil, utils.WrapError(err, "invalid system user")
 	}
@@ -505,7 +493,7 @@ func (p *Manager) getSystemUser() (*pbtypes.NatsUserRecord, error) {
 	}
 
 	if !user.Active {
-		return nil, fmt.Errorf("system user is inactive")
+		return nil, utils.WrapError(fmt.Errorf("system user is inactive"), "system user validation failed")
 	}
 
 	return user, nil

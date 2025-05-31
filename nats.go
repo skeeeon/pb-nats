@@ -4,7 +4,6 @@ package pbnats
 
 import (
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/pocketbase/dbx"
@@ -15,6 +14,7 @@ import (
 	"github.com/skeeeon/pb-nats/internal/nkey"
 	"github.com/skeeeon/pb-nats/internal/publisher"
 	"github.com/skeeeon/pb-nats/internal/sync"
+	"github.com/skeeeon/pb-nats/internal/utils"
 	pbtypes "github.com/skeeeon/pb-nats/internal/types"
 )
 
@@ -80,9 +80,12 @@ func Setup(app *pocketbase.PocketBase, options Options) error {
 	// Apply default options for any missing values
 	options = applyDefaultOptions(options)
 
+	// Create logger for consistent logging
+	logger := utils.NewLogger(options.LogToConsole)
+
 	// Validate required options
 	if err := validateOptions(options); err != nil {
-		return fmt.Errorf("invalid options: %w", err)
+		return utils.WrapError(err, "invalid options")
 	}
 
 	// Initialize all components after the app is bootstrapped
@@ -90,126 +93,91 @@ func Setup(app *pocketbase.PocketBase, options Options) error {
 	app.OnBootstrap().BindFunc(func(e *core.BootstrapEvent) error {
 		// Wait for bootstrap to complete first
 		if err := e.Next(); err != nil {
-			return fmt.Errorf("bootstrap failed: %w", err)
+			return utils.WrapError(err, "bootstrap failed")
 		}
 
 		// Initialize components in correct order to prevent race conditions
-		if err := initializeComponents(app, options); err != nil {
-			if options.LogToConsole {
-				log.Printf("❌ NATS sync initialization failed: %v", err)
-			}
-			return fmt.Errorf("failed to initialize NATS sync: %w", err)
+		if err := initializeComponents(app, options, logger); err != nil {
+			logger.Error("NATS sync initialization failed: %v", err)
+			return utils.WrapError(err, "failed to initialize NATS sync")
 		}
 
-		if options.LogToConsole {
-			log.Printf("✅ PocketBase NATS JWT sync initialized successfully")
-		}
+		logger.Success("PocketBase NATS JWT sync initialized successfully")
 
 		return nil
 	})
 
-	if options.LogToConsole {
-		log.Printf("🚀 PocketBase NATS JWT sync scheduled for initialization")
-		log.Printf("   User collection: %s", options.UserCollectionName)
-		log.Printf("   Role collection: %s", options.RoleCollectionName)
-		log.Printf("   Organization collection: %s", options.OrganizationCollectionName)
-		log.Printf("   NATS server: %s", options.NATSServerURL)
-		log.Printf("   Operator: %s", options.OperatorName)
-	}
+	logger.Start("PocketBase NATS JWT sync scheduled for initialization")
+	logger.Info("   User collection: %s", options.UserCollectionName)
+	logger.Info("   Role collection: %s", options.RoleCollectionName)
+	logger.Info("   Organization collection: %s", options.OrganizationCollectionName)
+	logger.Info("   NATS server: %s", options.NATSServerURL)
+	logger.Info("   Operator: %s", options.OperatorName)
 
 	return nil
 }
 
 // initializeComponents initializes all NATS sync components in the correct order
 // to prevent race conditions and ensure proper dependency resolution
-func initializeComponents(app *pocketbase.PocketBase, options Options) error {
-	if options.LogToConsole {
-		log.Printf("🔧 Initializing NATS sync components...")
-	}
+func initializeComponents(app *pocketbase.PocketBase, options Options, logger *utils.Logger) error {
+	logger.Process("Initializing NATS sync components...")
 
 	// Step 1: Initialize collections first - must happen before anything else
-	if options.LogToConsole {
-		log.Printf("   Creating collections...")
-	}
+	logger.Info("   Creating collections...")
 	collectionManager := collections.NewManager(app, options)
 	if err := collectionManager.InitializeCollections(); err != nil {
-		return fmt.Errorf("failed to initialize collections: %w", err)
+		return utils.WrapError(err, "failed to initialize collections")
 	}
-	if options.LogToConsole {
-		log.Printf("   ✅ Collections initialized")
-	}
+	logger.Success("   Collections initialized")
 
 	// Step 2: Initialize NKey manager - no dependencies
 	nkeyManager := nkey.NewManager()
-	if options.LogToConsole {
-		log.Printf("   ✅ NKey manager initialized")
-	}
+	logger.Success("   NKey manager initialized")
 
 	// Step 3: Initialize JWT generator - depends on NKey manager
 	jwtGenerator := jwt.NewGenerator(app, nkeyManager, options)
-	if options.LogToConsole {
-		log.Printf("   ✅ JWT generator initialized")
-	}
+	logger.Success("   JWT generator initialized")
 
 	// Step 4: Initialize system components - depends on collections and JWT generator
 	// This must happen before publisher starts to avoid processing incomplete data
-	if options.LogToConsole {
-		log.Printf("   Creating system components...")
+	logger.Info("   Creating system components...")
+	if err := initializeSystemComponents(app, jwtGenerator, nkeyManager, options, logger); err != nil {
+		return utils.WrapError(err, "failed to initialize system components")
 	}
-	if err := initializeSystemComponents(app, jwtGenerator, nkeyManager, options); err != nil {
-		return fmt.Errorf("failed to initialize system components: %w", err)
-	}
-	if options.LogToConsole {
-		log.Printf("   ✅ System components initialized")
-	}
+	logger.Success("   System components initialized")
 
 	// Step 5: Initialize publisher - depends on system components being ready
-	if options.LogToConsole {
-		log.Printf("   Starting account publisher...")
-	}
+	logger.Info("   Starting account publisher...")
 	accountPublisher := publisher.NewManager(app, options)
 	if err := accountPublisher.Start(); err != nil {
-		return fmt.Errorf("failed to start account publisher: %w", err)
+		return utils.WrapError(err, "failed to start account publisher")
 	}
-	if options.LogToConsole {
-		log.Printf("   ✅ Account publisher started")
-	}
+	logger.Success("   Account publisher started")
 
 	// Step 6: Initialize sync manager - sets up hooks, depends on all other components
-	if options.LogToConsole {
-		log.Printf("   Setting up sync hooks...")
-	}
+	logger.Info("   Setting up sync hooks...")
 	syncManager := sync.NewManager(app, jwtGenerator, nkeyManager, accountPublisher, options)
 	if err := syncManager.SetupHooks(); err != nil {
-		return fmt.Errorf("failed to setup sync hooks: %w", err)
+		return utils.WrapError(err, "failed to setup sync hooks")
 	}
-	if options.LogToConsole {
-		log.Printf("   ✅ Sync hooks configured")
-	}
+	logger.Success("   Sync hooks configured")
 
-	// Step 7: Setup cleanup handlers
-	app.OnServe().BindFunc(func(e *core.ServeEvent) error {
-		// Setup graceful shutdown when needed
-		return e.Next()
-	})
-
-	if options.LogToConsole {
-		log.Printf("🎉 NATS JWT sync fully initialized and ready")
-		log.Printf("   System operator: %s", options.OperatorName)
-		log.Printf("   Queue processing: %v intervals", options.PublishQueueInterval)
-		log.Printf("   Debounce delay: %v", options.DebounceInterval)
-	}
+	logger.Success("NATS JWT sync fully initialized and ready")
+	logger.Info("   System operator: %s", options.OperatorName)
+	logger.Info("   Queue processing: %v intervals", options.PublishQueueInterval)
+	logger.Info("   Debounce delay: %v", options.DebounceInterval)
+	logger.Info("   Resource cleanup: automatic via context cancellation")
 
 	return nil
 }
 
 // initializeSystemComponents creates system operator, account, role, and user
 // This is the proven working implementation adapted from the original sync/manager.go
-func initializeSystemComponents(app *pocketbase.PocketBase, jwtGen *jwt.Generator, nkeyManager *nkey.Manager, options Options) error {
+func initializeSystemComponents(app *pocketbase.PocketBase, jwtGen *jwt.Generator, nkeyManager *nkey.Manager, options Options, logger *utils.Logger) error {
 	// Check if system operator exists
 	operatorRecords, err := app.FindAllRecords(pbtypes.SystemOperatorCollectionName)
 	if err != nil {
-		return fmt.Errorf("failed to find system operator records: %w", err)
+		return utils.WrapError(err, "failed to find system operator records")
 	}
 
 	var operator *pbtypes.SystemOperatorRecord
@@ -224,25 +192,23 @@ func initializeSystemComponents(app *pocketbase.PocketBase, jwtGen *jwt.Generato
 		// 4. Create system role and user
 
 		// Step 1: Create system operator without JWT
-		operator, err = createSystemOperatorWithoutJWT(app, nkeyManager, options)
+		operator, err = createSystemOperatorWithoutJWT(app, nkeyManager, options, logger)
 		if err != nil {
-			return fmt.Errorf("failed to create system operator: %w", err)
+			return utils.WrapError(err, "failed to create system operator")
 		}
 
 		// Step 2: Create system account
-		sysAccountID, sysAccountPubKey, err = createSystemAccount(app, jwtGen, nkeyManager, operator, options)
+		sysAccountID, sysAccountPubKey, err = createSystemAccount(app, jwtGen, nkeyManager, operator, options, logger)
 		if err != nil {
-			return fmt.Errorf("failed to create system account: %w", err)
+			return utils.WrapError(err, "failed to create system account")
 		}
 
 		// Step 3: Update operator JWT with system account reference
-		if err := updateOperatorJWT(app, jwtGen, operator.ID, sysAccountPubKey); err != nil {
-			return fmt.Errorf("failed to update operator JWT: %w", err)
+		if err := updateOperatorJWT(app, jwtGen, operator.ID, sysAccountPubKey, logger); err != nil {
+			return utils.WrapError(err, "failed to update operator JWT")
 		}
 
-		if options.LogToConsole {
-			log.Printf("✅ Created and configured system operator with system account reference")
-		}
+		logger.Success("Created and configured system operator with system account reference")
 	} else {
 		// Use existing operator
 		record := operatorRecords[0]
@@ -262,19 +228,19 @@ func initializeSystemComponents(app *pocketbase.PocketBase, jwtGen *jwt.Generato
 		sysAccountRecords, err := app.FindAllRecords(options.OrganizationCollectionName,
 			dbx.HashExp{"account_name": "SYS"})
 		if err != nil {
-			return fmt.Errorf("failed to find system account records: %w", err)
+			return utils.WrapError(err, "failed to find system account records")
 		}
 
 		if len(sysAccountRecords) == 0 {
 			// Create system account with existing operator
-			sysAccountID, sysAccountPubKey, err = createSystemAccount(app, jwtGen, nkeyManager, operator, options)
+			sysAccountID, sysAccountPubKey, err = createSystemAccount(app, jwtGen, nkeyManager, operator, options, logger)
 			if err != nil {
-				return fmt.Errorf("failed to create system account: %w", err)
+				return utils.WrapError(err, "failed to create system account")
 			}
 
 			// Update operator JWT with system account reference
-			if err := updateOperatorJWT(app, jwtGen, operator.ID, sysAccountPubKey); err != nil {
-				return fmt.Errorf("failed to update operator JWT: %w", err)
+			if err := updateOperatorJWT(app, jwtGen, operator.ID, sysAccountPubKey, logger); err != nil {
+				return utils.WrapError(err, "failed to update operator JWT")
 			}
 		} else {
 			sysAccountID = sysAccountRecords[0].Id
@@ -286,15 +252,15 @@ func initializeSystemComponents(app *pocketbase.PocketBase, jwtGen *jwt.Generato
 	sysRoleRecords, err := app.FindAllRecords(options.RoleCollectionName,
 		dbx.HashExp{"name": "system_admin"})
 	if err != nil {
-		return fmt.Errorf("failed to find system role records: %w", err)
+		return utils.WrapError(err, "failed to find system role records")
 	}
 
 	var sysRoleID string
 	if len(sysRoleRecords) == 0 {
 		// Create system role
-		sysRoleID, err = createSystemRole(app, options)
+		sysRoleID, err = createSystemRole(app, options, logger)
 		if err != nil {
-			return fmt.Errorf("failed to create system role: %w", err)
+			return utils.WrapError(err, "failed to create system role")
 		}
 	} else {
 		sysRoleID = sysRoleRecords[0].Id
@@ -304,13 +270,13 @@ func initializeSystemComponents(app *pocketbase.PocketBase, jwtGen *jwt.Generato
 	sysUserRecords, err := app.FindAllRecords(options.UserCollectionName,
 		dbx.HashExp{"nats_username": "sys", "organization_id": sysAccountID})
 	if err != nil {
-		return fmt.Errorf("failed to find system user records: %w", err)
+		return utils.WrapError(err, "failed to find system user records")
 	}
 
 	if len(sysUserRecords) == 0 {
 		// Create system user
-		if err := createSystemUser(app, jwtGen, nkeyManager, sysAccountID, sysRoleID, options); err != nil {
-			return fmt.Errorf("failed to create system user: %w", err)
+		if err := createSystemUser(app, jwtGen, nkeyManager, sysAccountID, sysRoleID, options, logger); err != nil {
+			return utils.WrapError(err, "failed to create system user")
 		}
 	}
 
@@ -319,23 +285,23 @@ func initializeSystemComponents(app *pocketbase.PocketBase, jwtGen *jwt.Generato
 
 // createSystemOperatorWithoutJWT creates the system operator without generating JWT initially
 // This is the proven working implementation from the original code
-func createSystemOperatorWithoutJWT(app *pocketbase.PocketBase, nkeyManager *nkey.Manager, options Options) (*pbtypes.SystemOperatorRecord, error) {
+func createSystemOperatorWithoutJWT(app *pocketbase.PocketBase, nkeyManager *nkey.Manager, options Options, logger *utils.Logger) (*pbtypes.SystemOperatorRecord, error) {
 	// Generate operator keys
 	seed, public, signingKey, signingPublic, err := nkeyManager.GenerateOperatorKeyPair()
 	if err != nil {
-		return nil, fmt.Errorf("failed to generate operator keys: %w", err)
+		return nil, utils.WrapError(err, "failed to generate operator keys")
 	}
 
 	// Get private key
 	privateKey, err := nkeyManager.GetPrivateKeyFromSeed(seed)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get private key: %w", err)
+		return nil, utils.WrapError(err, "failed to get private key")
 	}
 
 	// Get signing private key
 	signingPrivateKey, err := nkeyManager.GetPrivateKeyFromSeed(signingKey)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get signing private key: %w", err)
+		return nil, utils.WrapError(err, "failed to get signing private key")
 	}
 
 	// Create operator record
@@ -353,7 +319,7 @@ func createSystemOperatorWithoutJWT(app *pocketbase.PocketBase, nkeyManager *nke
 	// Save to database without JWT initially
 	collection, err := app.FindCollectionByNameOrId(pbtypes.SystemOperatorCollectionName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to find system operator collection: %w", err)
+		return nil, utils.WrapError(err, "failed to find system operator collection")
 	}
 
 	record := core.NewRecord(collection)
@@ -367,25 +333,23 @@ func createSystemOperatorWithoutJWT(app *pocketbase.PocketBase, nkeyManager *nke
 	record.Set("jwt", "") // Empty initially
 
 	if err := app.Save(record); err != nil {
-		return nil, fmt.Errorf("failed to save system operator: %w", err)
+		return nil, utils.WrapError(err, "failed to save system operator")
 	}
 
 	operator.ID = record.Id
 
-	if options.LogToConsole {
-		log.Printf("Created system operator (without JWT): %s", operator.Name)
-	}
+	logger.Success("Created system operator (without JWT): %s", operator.Name)
 
 	return operator, nil
 }
 
 // updateOperatorJWT updates the operator JWT with system account reference
 // This is the proven working implementation from the original code
-func updateOperatorJWT(app *pocketbase.PocketBase, jwtGen *jwt.Generator, operatorID, systemAccountPubKey string) error {
+func updateOperatorJWT(app *pocketbase.PocketBase, jwtGen *jwt.Generator, operatorID, systemAccountPubKey string, logger *utils.Logger) error {
 	// Get the operator record
 	operatorRecord, err := app.FindRecordById(pbtypes.SystemOperatorCollectionName, operatorID)
 	if err != nil {
-		return fmt.Errorf("failed to find operator record: %w", err)
+		return utils.WrapError(err, "failed to find operator record")
 	}
 
 	// Create operator model
@@ -403,13 +367,13 @@ func updateOperatorJWT(app *pocketbase.PocketBase, jwtGen *jwt.Generator, operat
 	// Generate JWT with system account reference
 	jwtValue, err := jwtGen.GenerateOperatorJWT(operator, systemAccountPubKey)
 	if err != nil {
-		return fmt.Errorf("failed to generate operator JWT: %w", err)
+		return utils.WrapError(err, "failed to generate operator JWT")
 	}
 
 	// Update the record
 	operatorRecord.Set("jwt", jwtValue)
 	if err := app.Save(operatorRecord); err != nil {
-		return fmt.Errorf("failed to save updated operator JWT: %w", err)
+		return utils.WrapError(err, "failed to save updated operator JWT")
 	}
 
 	return nil
@@ -417,22 +381,22 @@ func updateOperatorJWT(app *pocketbase.PocketBase, jwtGen *jwt.Generator, operat
 
 // createSystemAccount creates the system account (SYS)
 // This is the proven working implementation adapted from the original code
-func createSystemAccount(app *pocketbase.PocketBase, jwtGen *jwt.Generator, nkeyManager *nkey.Manager, operator *pbtypes.SystemOperatorRecord, options Options) (string, string, error) {
+func createSystemAccount(app *pocketbase.PocketBase, jwtGen *jwt.Generator, nkeyManager *nkey.Manager, operator *pbtypes.SystemOperatorRecord, options Options, logger *utils.Logger) (string, string, error) {
 	// Generate account keys
 	seed, public, signingKey, signingPublic, err := nkeyManager.GenerateAccountKeyPair()
 	if err != nil {
-		return "", "", fmt.Errorf("failed to generate account keys: %w", err)
+		return "", "", utils.WrapError(err, "failed to generate account keys")
 	}
 
 	// Get private keys
 	privateKey, err := nkeyManager.GetPrivateKeyFromSeed(seed)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to get private key: %w", err)
+		return "", "", utils.WrapError(err, "failed to get private key")
 	}
 
 	signingPrivateKey, err := nkeyManager.GetPrivateKeyFromSeed(signingKey)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to get signing private key: %w", err)
+		return "", "", utils.WrapError(err, "failed to get signing private key")
 	}
 
 	// Create organization record for system account
@@ -452,14 +416,14 @@ func createSystemAccount(app *pocketbase.PocketBase, jwtGen *jwt.Generator, nkey
 	// Generate system account JWT (special handling for SYS account)
 	jwtValue, err := jwtGen.GenerateSystemAccountJWT(sysAccount, operator.SigningSeed)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to generate system account JWT: %w", err)
+		return "", "", utils.WrapError(err, "failed to generate system account JWT")
 	}
 	sysAccount.JWT = jwtValue
 
 	// Save to database
 	collection, err := app.FindCollectionByNameOrId(options.OrganizationCollectionName)
 	if err != nil {
-		return "", "", fmt.Errorf("failed to find organizations collection: %w", err)
+		return "", "", utils.WrapError(err, "failed to find organizations collection")
 	}
 
 	record := core.NewRecord(collection)
@@ -476,21 +440,19 @@ func createSystemAccount(app *pocketbase.PocketBase, jwtGen *jwt.Generator, nkey
 	record.Set("active", sysAccount.Active)
 
 	if err := app.Save(record); err != nil {
-		return "", "", fmt.Errorf("failed to save system account: %w", err)
+		return "", "", utils.WrapError(err, "failed to save system account")
 	}
 
-	if options.LogToConsole {
-		log.Printf("Created system account: %s (Public Key: %s)", sysAccount.AccountName, sysAccount.PublicKey)
-	}
+	logger.Success("Created system account: %s (Public Key: %s)", sysAccount.AccountName, sysAccount.PublicKey)
 
 	return record.Id, sysAccount.PublicKey, nil
 }
 
 // createSystemRole creates the system role for system users
-func createSystemRole(app *pocketbase.PocketBase, options Options) (string, error) {
+func createSystemRole(app *pocketbase.PocketBase, options Options, logger *utils.Logger) (string, error) {
 	collection, err := app.FindCollectionByNameOrId(options.RoleCollectionName)
 	if err != nil {
-		return "", fmt.Errorf("failed to find roles collection: %w", err)
+		return "", utils.WrapError(err, "failed to find roles collection")
 	}
 
 	record := core.NewRecord(collection)
@@ -504,21 +466,19 @@ func createSystemRole(app *pocketbase.PocketBase, options Options) (string, erro
 	record.Set("max_payload", -1)     // Unlimited
 
 	if err := app.Save(record); err != nil {
-		return "", fmt.Errorf("failed to save system role: %w", err)
+		return "", utils.WrapError(err, "failed to save system role")
 	}
 
-	if options.LogToConsole {
-		log.Printf("Created system role: system_admin")
-	}
+	logger.Success("Created system role: system_admin")
 
 	return record.Id, nil
 }
 
 // createSystemUser creates the system user for NATS connections
-func createSystemUser(app *pocketbase.PocketBase, jwtGen *jwt.Generator, nkeyManager *nkey.Manager, sysAccountID, sysRoleID string, options Options) error {
+func createSystemUser(app *pocketbase.PocketBase, jwtGen *jwt.Generator, nkeyManager *nkey.Manager, sysAccountID, sysRoleID string, options Options, logger *utils.Logger) error {
 	collection, err := app.FindCollectionByNameOrId(options.UserCollectionName)
 	if err != nil {
-		return fmt.Errorf("failed to find users collection: %w", err)
+		return utils.WrapError(err, "failed to find users collection")
 	}
 
 	record := core.NewRecord(collection)
@@ -538,16 +498,14 @@ func createSystemUser(app *pocketbase.PocketBase, jwtGen *jwt.Generator, nkeyMan
 
 	// Generate user keys and JWT
 	if err := generateUserKeys(app, jwtGen, nkeyManager, record, options); err != nil {
-		return fmt.Errorf("failed to generate system user keys: %w", err)
+		return utils.WrapError(err, "failed to generate system user keys")
 	}
 
 	if err := app.Save(record); err != nil {
-		return fmt.Errorf("failed to save system user: %w", err)
+		return utils.WrapError(err, "failed to save system user")
 	}
 
-	if options.LogToConsole {
-		log.Printf("Created system user: sys")
-	}
+	logger.Success("Created system user: sys")
 
 	return nil
 }
@@ -563,13 +521,13 @@ func generateUserKeys(app *pocketbase.PocketBase, jwtGen *jwt.Generator, nkeyMan
 	// Generate user keys
 	seed, public, err := nkeyManager.GenerateUserKeyPair()
 	if err != nil {
-		return fmt.Errorf("failed to generate user key pair: %w", err)
+		return utils.WrapError(err, "failed to generate user key pair")
 	}
 
 	// Get private key
 	privateKey, err := nkeyManager.GetPrivateKeyFromSeed(seed)
 	if err != nil {
-		return fmt.Errorf("failed to get private key from seed: %w", err)
+		return utils.WrapError(err, "failed to get private key from seed")
 	}
 
 	// Set the keys
@@ -587,12 +545,12 @@ func generateUserJWT(app *pocketbase.PocketBase, jwtGen *jwt.Generator, record *
 	// Get organization and role
 	org, err := app.FindRecordById(options.OrganizationCollectionName, record.GetString("organization_id"))
 	if err != nil {
-		return fmt.Errorf("failed to find organization %s: %w", record.GetString("organization_id"), err)
+		return utils.WrapErrorf(err, "failed to find organization %s", record.GetString("organization_id"))
 	}
 
 	role, err := app.FindRecordById(options.RoleCollectionName, record.GetString("role_id"))
 	if err != nil {
-		return fmt.Errorf("failed to find role %s: %w", record.GetString("role_id"), err)
+		return utils.WrapErrorf(err, "failed to find role %s", record.GetString("role_id"))
 	}
 
 	// Convert to models
@@ -603,7 +561,7 @@ func generateUserJWT(app *pocketbase.PocketBase, jwtGen *jwt.Generator, record *
 	// Generate JWT
 	jwtValue, err := jwtGen.GenerateUserJWT(user, orgModel, roleModel)
 	if err != nil {
-		return fmt.Errorf("failed to generate user JWT: %w", err)
+		return utils.WrapError(err, "failed to generate user JWT")
 	}
 
 	record.Set("jwt", jwtValue)
@@ -612,7 +570,7 @@ func generateUserJWT(app *pocketbase.PocketBase, jwtGen *jwt.Generator, record *
 	// Generate creds file
 	credsFile, err := jwtGen.GenerateCredsFile(user)
 	if err != nil {
-		return fmt.Errorf("failed to generate creds file: %w", err)
+		return utils.WrapError(err, "failed to generate creds file")
 	}
 
 	record.Set("creds_file", credsFile)
@@ -657,34 +615,41 @@ func recordToRoleModel(record *core.Record) *pbtypes.RoleRecord {
 	}
 }
 
-// validateOptions validates the provided options with consistent error handling
+// validateOptions validates the provided options with consistent error handling and enhanced validation
 func validateOptions(options Options) error {
-	if options.UserCollectionName == "" {
-		return fmt.Errorf("user collection name cannot be empty")
+	if err := utils.ValidateRequired(options.UserCollectionName, "user collection name"); err != nil {
+		return err
 	}
 	
-	if options.RoleCollectionName == "" {
-		return fmt.Errorf("role collection name cannot be empty")
+	if err := utils.ValidateRequired(options.RoleCollectionName, "role collection name"); err != nil {
+		return err
 	}
 	
-	if options.OrganizationCollectionName == "" {
-		return fmt.Errorf("organization collection name cannot be empty")
+	if err := utils.ValidateRequired(options.OrganizationCollectionName, "organization collection name"); err != nil {
+		return err
 	}
 	
-	if options.OperatorName == "" {
-		return fmt.Errorf("operator name cannot be empty")
+	if err := utils.ValidateRequired(options.OperatorName, "operator name"); err != nil {
+		return err
 	}
 	
-	if options.NATSServerURL == "" {
-		return fmt.Errorf("NATS server URL cannot be empty")
+	if err := utils.ValidateURL(options.NATSServerURL, "NATS server URL"); err != nil {
+		return err
 	}
 	
-	if options.PublishQueueInterval <= 0 {
-		return fmt.Errorf("publish queue interval must be positive, got: %v", options.PublishQueueInterval)
+	// Validate backup URLs if provided
+	for i, url := range options.BackupNATSServerURLs {
+		if err := utils.ValidateURL(url, fmt.Sprintf("backup NATS server URL[%d]", i)); err != nil {
+			return err
+		}
 	}
 	
-	if options.DebounceInterval <= 0 {
-		return fmt.Errorf("debounce interval must be positive, got: %v", options.DebounceInterval)
+	if err := utils.ValidatePositiveDuration(options.PublishQueueInterval, "publish queue interval"); err != nil {
+		return err
+	}
+	
+	if err := utils.ValidatePositiveDuration(options.DebounceInterval, "debounce interval"); err != nil {
+		return err
 	}
 
 	return nil
