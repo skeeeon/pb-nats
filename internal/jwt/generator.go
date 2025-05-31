@@ -28,7 +28,8 @@ func NewGenerator(app *pocketbase.PocketBase, nkeyManager *nkey.Manager, options
 }
 
 // GenerateOperatorJWT generates a JWT for the operator
-func (g *Generator) GenerateOperatorJWT(operator *pbtypes.SystemOperatorRecord) (string, error) {
+// systemAccountPubKey should be provided to properly designate the system account
+func (g *Generator) GenerateOperatorJWT(operator *pbtypes.SystemOperatorRecord, systemAccountPubKey string) (string, error) {
 	// Create operator key pair from seed
 	operatorKP, err := g.nkeyManager.KeyPairFromSeed(operator.Seed)
 	if err != nil {
@@ -38,6 +39,12 @@ func (g *Generator) GenerateOperatorJWT(operator *pbtypes.SystemOperatorRecord) 
 	// Create operator claims
 	operatorClaims := jwt.NewOperatorClaims(operator.PublicKey)
 	operatorClaims.Name = operator.Name
+	
+	// **CRITICAL FIX**: Specify which account is the system account
+	// This is required for NATS to properly recognize the system account
+	if systemAccountPubKey != "" {
+		operatorClaims.SystemAccount = systemAccountPubKey
+	}
 	
 	// Add signing key
 	operatorClaims.SigningKeys.Add(operator.SigningPublicKey)
@@ -49,6 +56,12 @@ func (g *Generator) GenerateOperatorJWT(operator *pbtypes.SystemOperatorRecord) 
 	}
 
 	return jwtValue, nil
+}
+
+// GenerateOperatorJWTWithoutSystemAccount generates operator JWT without system account reference
+// Used for initial operator creation before system account exists
+func (g *Generator) GenerateOperatorJWTWithoutSystemAccount(operator *pbtypes.SystemOperatorRecord) (string, error) {
+	return g.GenerateOperatorJWT(operator, "")
 }
 
 // GenerateAccountJWT generates a JWT for an organization (NATS account)
@@ -268,9 +281,18 @@ func (g *Generator) GenerateSystemAccountJWT(sysAccount *pbtypes.OrganizationRec
 		},
 	}
 
-	// No limits for system account
-	accountClaims.Limits.JetStreamLimits.DiskStorage = jwt.NoLimit
-	accountClaims.Limits.JetStreamLimits.MemoryStorage = jwt.NoLimit
+	// **CRITICAL FIX**: Explicitly disable JetStream for system account
+	// System accounts should never have JetStream enabled
+	accountClaims.Limits.JetStreamLimits.DiskStorage = 0  // Disabled
+	accountClaims.Limits.JetStreamLimits.MemoryStorage = 0  // Disabled
+	accountClaims.Limits.JetStreamLimits.Streams = 0  // No streams allowed
+	accountClaims.Limits.JetStreamLimits.Consumer = 0  // No consumers allowed
+	
+	// Set reasonable limits for system operations
+	accountClaims.Limits.AccountLimits.Conn = jwt.NoLimit  // Unlimited connections
+	accountClaims.Limits.NatsLimits.Subs = jwt.NoLimit     // Unlimited subscriptions
+	accountClaims.Limits.NatsLimits.Data = jwt.NoLimit     // Unlimited data
+	accountClaims.Limits.NatsLimits.Payload = jwt.NoLimit  // Unlimited payload
 
 	// Encode the JWT
 	jwtValue, err := accountClaims.Encode(operatorKP)

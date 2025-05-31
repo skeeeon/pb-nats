@@ -52,6 +52,11 @@ func (sm *Manager) Setup() error {
 		return fmt.Errorf("failed to initialize system components: %w", err)
 	}
 
+	// **NEW**: Check if we need to regenerate system JWTs for existing installations
+	if err := sm.checkAndFixSystemJWTs(); err != nil {
+		log.Printf("Warning: Could not verify/fix system JWTs: %v", err)
+	}
+
 	// Setup hooks for each collection
 	sm.setupOrganizationHooks()
 	sm.setupUserHooks()
@@ -64,7 +69,77 @@ func (sm *Manager) Setup() error {
 	return nil
 }
 
+// getSystemOperator gets the system operator
+func (sm *Manager) getSystemOperator() (*pbtypes.SystemOperatorRecord, error) {
+	records, err := sm.app.FindAllRecords(pbtypes.SystemOperatorCollectionName)
+	if err != nil {
+		return nil, err
+	}
+	
+	if len(records) == 0 {
+		return nil, fmt.Errorf("system operator not found")
+	}
+
+	record := records[0]
+	return &pbtypes.SystemOperatorRecord{
+		ID:                record.Id,
+		Name:              record.GetString("name"),
+		PublicKey:         record.GetString("public_key"),
+		SigningSeed:       record.GetString("signing_seed"),
+	}, nil
+}
+
+// checkAndFixSystemJWTs verifies system JWTs are correct and fixes them if needed
+// **NEW METHOD**: Handles existing installations that might have incorrect JWTs
+func (sm *Manager) checkAndFixSystemJWTs() error {
+	// Get operator JWT and check if it contains system account reference
+	operatorRecords, err := sm.app.FindAllRecords(pbtypes.SystemOperatorCollectionName)
+	if err != nil || len(operatorRecords) == 0 {
+		return nil // No operator, nothing to check
+	}
+
+	operatorJWT := operatorRecords[0].GetString("jwt")
+	if operatorJWT == "" {
+		return nil // No JWT, will be handled by initialization
+	}
+
+	// Simple check: if JWT contains "system_account" field, it's probably correct
+	// If not, we need to regenerate
+	if !contains(operatorJWT, "system_account") {
+		if sm.options.LogToConsole {
+			log.Printf("⚠️  Detected operator JWT without system account reference - regenerating...")
+		}
+		return sm.RegenerateSystemJWTs()
+	}
+
+	return nil
+}
+
+// Helper function to check if a string contains a substring
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(substr) == 0 || 
+		indexOf(s, substr) >= 0)
+}
+
+// indexOf finds the index of substr in s, returns -1 if not found
+func indexOf(s, substr string) int {
+	if len(substr) == 0 {
+		return 0
+	}
+	if len(s) < len(substr) {
+		return -1
+	}
+	
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return i
+		}
+	}
+	return -1
+}
+
 // initializeSystemComponents creates the system operator, account, role, and user if they don't exist
+// **UPDATED**: Fixed initialization order to handle JWT dependencies properly
 func (sm *Manager) initializeSystemComponents() error {
 	// Check if system operator exists
 	operatorRecords, err := sm.app.FindAllRecords(pbtypes.SystemOperatorCollectionName)
@@ -73,11 +148,35 @@ func (sm *Manager) initializeSystemComponents() error {
 	}
 
 	var operator *pbtypes.SystemOperatorRecord
+	var sysAccountID string
+	var sysAccountPubKey string
+
 	if len(operatorRecords) == 0 {
-		// Create system operator
-		operator, err = sm.createSystemOperator()
+		// **NEW INITIALIZATION FLOW**:
+		// 1. Create operator (without JWT initially)
+		// 2. Create system account 
+		// 3. Update operator JWT with system account reference
+		// 4. Create system role and user
+
+		// Step 1: Create system operator without JWT
+		operator, err = sm.createSystemOperatorWithoutJWT()
 		if err != nil {
 			return fmt.Errorf("failed to create system operator: %w", err)
+		}
+
+		// Step 2: Create system account
+		sysAccountID, sysAccountPubKey, err = sm.createSystemAccount(operator)
+		if err != nil {
+			return fmt.Errorf("failed to create system account: %w", err)
+		}
+
+		// Step 3: Update operator JWT with system account reference
+		if err := sm.updateOperatorJWT(operator.ID, sysAccountPubKey); err != nil {
+			return fmt.Errorf("failed to update operator JWT: %w", err)
+		}
+
+		if sm.options.LogToConsole {
+			log.Printf("✅ Created and configured system operator with system account reference")
 		}
 	} else {
 		// Use existing operator
@@ -93,24 +192,29 @@ func (sm *Manager) initializeSystemComponents() error {
 			SigningSeed:       record.GetString("signing_seed"),
 			JWT:               record.GetString("jwt"),
 		}
-	}
 
-	// Check if system account (SYS) exists using proper dbx query
-	sysAccountRecords, err := sm.app.FindAllRecords(sm.options.OrganizationCollectionName,
-		dbx.HashExp{"account_name": "SYS"})
-	if err != nil {
-		return fmt.Errorf("failed to find system account records: %w", err)
-	}
-
-	var sysAccountID string
-	if len(sysAccountRecords) == 0 {
-		// Create system account
-		sysAccountID, err = sm.createSystemAccount(operator)
+		// Check if system account exists
+		sysAccountRecords, err := sm.app.FindAllRecords(sm.options.OrganizationCollectionName,
+			dbx.HashExp{"account_name": "SYS"})
 		if err != nil {
-			return fmt.Errorf("failed to create system account: %w", err)
+			return fmt.Errorf("failed to find system account records: %w", err)
 		}
-	} else {
-		sysAccountID = sysAccountRecords[0].Id
+
+		if len(sysAccountRecords) == 0 {
+			// Create system account with existing operator
+			sysAccountID, sysAccountPubKey, err = sm.createSystemAccount(operator)
+			if err != nil {
+				return fmt.Errorf("failed to create system account: %w", err)
+			}
+
+			// Update operator JWT with system account reference
+			if err := sm.updateOperatorJWT(operator.ID, sysAccountPubKey); err != nil {
+				return fmt.Errorf("failed to update operator JWT: %w", err)
+			}
+		} else {
+			sysAccountID = sysAccountRecords[0].Id
+			sysAccountPubKey = sysAccountRecords[0].GetString("public_key")
+		}
 	}
 
 	// Check if system role exists
@@ -148,8 +252,9 @@ func (sm *Manager) initializeSystemComponents() error {
 	return nil
 }
 
-// createSystemOperator creates the system operator
-func (sm *Manager) createSystemOperator() (*pbtypes.SystemOperatorRecord, error) {
+// createSystemOperatorWithoutJWT creates the system operator without generating JWT initially
+// **NEW METHOD**: Separates operator creation from JWT generation to handle dependencies
+func (sm *Manager) createSystemOperatorWithoutJWT() (*pbtypes.SystemOperatorRecord, error) {
 	// Generate operator keys
 	seed, public, signingKey, signingPublic, err := sm.nkeyManager.GenerateOperatorKeyPair()
 	if err != nil {
@@ -177,16 +282,10 @@ func (sm *Manager) createSystemOperator() (*pbtypes.SystemOperatorRecord, error)
 		SigningPublicKey:  signingPublic,
 		SigningPrivateKey: signingPrivateKey,
 		SigningSeed:       signingKey,
+		JWT:               "", // Will be generated later
 	}
 
-	// Generate JWT
-	jwtValue, err := sm.jwtGen.GenerateOperatorJWT(operator)
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate operator JWT: %w", err)
-	}
-	operator.JWT = jwtValue
-
-	// Save to database
+	// Save to database without JWT initially
 	collection, err := sm.app.FindCollectionByNameOrId(pbtypes.SystemOperatorCollectionName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find system operator collection: %w", err)
@@ -200,7 +299,7 @@ func (sm *Manager) createSystemOperator() (*pbtypes.SystemOperatorRecord, error)
 	record.Set("signing_public_key", operator.SigningPublicKey)
 	record.Set("signing_private_key", operator.SigningPrivateKey)
 	record.Set("signing_seed", operator.SigningSeed)
-	record.Set("jwt", operator.JWT)
+	record.Set("jwt", "") // Empty initially
 
 	if err := sm.app.Save(record); err != nil {
 		return nil, fmt.Errorf("failed to save system operator: %w", err)
@@ -209,29 +308,70 @@ func (sm *Manager) createSystemOperator() (*pbtypes.SystemOperatorRecord, error)
 	operator.ID = record.Id
 
 	if sm.options.LogToConsole {
-		log.Printf("Created system operator: %s", operator.Name)
+		log.Printf("Created system operator (without JWT): %s", operator.Name)
 	}
 
 	return operator, nil
 }
 
+// updateOperatorJWT updates the operator JWT with system account reference
+// **NEW METHOD**: Updates operator JWT after system account is created
+func (sm *Manager) updateOperatorJWT(operatorID, systemAccountPubKey string) error {
+	// Get the operator record
+	operatorRecord, err := sm.app.FindRecordById(pbtypes.SystemOperatorCollectionName, operatorID)
+	if err != nil {
+		return fmt.Errorf("failed to find operator record: %w", err)
+	}
+
+	// Create operator model
+	operator := &pbtypes.SystemOperatorRecord{
+		ID:                operatorRecord.Id,
+		Name:              operatorRecord.GetString("name"),
+		PublicKey:         operatorRecord.GetString("public_key"),
+		PrivateKey:        operatorRecord.GetString("private_key"),
+		Seed:              operatorRecord.GetString("seed"),
+		SigningPublicKey:  operatorRecord.GetString("signing_public_key"),
+		SigningPrivateKey: operatorRecord.GetString("signing_private_key"),
+		SigningSeed:       operatorRecord.GetString("signing_seed"),
+	}
+
+	// Generate JWT with system account reference
+	jwtValue, err := sm.jwtGen.GenerateOperatorJWT(operator, systemAccountPubKey)
+	if err != nil {
+		return fmt.Errorf("failed to generate operator JWT: %w", err)
+	}
+
+	// Update the record
+	operatorRecord.Set("jwt", jwtValue)
+	if err := sm.app.Save(operatorRecord); err != nil {
+		return fmt.Errorf("failed to save updated operator JWT: %w", err)
+	}
+
+	if sm.options.LogToConsole {
+		log.Printf("✅ Updated operator JWT with system account reference: %s", systemAccountPubKey)
+	}
+
+	return nil
+}
+
 // createSystemAccount creates the system account (SYS)
-func (sm *Manager) createSystemAccount(operator *pbtypes.SystemOperatorRecord) (string, error) {
+// **UPDATED**: Returns system account public key for operator JWT reference
+func (sm *Manager) createSystemAccount(operator *pbtypes.SystemOperatorRecord) (string, string, error) {
 	// Generate account keys
 	seed, public, signingKey, signingPublic, err := sm.nkeyManager.GenerateAccountKeyPair()
 	if err != nil {
-		return "", fmt.Errorf("failed to generate account keys: %w", err)
+		return "", "", fmt.Errorf("failed to generate account keys: %w", err)
 	}
 
 	// Get private keys
 	privateKey, err := sm.nkeyManager.GetPrivateKeyFromSeed(seed)
 	if err != nil {
-		return "", fmt.Errorf("failed to get private key: %w", err)
+		return "", "", fmt.Errorf("failed to get private key: %w", err)
 	}
 
 	signingPrivateKey, err := sm.nkeyManager.GetPrivateKeyFromSeed(signingKey)
 	if err != nil {
-		return "", fmt.Errorf("failed to get signing private key: %w", err)
+		return "", "", fmt.Errorf("failed to get signing private key: %w", err)
 	}
 
 	// Create organization record for system account
@@ -251,14 +391,14 @@ func (sm *Manager) createSystemAccount(operator *pbtypes.SystemOperatorRecord) (
 	// Generate system account JWT (special handling for SYS account)
 	jwtValue, err := sm.jwtGen.GenerateSystemAccountJWT(sysAccount, operator.SigningSeed)
 	if err != nil {
-		return "", fmt.Errorf("failed to generate system account JWT: %w", err)
+		return "", "", fmt.Errorf("failed to generate system account JWT: %w", err)
 	}
 	sysAccount.JWT = jwtValue
 
 	// Save to database
 	collection, err := sm.app.FindCollectionByNameOrId(sm.options.OrganizationCollectionName)
 	if err != nil {
-		return "", fmt.Errorf("failed to find organizations collection: %w", err)
+		return "", "", fmt.Errorf("failed to find organizations collection: %w", err)
 	}
 
 	record := core.NewRecord(collection)
@@ -275,14 +415,14 @@ func (sm *Manager) createSystemAccount(operator *pbtypes.SystemOperatorRecord) (
 	record.Set("active", sysAccount.Active)
 
 	if err := sm.app.Save(record); err != nil {
-		return "", fmt.Errorf("failed to save system account: %w", err)
+		return "", "", fmt.Errorf("failed to save system account: %w", err)
 	}
 
 	if sm.options.LogToConsole {
-		log.Printf("Created system account: %s", sysAccount.AccountName)
+		log.Printf("Created system account: %s (Public Key: %s)", sysAccount.AccountName, sysAccount.PublicKey)
 	}
 
-	return record.Id, nil
+	return record.Id, sysAccount.PublicKey, nil
 }
 
 // createSystemRole creates the system role for system users
@@ -733,8 +873,85 @@ func (sm *Manager) recordToRoleModel(record *core.Record) *pbtypes.RoleRecord {
 	}
 }
 
-// getSystemOperator gets the system operator
-func (sm *Manager) getSystemOperator() (*pbtypes.SystemOperatorRecord, error) {
+// RegenerateSystemJWTs forces regeneration of all system JWTs
+// **NEW METHOD**: Use this to fix existing installations with incorrect JWTs
+func (sm *Manager) RegenerateSystemJWTs() error {
+	if sm.options.LogToConsole {
+		log.Printf("🔄 Force regenerating all system JWTs...")
+	}
+
+	// Get existing system operator
+	operatorRecords, err := sm.app.FindAllRecords(pbtypes.SystemOperatorCollectionName)
+	if err != nil || len(operatorRecords) == 0 {
+		return fmt.Errorf("system operator not found for regeneration")
+	}
+	operatorRecord := operatorRecords[0]
+
+	// Get existing system account
+	sysAccountRecords, err := sm.app.FindAllRecords(sm.options.OrganizationCollectionName,
+		dbx.HashExp{"account_name": "SYS"})
+	if err != nil || len(sysAccountRecords) == 0 {
+		return fmt.Errorf("system account not found for regeneration")
+	}
+	sysAccountRecord := sysAccountRecords[0]
+
+	// Create models
+	operator := &pbtypes.SystemOperatorRecord{
+		ID:                operatorRecord.Id,
+		Name:              operatorRecord.GetString("name"),
+		PublicKey:         operatorRecord.GetString("public_key"),
+		PrivateKey:        operatorRecord.GetString("private_key"),
+		Seed:              operatorRecord.GetString("seed"),
+		SigningPublicKey:  operatorRecord.GetString("signing_public_key"),
+		SigningPrivateKey: operatorRecord.GetString("signing_private_key"),
+		SigningSeed:       operatorRecord.GetString("signing_seed"),
+	}
+
+	sysAccount := &pbtypes.OrganizationRecord{
+		ID:               sysAccountRecord.Id,
+		Name:             sysAccountRecord.GetString("name"),
+		AccountName:      sysAccountRecord.GetString("account_name"),
+		PublicKey:        sysAccountRecord.GetString("public_key"),
+		PrivateKey:       sysAccountRecord.GetString("private_key"),
+		Seed:             sysAccountRecord.GetString("seed"),
+		SigningPublicKey: sysAccountRecord.GetString("signing_public_key"),
+		SigningSeed:      sysAccountRecord.GetString("signing_seed"),
+		Active:           sysAccountRecord.GetBool("active"),
+	}
+
+	// Regenerate system account JWT with proper JetStream disabled
+	sysAccountJWT, err := sm.jwtGen.GenerateSystemAccountJWT(sysAccount, operator.SigningSeed)
+	if err != nil {
+		return fmt.Errorf("failed to regenerate system account JWT: %w", err)
+	}
+
+	// Update system account record
+	sysAccountRecord.Set("jwt", sysAccountJWT)
+	if err := sm.app.Save(sysAccountRecord); err != nil {
+		return fmt.Errorf("failed to save regenerated system account JWT: %w", err)
+	}
+
+	// Regenerate operator JWT with system account reference
+	operatorJWT, err := sm.jwtGen.GenerateOperatorJWT(operator, sysAccount.PublicKey)
+	if err != nil {
+		return fmt.Errorf("failed to regenerate operator JWT: %w", err)
+	}
+
+	// Update operator record
+	operatorRecord.Set("jwt", operatorJWT)
+	if err := sm.app.Save(operatorRecord); err != nil {
+		return fmt.Errorf("failed to save regenerated operator JWT: %w", err)
+	}
+
+	if sm.options.LogToConsole {
+		log.Printf("✅ Successfully regenerated system JWTs")
+		log.Printf("   Operator JWT updated with system account: %s", sysAccount.PublicKey)
+		log.Printf("   System account JWT updated with JetStream disabled")
+		log.Printf("   Please copy the new JWTs to your NATS configuration files")
+	}
+
+	return nil
+}
 	records, err := sm.app.FindAllRecords(pbtypes.SystemOperatorCollectionName)
 	if err != nil {
 		return nil, err
