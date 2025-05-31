@@ -140,11 +140,13 @@ func (g *Generator) GenerateCredsFile(user *pbtypes.NatsUserRecord) (string, err
 	return string(creds), nil
 }
 
+// isSystemUser checks if a user is a system user that needs unscoped permissions
+func (g *Generator) isSystemUser(user *pbtypes.NatsUserRecord, org *pbtypes.OrganizationRecord) bool {
+	return org.AccountName == "SYS" && user.NatsUsername == "sys"
+}
+
 // applyRolePermissions applies role-based permissions to user claims
 func (g *Generator) applyRolePermissions(userClaims *jwt.UserClaims, user *pbtypes.NatsUserRecord, org *pbtypes.OrganizationRecord, role *pbtypes.RoleRecord) error {
-	orgName := org.NormalizeAccountName()
-	username := user.NatsUsername
-
 	// Get publish permissions from role
 	publishPerms, err := role.GetPublishPermissions()
 	if err != nil {
@@ -159,21 +161,42 @@ func (g *Generator) applyRolePermissions(userClaims *jwt.UserClaims, user *pbtyp
 
 	// Apply default permissions if role permissions are empty
 	if len(publishPerms) == 0 {
-		publishPerms = []string{g.options.DefaultUserPublish}
+		if g.isSystemUser(user, org) {
+			// System users get unrestricted access
+			publishPerms = []string{"$SYS.>", ">"}
+		} else {
+			publishPerms = []string{g.options.DefaultUserPublish}
+		}
 	}
 	if len(subscribePerms) == 0 {
-		subscribePerms = g.options.DefaultUserSubscribe
+		if g.isSystemUser(user, org) {
+			// System users get unrestricted access
+			subscribePerms = []string{"$SYS.>", ">"}
+		} else {
+			subscribePerms = g.options.DefaultUserSubscribe
+		}
 	}
 
-	// Apply organization and user scoping
-	scopedPublishPerms := pbtypes.ApplyUserScope(publishPerms, orgName, username)
-	scopedSubscribePerms := pbtypes.ApplyUserScope(subscribePerms, orgName, username)
+	var finalPublishPerms, finalSubscribePerms []string
+
+	// Check if this is a system user - if so, don't apply scoping
+	if g.isSystemUser(user, org) {
+		// System users get raw permissions without any scoping
+		finalPublishPerms = publishPerms
+		finalSubscribePerms = subscribePerms
+	} else {
+		// Regular users get organization and user scoping
+		orgName := org.NormalizeAccountName()
+		username := user.NatsUsername
+		finalPublishPerms = pbtypes.ApplyUserScope(publishPerms, orgName, username)
+		finalSubscribePerms = pbtypes.ApplyUserScope(subscribePerms, orgName, username)
+	}
 
 	// Set permissions in claims
-	for _, perm := range scopedPublishPerms {
+	for _, perm := range finalPublishPerms {
 		userClaims.Permissions.Pub.Allow.Add(perm)
 	}
-	for _, perm := range scopedSubscribePerms {
+	for _, perm := range finalSubscribePerms {
 		userClaims.Permissions.Sub.Allow.Add(perm)
 	}
 

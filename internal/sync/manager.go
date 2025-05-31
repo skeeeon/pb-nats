@@ -323,7 +323,7 @@ func (sm *Manager) createSystemUser(sysAccountID, sysRoleID string) error {
 	record := core.NewRecord(collection)
 	
 	// PocketBase auth fields
-	record.Set("email", "system@localhost")
+	record.Set("email", "system@localhost.com")
 	record.Set("password", "system-generated-password-"+time.Now().Format("20060102150405"))
 	record.Set("verified", true)
 	
