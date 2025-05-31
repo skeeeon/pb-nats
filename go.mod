@@ -3,8 +3,12 @@ module github.com/skeeeon/pb-nats
 go 1.23.4
 
 require (
+	github.com/nats-io/jwt/v2 v2.7.4
+	github.com/nats-io/nats.go v1.42.0
+	github.com/nats-io/nkeys v0.4.11
 	github.com/pocketbase/dbx v1.11.0
 	github.com/pocketbase/pocketbase v0.28.0
+	github.com/skeeeon/pb-audit v0.0.0-20250511213441-da9141559cac
 )
 
 require (
@@ -19,8 +23,10 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.2.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
+	github.com/klauspost/compress v1.18.0 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
+	github.com/nats-io/nuid v1.0.1 // indirect
 	github.com/ncruces/go-strftime v0.1.9 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/spf13/cast v1.8.0 // indirect

@@ -2,61 +2,63 @@ package pbnats
 
 import "time"
 
-// Options allows customizing the behavior of the NATS synchronization.
+// Options allows customizing the behavior of the NATS JWT synchronization
 type Options struct {
-	// Collection names to monitor
-	UserCollectionName string
-	RoleCollectionName string
-
-	// File paths
-	ConfigFilePath     string
-	BackupDirPath      string
-
-	// Reloading
-	ReloadCommand    string
-	DebounceInterval time.Duration // Time to wait before applying multiple changes
-
-	// Default permissions
-	DefaultPublish   interface{} // String or []string
-	DefaultSubscribe interface{} // String or []string
-
+	// Collection names
+	UserCollectionName         string
+	RoleCollectionName         string
+	OrganizationCollectionName string
+	
+	// NATS configuration  
+	OperatorName              string
+	NATSServerURL             string
+	BackupNATSServerURLs      []string
+	
+	// JWT settings
+	DefaultJWTExpiry          time.Duration // Default: 0 (never expires)
+	
+	// Performance
+	PublishQueueInterval time.Duration // How often to process the publish queue
+	DebounceInterval     time.Duration // Wait time after changes before processing
+	LogToConsole         bool
+	
+	// Default permissions (organization-scoped)
+	DefaultOrgPublish     string   // "{org}.>"
+	DefaultOrgSubscribe   []string // ["{org}.>", "_INBOX.>"]
+	DefaultUserPublish    string   // "{org}.user.{user}.>"
+	DefaultUserSubscribe  []string // ["{org}.>", "_INBOX.>"]
+	
 	// Custom event filter function
 	// Return true to process the event, false to ignore
 	EventFilter func(collectionName, eventType string) bool
-
-	// Whether to log events to console
-	LogToConsole bool
-
-	// Whether to create a backup before writing a new config
-	CreateBackups bool
-
-	// Max number of backup files to keep (0 = unlimited)
-	MaxBackups int
-
-	// Whether to initialize config on startup
-	GenerateInitialConfig bool
 }
 
-// DefaultOptions returns sensible defaults for the NATS synchronization options.
+// DefaultOptions returns sensible defaults for the NATS JWT synchronization options
 func DefaultOptions() Options {
 	return Options{
-		UserCollectionName:    DefaultUserCollectionName,
-		RoleCollectionName:    DefaultRoleCollectionName,
-		ConfigFilePath:        "/etc/nats/mqtt-auth.conf",
-		BackupDirPath:         "/etc/nats/backups",
-		ReloadCommand:         "nats-server --signal reload",
-		DebounceInterval:      3 * time.Second,
-		DefaultPublish:        "PUBLIC.>",
-		DefaultSubscribe:      []string{"PUBLIC.>", "_INBOX.>"},
-		EventFilter:           nil, // No filter by default, process all events
-		LogToConsole:          true,
-		CreateBackups:         true,
-		MaxBackups:            30,  // Keep last 30 backups
-		GenerateInitialConfig: true, // Generate config on startup
+		UserCollectionName:         DefaultUserCollectionName,
+		RoleCollectionName:         DefaultRoleCollectionName,
+		OrganizationCollectionName: DefaultOrganizationCollectionName,
+		
+		OperatorName:              DefaultOperatorName,
+		NATSServerURL:             "nats://localhost:4222",
+		BackupNATSServerURLs:      []string{},
+		
+		DefaultJWTExpiry:          0, // Never expires
+		PublishQueueInterval:      30 * time.Second,
+		DebounceInterval:          3 * time.Second,
+		LogToConsole:              true,
+		
+		DefaultOrgPublish:     DefaultOrgPublish,
+		DefaultOrgSubscribe:   DefaultOrgSubscribe,
+		DefaultUserPublish:    DefaultUserPublish,
+		DefaultUserSubscribe:  DefaultUserSubscribe,
+		
+		EventFilter:               nil, // No filter by default, process all events
 	}
 }
 
-// applyDefaultOptions fills in default values for any missing options.
+// applyDefaultOptions fills in default values for any missing options
 func applyDefaultOptions(options Options) Options {
 	defaults := DefaultOptions()
 
@@ -67,34 +69,39 @@ func applyDefaultOptions(options Options) Options {
 	if options.RoleCollectionName == "" {
 		options.RoleCollectionName = defaults.RoleCollectionName
 	}
-
-	// Apply file paths
-	if options.ConfigFilePath == "" {
-		options.ConfigFilePath = defaults.ConfigFilePath
-	}
-	if options.BackupDirPath == "" {
-		options.BackupDirPath = defaults.BackupDirPath
+	if options.OrganizationCollectionName == "" {
+		options.OrganizationCollectionName = defaults.OrganizationCollectionName
 	}
 
-	// Apply reload command
-	if options.ReloadCommand == "" {
-		options.ReloadCommand = defaults.ReloadCommand
+	// Apply NATS configuration
+	if options.OperatorName == "" {
+		options.OperatorName = defaults.OperatorName
+	}
+	if options.NATSServerURL == "" {
+		options.NATSServerURL = defaults.NATSServerURL
 	}
 
-	// Apply debounce interval
+	// Apply timing intervals
+	if options.PublishQueueInterval <= 0 {
+		options.PublishQueueInterval = defaults.PublishQueueInterval
+	}
 	if options.DebounceInterval <= 0 {
 		options.DebounceInterval = defaults.DebounceInterval
 	}
 
 	// Apply default permissions if not provided
-	if options.DefaultPublish == nil {
-		options.DefaultPublish = defaults.DefaultPublish
+	if options.DefaultOrgPublish == "" {
+		options.DefaultOrgPublish = defaults.DefaultOrgPublish
 	}
-	if options.DefaultSubscribe == nil {
-		options.DefaultSubscribe = defaults.DefaultSubscribe
+	if len(options.DefaultOrgSubscribe) == 0 {
+		options.DefaultOrgSubscribe = defaults.DefaultOrgSubscribe
 	}
-
-	// Keep custom event filter if provided
+	if options.DefaultUserPublish == "" {
+		options.DefaultUserPublish = defaults.DefaultUserPublish
+	}
+	if len(options.DefaultUserSubscribe) == 0 {
+		options.DefaultUserSubscribe = defaults.DefaultUserSubscribe
+	}
 
 	return options
 }
