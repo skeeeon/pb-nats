@@ -12,6 +12,7 @@ import (
 	"github.com/skeeeon/pb-nats/internal/jwt"
 	"github.com/skeeeon/pb-nats/internal/nkey"
 	"github.com/skeeeon/pb-nats/internal/publisher"
+	pbtypes "github.com/skeeeon/pb-nats/internal/types"
 )
 
 // Manager manages the synchronization between PocketBase and NATS
@@ -20,7 +21,7 @@ type Manager struct {
 	jwtGen      *jwt.Generator
 	nkeyManager *nkey.Manager
 	publisher   *publisher.Manager
-	options     pbnats.Options
+	options     pbtypes.Options
 	
 	// Debouncing
 	timer       *time.Timer
@@ -33,7 +34,7 @@ type Manager struct {
 
 // NewManager creates a new sync manager
 func NewManager(app *pocketbase.PocketBase, jwtGen *jwt.Generator, nkeyManager *nkey.Manager, 
-	publisher *publisher.Manager, options pbnats.Options) *Manager {
+	publisher *publisher.Manager, options pbtypes.Options) *Manager {
 	return &Manager{
 		app:         app,
 		jwtGen:      jwtGen,
@@ -65,12 +66,12 @@ func (sm *Manager) Setup() error {
 // initializeSystemComponents creates the system operator and SYS account if they don't exist
 func (sm *Manager) initializeSystemComponents() error {
 	// Check if system operator exists
-	operatorRecords, err := sm.app.FindAllRecords(pbnats.SystemOperatorCollectionName)
+	operatorRecords, err := sm.app.FindAllRecords(pbtypes.SystemOperatorCollectionName)
 	if err != nil {
 		return fmt.Errorf("failed to find system operator records: %w", err)
 	}
 
-	var operator *pbnats.SystemOperatorRecord
+	var operator *pbtypes.SystemOperatorRecord
 	if len(operatorRecords) == 0 {
 		// Create system operator
 		operator, err = sm.createSystemOperator()
@@ -80,7 +81,7 @@ func (sm *Manager) initializeSystemComponents() error {
 	} else {
 		// Use existing operator
 		record := operatorRecords[0]
-		operator = &pbnats.SystemOperatorRecord{
+		operator = &pbtypes.SystemOperatorRecord{
 			ID:                record.Id,
 			Name:              record.GetString("name"),
 			PublicKey:         record.GetString("public_key"),
@@ -111,7 +112,7 @@ func (sm *Manager) initializeSystemComponents() error {
 }
 
 // createSystemOperator creates the system operator
-func (sm *Manager) createSystemOperator() (*pbnats.SystemOperatorRecord, error) {
+func (sm *Manager) createSystemOperator() (*pbtypes.SystemOperatorRecord, error) {
 	// Generate operator keys
 	seed, public, signingKey, signingPublic, err := sm.nkeyManager.GenerateOperatorKeyPair()
 	if err != nil {
@@ -131,7 +132,7 @@ func (sm *Manager) createSystemOperator() (*pbnats.SystemOperatorRecord, error) 
 	}
 
 	// Create operator record
-	operator := &pbnats.SystemOperatorRecord{
+	operator := &pbtypes.SystemOperatorRecord{
 		Name:              sm.options.OperatorName,
 		PublicKey:         public,
 		PrivateKey:        privateKey,
@@ -149,7 +150,7 @@ func (sm *Manager) createSystemOperator() (*pbnats.SystemOperatorRecord, error) 
 	operator.JWT = jwtValue
 
 	// Save to database
-	collection, err := sm.app.FindCollectionByNameOrId(pbnats.SystemOperatorCollectionName)
+	collection, err := sm.app.FindCollectionByNameOrId(pbtypes.SystemOperatorCollectionName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find system operator collection: %w", err)
 	}
@@ -178,7 +179,7 @@ func (sm *Manager) createSystemOperator() (*pbnats.SystemOperatorRecord, error) 
 }
 
 // createSystemAccount creates the system account (SYS)
-func (sm *Manager) createSystemAccount(operator *pbnats.SystemOperatorRecord) error {
+func (sm *Manager) createSystemAccount(operator *pbtypes.SystemOperatorRecord) error {
 	// Generate account keys
 	seed, public, signingKey, signingPublic, err := sm.nkeyManager.GenerateAccountKeyPair()
 	if err != nil {
@@ -197,7 +198,7 @@ func (sm *Manager) createSystemAccount(operator *pbnats.SystemOperatorRecord) er
 	}
 
 	// Create organization record for system account
-	sysAccount := &pbnats.OrganizationRecord{
+	sysAccount := &pbtypes.OrganizationRecord{
 		Name:              "System Account",
 		AccountName:       "SYS",
 		Description:       "Automatically created system account for NATS management",
@@ -268,8 +269,8 @@ func (sm *Manager) setupOrganizationHooks() {
 			return e.Next()
 		}
 
-		if sm.shouldHandleEvent(sm.options.OrganizationCollectionName, pbnats.EventTypeOrgCreate) {
-			sm.scheduleSync(e.Record.Id, pbnats.PublishActionUpsert)
+		if sm.shouldHandleEvent(sm.options.OrganizationCollectionName, pbtypes.EventTypeOrgCreate) {
+			sm.scheduleSync(e.Record.Id, pbtypes.PublishActionUpsert)
 		}
 
 		return e.Next()
@@ -286,8 +287,8 @@ func (sm *Manager) setupOrganizationHooks() {
 			return e.Next()
 		}
 
-		if sm.shouldHandleEvent(sm.options.OrganizationCollectionName, pbnats.EventTypeOrgUpdate) {
-			sm.scheduleSync(e.Record.Id, pbnats.PublishActionUpsert)
+		if sm.shouldHandleEvent(sm.options.OrganizationCollectionName, pbtypes.EventTypeOrgUpdate) {
+			sm.scheduleSync(e.Record.Id, pbtypes.PublishActionUpsert)
 		}
 
 		return e.Next()
@@ -304,8 +305,8 @@ func (sm *Manager) setupOrganizationHooks() {
 			return fmt.Errorf("cannot delete system account")
 		}
 
-		if sm.shouldHandleEvent(sm.options.OrganizationCollectionName, pbnats.EventTypeOrgDelete) {
-			sm.scheduleSync(e.Record.Id, pbnats.PublishActionDelete)
+		if sm.shouldHandleEvent(sm.options.OrganizationCollectionName, pbtypes.EventTypeOrgDelete) {
+			sm.scheduleSync(e.Record.Id, pbtypes.PublishActionDelete)
 		}
 
 		return e.Next()
@@ -333,11 +334,11 @@ func (sm *Manager) setupUserHooks() {
 			return e.Next()
 		}
 
-		if sm.shouldHandleEvent(sm.options.UserCollectionName, pbnats.EventTypeUserCreate) {
+		if sm.shouldHandleEvent(sm.options.UserCollectionName, pbtypes.EventTypeUserCreate) {
 			// User changes trigger organization JWT regeneration
 			orgID := e.Record.GetString("organization_id")
 			if orgID != "" {
-				sm.scheduleSync(orgID, pbnats.PublishActionUpsert)
+				sm.scheduleSync(orgID, pbtypes.PublishActionUpsert)
 			}
 		}
 
@@ -369,11 +370,11 @@ func (sm *Manager) setupUserHooks() {
 			return e.Next()
 		}
 
-		if sm.shouldHandleEvent(sm.options.UserCollectionName, pbnats.EventTypeUserUpdate) {
+		if sm.shouldHandleEvent(sm.options.UserCollectionName, pbtypes.EventTypeUserUpdate) {
 			// User changes trigger organization JWT regeneration
 			orgID := e.Record.GetString("organization_id")
 			if orgID != "" {
-				sm.scheduleSync(orgID, pbnats.PublishActionUpsert)
+				sm.scheduleSync(orgID, pbtypes.PublishActionUpsert)
 			}
 		}
 
@@ -386,11 +387,11 @@ func (sm *Manager) setupUserHooks() {
 			return e.Next()
 		}
 
-		if sm.shouldHandleEvent(sm.options.UserCollectionName, pbnats.EventTypeUserDelete) {
+		if sm.shouldHandleEvent(sm.options.UserCollectionName, pbtypes.EventTypeUserDelete) {
 			// User deletion triggers organization JWT regeneration (to revoke user)
 			orgID := e.Record.GetString("organization_id")
 			if orgID != "" {
-				sm.scheduleSync(orgID, pbnats.PublishActionUpsert)
+				sm.scheduleSync(orgID, pbtypes.PublishActionUpsert)
 			}
 		}
 
@@ -406,7 +407,7 @@ func (sm *Manager) setupRoleHooks() {
 			return e.Next()
 		}
 
-		if sm.shouldHandleEvent(sm.options.RoleCollectionName, pbnats.EventTypeRoleUpdate) {
+		if sm.shouldHandleEvent(sm.options.RoleCollectionName, pbtypes.EventTypeRoleUpdate) {
 			// Find all users with this role and regenerate their JWTs
 			if err := sm.regenerateUsersWithRole(e.Record.Id); err != nil {
 				log.Printf("Failed to regenerate users with role %s: %v", e.Record.Id, err)
@@ -453,8 +454,6 @@ func (sm *Manager) scheduleSync(orgID, action string) {
 	})
 }
 
-// Additional helper methods...
-
 // generateOrganizationKeys generates keys and JWT for an organization
 func (sm *Manager) generateOrganizationKeys(record *core.Record) error {
 	// Skip if keys already exist
@@ -489,7 +488,7 @@ func (sm *Manager) generateOrganizationKeys(record *core.Record) error {
 
 	// Normalize account name
 	if record.GetString("account_name") == "" {
-		orgRecord := &pbnats.OrganizationRecord{Name: record.GetString("name")}
+		orgRecord := &pbtypes.OrganizationRecord{Name: record.GetString("name")}
 		record.Set("account_name", orgRecord.NormalizeAccountName())
 	}
 
@@ -506,7 +505,7 @@ func (sm *Manager) generateOrganizationJWT(record *core.Record) error {
 	}
 
 	// Create organization record
-	org := &pbnats.OrganizationRecord{
+	org := &pbtypes.OrganizationRecord{
 		PublicKey:        record.GetString("public_key"),
 		SigningPublicKey: record.GetString("signing_public_key"),
 		Name:             record.GetString("name"),
@@ -599,8 +598,8 @@ func (sm *Manager) regenerateUserJWT(record *core.Record) error {
 }
 
 // Helper methods to convert records to models
-func (sm *Manager) recordToUserModel(record *core.Record) *pbnats.NatsUserRecord {
-	return &pbnats.NatsUserRecord{
+func (sm *Manager) recordToUserModel(record *core.Record) *pbtypes.NatsUserRecord {
+	return &pbtypes.NatsUserRecord{
 		ID:             record.Id,
 		NatsUsername:   record.GetString("nats_username"),
 		PublicKey:      record.GetString("public_key"),
@@ -613,8 +612,8 @@ func (sm *Manager) recordToUserModel(record *core.Record) *pbnats.NatsUserRecord
 	}
 }
 
-func (sm *Manager) recordToOrgModel(record *core.Record) *pbnats.OrganizationRecord {
-	return &pbnats.OrganizationRecord{
+func (sm *Manager) recordToOrgModel(record *core.Record) *pbtypes.OrganizationRecord {
+	return &pbtypes.OrganizationRecord{
 		ID:               record.Id,
 		Name:             record.GetString("name"),
 		AccountName:      record.GetString("account_name"),
@@ -624,8 +623,8 @@ func (sm *Manager) recordToOrgModel(record *core.Record) *pbnats.OrganizationRec
 	}
 }
 
-func (sm *Manager) recordToRoleModel(record *core.Record) *pbnats.RoleRecord {
-	return &pbnats.RoleRecord{
+func (sm *Manager) recordToRoleModel(record *core.Record) *pbtypes.RoleRecord {
+	return &pbtypes.RoleRecord{
 		ID:                   record.Id,
 		Name:                 record.GetString("name"),
 		PublishPermissions:   []byte(record.GetString("publish_permissions")),
@@ -637,8 +636,8 @@ func (sm *Manager) recordToRoleModel(record *core.Record) *pbnats.RoleRecord {
 }
 
 // getSystemOperator gets the system operator
-func (sm *Manager) getSystemOperator() (*pbnats.SystemOperatorRecord, error) {
-	records, err := sm.app.FindAllRecords(pbnats.SystemOperatorCollectionName)
+func (sm *Manager) getSystemOperator() (*pbtypes.SystemOperatorRecord, error) {
+	records, err := sm.app.FindAllRecords(pbtypes.SystemOperatorCollectionName)
 	if err != nil {
 		return nil, err
 	}
@@ -648,7 +647,7 @@ func (sm *Manager) getSystemOperator() (*pbnats.SystemOperatorRecord, error) {
 	}
 
 	record := records[0]
-	return &pbnats.SystemOperatorRecord{
+	return &pbtypes.SystemOperatorRecord{
 		ID:                record.Id,
 		Name:              record.GetString("name"),
 		PublicKey:         record.GetString("public_key"),
@@ -695,7 +694,7 @@ func (sm *Manager) scheduleOrganizationsWithRole(roleID string) error {
 
 	// Schedule sync for each organization
 	for orgID := range orgIDs {
-		sm.scheduleSync(orgID, pbnats.PublishActionUpsert)
+		sm.scheduleSync(orgID, pbtypes.PublishActionUpsert)
 	}
 
 	return nil

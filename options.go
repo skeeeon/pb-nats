@@ -1,46 +1,18 @@
 package pbnats
 
-import "time"
-
-// Options allows customizing the behavior of the NATS JWT synchronization
-type Options struct {
-	// Collection names
-	UserCollectionName         string
-	RoleCollectionName         string
-	OrganizationCollectionName string
-	
-	// NATS configuration  
-	OperatorName              string
-	NATSServerURL             string
-	BackupNATSServerURLs      []string
-	
-	// JWT settings
-	DefaultJWTExpiry          time.Duration // Default: 0 (never expires)
-	
-	// Performance
-	PublishQueueInterval time.Duration // How often to process the publish queue
-	DebounceInterval     time.Duration // Wait time after changes before processing
-	LogToConsole         bool
-	
-	// Default permissions (organization-scoped)
-	DefaultOrgPublish     string   // "{org}.>"
-	DefaultOrgSubscribe   []string // ["{org}.>", "_INBOX.>"]
-	DefaultUserPublish    string   // "{org}.user.{user}.>"
-	DefaultUserSubscribe  []string // ["{org}.>", "_INBOX.>"]
-	
-	// Custom event filter function
-	// Return true to process the event, false to ignore
-	EventFilter func(collectionName, eventType string) bool
-}
+import (
+	"time"
+	pbtypes "github.com/skeeeon/pb-nats/internal/types"
+)
 
 // DefaultOptions returns sensible defaults for the NATS JWT synchronization options
 func DefaultOptions() Options {
 	return Options{
-		UserCollectionName:         DefaultUserCollectionName,
-		RoleCollectionName:         DefaultRoleCollectionName,
-		OrganizationCollectionName: DefaultOrganizationCollectionName,
+		UserCollectionName:         pbtypes.DefaultUserCollectionName,
+		RoleCollectionName:         pbtypes.DefaultRoleCollectionName,
+		OrganizationCollectionName: pbtypes.DefaultOrganizationCollectionName,
 		
-		OperatorName:              DefaultOperatorName,
+		OperatorName:              pbtypes.DefaultOperatorName,
 		NATSServerURL:             "nats://localhost:4222",
 		BackupNATSServerURLs:      []string{},
 		
@@ -49,10 +21,10 @@ func DefaultOptions() Options {
 		DebounceInterval:          3 * time.Second,
 		LogToConsole:              true,
 		
-		DefaultOrgPublish:     DefaultOrgPublish,
-		DefaultOrgSubscribe:   DefaultOrgSubscribe,
-		DefaultUserPublish:    DefaultUserPublish,
-		DefaultUserSubscribe:  DefaultUserSubscribe,
+		DefaultOrgPublish:     pbtypes.DefaultOrgPublish,
+		DefaultOrgSubscribe:   pbtypes.DefaultOrgSubscribe,
+		DefaultUserPublish:    pbtypes.DefaultUserPublish,
+		DefaultUserSubscribe:  pbtypes.DefaultUserSubscribe,
 		
 		EventFilter:               nil, // No filter by default, process all events
 	}

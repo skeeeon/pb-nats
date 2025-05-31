@@ -9,17 +9,18 @@ import (
 	"github.com/nats-io/nkeys"
 	"github.com/pocketbase/pocketbase"
 	"github.com/skeeeon/pb-nats/internal/nkey"
+	pbtypes "github.com/skeeeon/pb-nats/internal/types"
 )
 
 // Generator handles generating NATS JWTs
 type Generator struct {
 	app         *pocketbase.PocketBase
 	nkeyManager *nkey.Manager
-	options     pbnats.Options
+	options     pbtypes.Options
 }
 
 // NewGenerator creates a new JWT generator
-func NewGenerator(app *pocketbase.PocketBase, nkeyManager *nkey.Manager, options pbnats.Options) *Generator {
+func NewGenerator(app *pocketbase.PocketBase, nkeyManager *nkey.Manager, options pbtypes.Options) *Generator {
 	return &Generator{
 		app:         app,
 		nkeyManager: nkeyManager,
@@ -28,7 +29,7 @@ func NewGenerator(app *pocketbase.PocketBase, nkeyManager *nkey.Manager, options
 }
 
 // GenerateOperatorJWT generates a JWT for the operator
-func (g *Generator) GenerateOperatorJWT(operator *pbnats.SystemOperatorRecord) (string, error) {
+func (g *Generator) GenerateOperatorJWT(operator *pbtypes.SystemOperatorRecord) (string, error) {
 	// Create operator key pair from seed
 	operatorKP, err := g.nkeyManager.KeyPairFromSeed(operator.Seed)
 	if err != nil {
@@ -52,7 +53,7 @@ func (g *Generator) GenerateOperatorJWT(operator *pbnats.SystemOperatorRecord) (
 }
 
 // GenerateAccountJWT generates a JWT for an organization (NATS account)
-func (g *Generator) GenerateAccountJWT(org *pbnats.OrganizationRecord, operatorSigningSeed string) (string, error) {
+func (g *Generator) GenerateAccountJWT(org *pbtypes.OrganizationRecord, operatorSigningSeed string) (string, error) {
 	// Create operator signing key pair
 	operatorKP, err := g.nkeyManager.KeyPairFromSeed(operatorSigningSeed)
 	if err != nil {
@@ -84,7 +85,7 @@ func (g *Generator) GenerateAccountJWT(org *pbnats.OrganizationRecord, operatorS
 }
 
 // GenerateUserJWT generates a JWT for a user
-func (g *Generator) GenerateUserJWT(user *pbnats.NatsUserRecord, org *pbnats.OrganizationRecord, role *pbnats.RoleRecord) (string, error) {
+func (g *Generator) GenerateUserJWT(user *pbtypes.NatsUserRecord, org *pbtypes.OrganizationRecord, role *pbtypes.RoleRecord) (string, error) {
 	// Create account signing key pair
 	accountKP, err := g.nkeyManager.KeyPairFromSeed(org.SigningSeed)
 	if err != nil {
@@ -122,7 +123,7 @@ func (g *Generator) GenerateUserJWT(user *pbnats.NatsUserRecord, org *pbnats.Org
 }
 
 // GenerateCredsFile generates a complete .creds file for a user
-func (g *Generator) GenerateCredsFile(user *pbnats.NatsUserRecord) (string, error) {
+func (g *Generator) GenerateCredsFile(user *pbtypes.NatsUserRecord) (string, error) {
 	if user.JWT == "" {
 		return "", fmt.Errorf("user JWT is empty, cannot generate creds file")
 	}
@@ -141,7 +142,7 @@ func (g *Generator) GenerateCredsFile(user *pbnats.NatsUserRecord) (string, erro
 }
 
 // applyRolePermissions applies role-based permissions to user claims
-func (g *Generator) applyRolePermissions(userClaims *jwt.UserClaims, user *pbnats.NatsUserRecord, org *pbnats.OrganizationRecord, role *pbnats.RoleRecord) error {
+func (g *Generator) applyRolePermissions(userClaims *jwt.UserClaims, user *pbtypes.NatsUserRecord, org *pbtypes.OrganizationRecord, role *pbtypes.RoleRecord) error {
 	orgName := org.NormalizeAccountName()
 	username := user.NatsUsername
 
@@ -166,8 +167,8 @@ func (g *Generator) applyRolePermissions(userClaims *jwt.UserClaims, user *pbnat
 	}
 
 	// Apply organization and user scoping
-	scopedPublishPerms := pbnats.ApplyUserScope(publishPerms, orgName, username)
-	scopedSubscribePerms := pbnats.ApplyUserScope(subscribePerms, orgName, username)
+	scopedPublishPerms := pbtypes.ApplyUserScope(publishPerms, orgName, username)
+	scopedSubscribePerms := pbtypes.ApplyUserScope(subscribePerms, orgName, username)
 
 	// Set permissions in claims
 	for _, perm := range scopedPublishPerms {
@@ -181,7 +182,7 @@ func (g *Generator) applyRolePermissions(userClaims *jwt.UserClaims, user *pbnat
 }
 
 // applyRoleLimits applies role-based limits to user claims
-func (g *Generator) applyRoleLimits(userClaims *jwt.UserClaims, role *pbnats.RoleRecord) {
+func (g *Generator) applyRoleLimits(userClaims *jwt.UserClaims, role *pbtypes.RoleRecord) {
 	// Apply connection limits
 	if role.MaxConnections > 0 {
 		userClaims.Limits.NatsLimits.Conn = role.MaxConnections
@@ -205,7 +206,7 @@ func (g *Generator) applyRoleLimits(userClaims *jwt.UserClaims, role *pbnats.Rol
 }
 
 // GenerateSystemAccountJWT generates a JWT for the system account
-func (g *Generator) GenerateSystemAccountJWT(sysAccount *pbnats.OrganizationRecord, operatorSigningSeed string) (string, error) {
+func (g *Generator) GenerateSystemAccountJWT(sysAccount *pbtypes.OrganizationRecord, operatorSigningSeed string) (string, error) {
 	// Create operator signing key pair
 	operatorKP, err := g.nkeyManager.KeyPairFromSeed(operatorSigningSeed)
 	if err != nil {

@@ -13,6 +13,55 @@ import (
 	"github.com/skeeeon/pb-nats/internal/nkey"
 	"github.com/skeeeon/pb-nats/internal/publisher"
 	"github.com/skeeeon/pb-nats/internal/sync"
+	pbtypes "github.com/skeeeon/pb-nats/internal/types"
+)
+
+// Re-export types for external use
+type Options = pbtypes.Options
+type OrganizationRecord = pbtypes.OrganizationRecord
+type NatsUserRecord = pbtypes.NatsUserRecord
+type RoleRecord = pbtypes.RoleRecord
+type SystemOperatorRecord = pbtypes.SystemOperatorRecord
+type PublishQueueRecord = pbtypes.PublishQueueRecord
+
+// Re-export constants for external use  
+const (
+	DefaultOrganizationCollectionName = pbtypes.DefaultOrganizationCollectionName
+	DefaultUserCollectionName         = pbtypes.DefaultUserCollectionName
+	DefaultRoleCollectionName         = pbtypes.DefaultRoleCollectionName
+	SystemOperatorCollectionName      = pbtypes.SystemOperatorCollectionName
+	PublishQueueCollectionName        = pbtypes.PublishQueueCollectionName
+	
+	DefaultOperatorName = pbtypes.DefaultOperatorName
+	
+	PublishActionUpsert = pbtypes.PublishActionUpsert
+	PublishActionDelete = pbtypes.PublishActionDelete
+	
+	EventTypeOrgCreate    = pbtypes.EventTypeOrgCreate
+	EventTypeOrgUpdate    = pbtypes.EventTypeOrgUpdate
+	EventTypeOrgDelete    = pbtypes.EventTypeOrgDelete
+	EventTypeUserCreate   = pbtypes.EventTypeUserCreate
+	EventTypeUserUpdate   = pbtypes.EventTypeUserUpdate
+	EventTypeUserDelete   = pbtypes.EventTypeUserDelete
+	EventTypeRoleCreate   = pbtypes.EventTypeRoleCreate
+	EventTypeRoleUpdate   = pbtypes.EventTypeRoleUpdate
+	EventTypeRoleDelete   = pbtypes.EventTypeRoleDelete
+	
+	DefaultOrgPublish      = pbtypes.DefaultOrgPublish
+	DefaultUserPublish     = pbtypes.DefaultUserPublish
+	DefaultInboxSubscribe  = pbtypes.DefaultInboxSubscribe
+)
+
+// Re-export variables for external use
+var (
+	DefaultOrgSubscribe  = pbtypes.DefaultOrgSubscribe
+	DefaultUserSubscribe = pbtypes.DefaultUserSubscribe
+)
+
+// Re-export utility functions
+var (
+	ApplyOrganizationScope = pbtypes.ApplyOrganizationScope
+	ApplyUserScope         = pbtypes.ApplyUserScope
 )
 
 // Setup initializes the NATS JWT synchronization for a PocketBase instance.

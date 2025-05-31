@@ -14,20 +14,20 @@ import (
 	"github.com/pocketbase/dbx"
 	"github.com/pocketbase/pocketbase"
 	"github.com/pocketbase/pocketbase/core"
-	"github.com/skeeeon/pb-nats"
+	pbtypes "github.com/skeeeon/pb-nats/internal/types"
 )
 
 // Manager handles publishing account JWTs to NATS servers
 type Manager struct {
 	app       *pocketbase.PocketBase
-	options   pbnats.Options
+	options   pbtypes.Options
 	mu        sync.Mutex
 	ctx       context.Context
 	cancelCtx context.CancelFunc
 }
 
 // NewManager creates a new account publisher
-func NewManager(app *pocketbase.PocketBase, options pbnats.Options) *Manager {
+func NewManager(app *pocketbase.PocketBase, options pbtypes.Options) *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
 	
 	return &Manager{
@@ -56,12 +56,12 @@ func (p *Manager) Stop() {
 }
 
 // PublishAccount publishes an organization's account JWT to NATS
-func (p *Manager) PublishAccount(org *pbnats.OrganizationRecord) error {
+func (p *Manager) PublishAccount(org *pbtypes.OrganizationRecord) error {
 	return p.publishAccountJWT(org.JWT, org.NormalizeAccountName())
 }
 
 // RemoveAccount removes an organization's account from NATS
-func (p *Manager) RemoveAccount(org *pbnats.OrganizationRecord) error {
+func (p *Manager) RemoveAccount(org *pbtypes.OrganizationRecord) error {
 	return p.removeAccountJWT(org.PublicKey, org.NormalizeAccountName())
 }
 
@@ -71,7 +71,7 @@ func (p *Manager) QueueAccountUpdate(orgID string, action string) error {
 	defer p.mu.Unlock()
 
 	// Check if there's already a queued operation for this organization
-	existingRecords, err := p.app.FindAllRecords(pbnats.PublishQueueCollectionName, 
+	existingRecords, err := p.app.FindAllRecords(pbtypes.PublishQueueCollectionName, 
 		dbx.HashExp{"organization_id": orgID})
 	if err != nil {
 		return fmt.Errorf("failed to check existing queue records: %w", err)
@@ -93,7 +93,7 @@ func (p *Manager) QueueAccountUpdate(orgID string, action string) error {
 		}
 	} else {
 		// Create new record
-		collection, err := p.app.FindCollectionByNameOrId(pbnats.PublishQueueCollectionName)
+		collection, err := p.app.FindCollectionByNameOrId(pbtypes.PublishQueueCollectionName)
 		if err != nil {
 			return fmt.Errorf("failed to find publish queue collection: %w", err)
 		}
@@ -121,7 +121,7 @@ func (p *Manager) ProcessPublishQueue() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	records, err := p.app.FindAllRecords(pbnats.PublishQueueCollectionName)
+	records, err := p.app.FindAllRecords(pbtypes.PublishQueueCollectionName)
 	if err != nil {
 		return fmt.Errorf("failed to find queue records: %w", err)
 	}
@@ -181,7 +181,7 @@ func (p *Manager) processQueueRecord(record *core.Record) error {
 	}
 
 	// Convert to organization record
-	orgRecord := &pbnats.OrganizationRecord{
+	orgRecord := &pbtypes.OrganizationRecord{
 		ID:                org.Id,
 		Name:              org.GetString("name"),
 		AccountName:       org.GetString("account_name"),
@@ -199,9 +199,9 @@ func (p *Manager) processQueueRecord(record *core.Record) error {
 	// Process based on action
 	var processErr error
 	switch action {
-	case pbnats.PublishActionUpsert:
+	case pbtypes.PublishActionUpsert:
 		processErr = p.PublishAccount(orgRecord)
-	case pbnats.PublishActionDelete:
+	case pbtypes.PublishActionDelete:
 		processErr = p.RemoveAccount(orgRecord)
 	default:
 		processErr = fmt.Errorf("unknown action: %s", action)
@@ -301,8 +301,8 @@ func (p *Manager) removeAccountJWT(accountPublicKey, accountName string) error {
 }
 
 // getSystemOperator gets the system operator record
-func (p *Manager) getSystemOperator() (*pbnats.SystemOperatorRecord, error) {
-	records, err := p.app.FindAllRecords(pbnats.SystemOperatorCollectionName)
+func (p *Manager) getSystemOperator() (*pbtypes.SystemOperatorRecord, error) {
+	records, err := p.app.FindAllRecords(pbtypes.SystemOperatorCollectionName)
 	if err != nil {
 		return nil, err
 	}
@@ -312,7 +312,7 @@ func (p *Manager) getSystemOperator() (*pbnats.SystemOperatorRecord, error) {
 	}
 
 	record := records[0]
-	return &pbnats.SystemOperatorRecord{
+	return &pbtypes.SystemOperatorRecord{
 		ID:                record.Id,
 		Name:              record.GetString("name"),
 		PublicKey:         record.GetString("public_key"),
@@ -326,7 +326,7 @@ func (p *Manager) getSystemOperator() (*pbnats.SystemOperatorRecord, error) {
 }
 
 // getSystemAccount gets the system account record (SYS account)
-func (p *Manager) getSystemAccount() (*pbnats.OrganizationRecord, error) {
+func (p *Manager) getSystemAccount() (*pbtypes.OrganizationRecord, error) {
 	records, err := p.app.FindAllRecords(p.options.OrganizationCollectionName,
 		dbx.HashExp{"account_name": "SYS"})
 	if err != nil {
@@ -338,7 +338,7 @@ func (p *Manager) getSystemAccount() (*pbnats.OrganizationRecord, error) {
 	}
 
 	record := records[0]
-	return &pbnats.OrganizationRecord{
+	return &pbtypes.OrganizationRecord{
 		ID:                record.Id,
 		Name:              record.GetString("name"),
 		AccountName:       record.GetString("account_name"),

@@ -1,47 +1,45 @@
 // Package pbnats provides seamless integration between PocketBase and NATS server
-// by automatically generating and managing NATS JWT authentication.
 package pbnats
 
-// Collection names
-const (
-	DefaultOrganizationCollectionName = "organizations"
-	DefaultUserCollectionName         = "nats_users"
-	DefaultRoleCollectionName         = "nats_roles"
-	SystemOperatorCollectionName      = "nats_system_operator"
-	PublishQueueCollectionName        = "nats_publish_queue"
-)
+// This file re-exports constants from internal/types for external use.
+// All constant definitions have been moved to internal/types to avoid circular imports.
+// They are re-exported in nats.go for external consumption.
 
-// Default operator name
-const (
-	DefaultOperatorName = "stone-age.io"
-)
+// The following constants are available (re-exported in nats.go):
 
-// Publishing actions for the queue
-const (
-	PublishActionUpsert = "upsert"
-	PublishActionDelete = "delete"
-)
+// Collection names:
+// - DefaultOrganizationCollectionName = "organizations"
+// - DefaultUserCollectionName = "nats_users"  
+// - DefaultRoleCollectionName = "nats_roles"
+// - SystemOperatorCollectionName = "nats_system_operator"
+// - PublishQueueCollectionName = "nats_publish_queue"
 
-// Event types for logging and filtering
-const (
-	EventTypeOrgCreate    = "org_create"
-	EventTypeOrgUpdate    = "org_update"
-	EventTypeOrgDelete    = "org_delete"
-	EventTypeUserCreate   = "user_create"
-	EventTypeUserUpdate   = "user_update"
-	EventTypeUserDelete   = "user_delete"
-	EventTypeRoleCreate   = "role_create"
-	EventTypeRoleUpdate   = "role_update"
-	EventTypeRoleDelete   = "role_delete"
-)
+// Default operator name:
+// - DefaultOperatorName = "stone-age.io"
 
-// Default permissions
-const (
-	DefaultOrgPublish      = "{org}.>"
-	DefaultUserPublish     = "{org}.user.{user}.>"
-	DefaultInboxSubscribe  = "_INBOX.>"
-)
+// Publishing actions:
+// - PublishActionUpsert = "upsert"
+// - PublishActionDelete = "delete"
 
-// Default subscribe permissions
-var DefaultOrgSubscribe = []string{"{org}.>", "_INBOX.>"}
-var DefaultUserSubscribe = []string{"{org}.>", "_INBOX.>"}
+// Event types:
+// - EventTypeOrgCreate = "org_create"
+// - EventTypeOrgUpdate = "org_update"
+// - EventTypeOrgDelete = "org_delete"
+// - EventTypeUserCreate = "user_create"
+// - EventTypeUserUpdate = "user_update"
+// - EventTypeUserDelete = "user_delete"
+// - EventTypeRoleCreate = "role_create"
+// - EventTypeRoleUpdate = "role_update"
+// - EventTypeRoleDelete = "role_delete"
+
+// Default permissions:
+// - DefaultOrgPublish = "{org}.>"
+// - DefaultUserPublish = "{org}.user.{user}.>"
+// - DefaultInboxSubscribe = "_INBOX.>"
+
+// Default subscribe permissions (variables):
+// - DefaultOrgSubscribe = []string{"{org}.>", "_INBOX.>"}
+// - DefaultUserSubscribe = []string{"{org}.>", "_INBOX.>"}
+
+// Access these constants through the main package:
+// Example: pbnats.DefaultOrganizationCollectionName
