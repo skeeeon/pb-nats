@@ -2,6 +2,7 @@
 package sync
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"sync"
@@ -179,7 +180,7 @@ func (sm *Manager) createSystemOperator() (*pbtypes.SystemOperatorRecord, error)
 	return operator, nil
 }
 
-// createSystemAccount creates the system account (SYS)
+// createSystemAccount creates the system account (SYS) and system user
 func (sm *Manager) createSystemAccount(operator *pbtypes.SystemOperatorRecord) error {
 	// Generate account keys
 	seed, public, signingKey, signingPublic, err := sm.nkeyManager.GenerateAccountKeyPair()
@@ -246,6 +247,150 @@ func (sm *Manager) createSystemAccount(operator *pbtypes.SystemOperatorRecord) e
 		log.Printf("Created system account: %s", sysAccount.AccountName)
 	}
 
+	// Now create the system user within this account
+	if err := sm.createSystemUser(record.Id); err != nil {
+		return fmt.Errorf("failed to create system user: %w", err)
+	}
+
+	// Manually place system account JWT in NATS resolver directory
+	if err := sm.publishSystemAccountToResolver(sysAccount); err != nil {
+		// Log warning but don't fail - NATS might auto-trust system accounts
+		if sm.options.LogToConsole {
+			log.Printf("Warning: Failed to publish system account to resolver: %v", err)
+		}
+	}
+
+	return nil
+}
+
+// createSystemUser creates a system user within the system account
+func (sm *Manager) createSystemUser(sysAccountID string) error {
+	// Check if system user already exists
+	existingUsers, err := sm.app.FindAllRecords(sm.options.UserCollectionName,
+		dbx.HashExp{
+			"organization_id": sysAccountID,
+			"nats_username":   "sys",
+		})
+	if err != nil {
+		return fmt.Errorf("failed to check for existing system user: %w", err)
+	}
+
+	if len(existingUsers) > 0 {
+		if sm.options.LogToConsole {
+			log.Printf("System user already exists")
+		}
+		return nil
+	}
+
+	// Create a default role for system user if it doesn't exist
+	systemRole, err := sm.createSystemRole()
+	if err != nil {
+		return fmt.Errorf("failed to create system role: %w", err)
+	}
+
+	// Generate user keys
+	seed, public, err := sm.nkeyManager.GenerateUserKeyPair()
+	if err != nil {
+		return fmt.Errorf("failed to generate system user keys: %w", err)
+	}
+
+	// Get private key
+	privateKey, err := sm.nkeyManager.GetPrivateKeyFromSeed(seed)
+	if err != nil {
+		return fmt.Errorf("failed to get system user private key: %w", err)
+	}
+
+	// Create system user record
+	collection, err := sm.app.FindCollectionByNameOrId(sm.options.UserCollectionName)
+	if err != nil {
+		return fmt.Errorf("failed to find users collection: %w", err)
+	}
+
+	record := core.NewRecord(collection)
+	record.Set("email", "sys@system.local")
+	record.Set("nats_username", "sys")
+	record.Set("description", "Automatically created system user for NATS management")
+	record.Set("organization_id", sysAccountID)
+	record.Set("role_id", systemRole.Id)
+	record.Set("public_key", public)
+	record.Set("private_key", privateKey)
+	record.Set("seed", seed)
+	record.Set("active", true)
+	record.Set("verified", true)
+
+	// Generate JWT and creds for system user
+	if err := sm.generateUserJWT(record); err != nil {
+		return fmt.Errorf("failed to generate system user JWT: %w", err)
+	}
+
+	// Save system user
+	if err := sm.app.Save(record); err != nil {
+		return fmt.Errorf("failed to save system user: %w", err)
+	}
+
+	if sm.options.LogToConsole {
+		log.Printf("Created system user: sys")
+	}
+
+	return nil
+}
+
+// createSystemRole creates a system role with full permissions
+func (sm *Manager) createSystemRole() (*core.Record, error) {
+	// Check if system role already exists
+	existingRoles, err := sm.app.FindAllRecords(sm.options.RoleCollectionName,
+		dbx.HashExp{"name": "System Administrator"})
+	if err != nil {
+		return nil, fmt.Errorf("failed to check for existing system role: %w", err)
+	}
+
+	if len(existingRoles) > 0 {
+		return existingRoles[0], nil
+	}
+
+	// Create system role with full permissions
+	collection, err := sm.app.FindCollectionByNameOrId(sm.options.RoleCollectionName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find roles collection: %w", err)
+	}
+
+	record := core.NewRecord(collection)
+	record.Set("name", "System Administrator")
+	record.Set("description", "Full system access for NATS management")
+	
+	// System role gets full access to everything
+	publishPerms := []string{"$SYS.>", ">"}  // Full system and global access
+	subscribePerms := []string{"$SYS.>", ">"}
+	
+	publishJSON, _ := json.Marshal(publishPerms)
+	subscribeJSON, _ := json.Marshal(subscribePerms)
+	
+	record.Set("publish_permissions", string(publishJSON))
+	record.Set("subscribe_permissions", string(subscribeJSON))
+	record.Set("max_connections", -1)  // Unlimited
+	record.Set("max_data", -1)         // Unlimited
+	record.Set("max_payload", -1)      // Unlimited
+
+	if err := sm.app.Save(record); err != nil {
+		return nil, fmt.Errorf("failed to save system role: %w", err)
+	}
+
+	if sm.options.LogToConsole {
+		log.Printf("Created system role: System Administrator")
+	}
+
+	return record, nil
+}
+
+// publishSystemAccountToResolver manually publishes the system account JWT
+func (sm *Manager) publishSystemAccountToResolver(sysAccount *pbtypes.OrganizationRecord) error {
+	// This would ideally write the JWT to the NATS resolver directory
+	// For now, we'll just log it so you can manually add it if needed
+	if sm.options.LogToConsole {
+		log.Printf("System Account JWT: %s", sysAccount.JWT)
+		log.Printf("System Account Public Key: %s", sysAccount.PublicKey)
+		log.Printf("You may need to place this JWT in your NATS resolver directory as: %s.jwt", sysAccount.PublicKey)
+	}
 	return nil
 }
 

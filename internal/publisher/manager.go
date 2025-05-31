@@ -223,15 +223,15 @@ func (p *Manager) processQueueRecord(record *core.Record) error {
 
 // publishAccountJWT publishes an account JWT to NATS
 func (p *Manager) publishAccountJWT(accountJWT, accountName string) error {
-	// Get system account for connection
-	sysAccount, err := p.getSystemAccount()
+	// Get system user for connection (not just system account)
+	sysUser, err := p.getSystemUser()
 	if err != nil {
-		return fmt.Errorf("failed to get system account: %w", err)
+		return fmt.Errorf("failed to get system user: %w", err)
 	}
 
-	// Connect to NATS using system account
+	// Connect to NATS using system user credentials
 	nc, err := nats.Connect(p.options.NATSServerURL,
-		nats.UserJWTAndSeed(sysAccount.JWT, sysAccount.Seed))
+		nats.UserJWTAndSeed(sysUser.JWT, sysUser.Seed))
 	if err != nil {
 		return fmt.Errorf("failed to connect to NATS: %w", err)
 	}
@@ -258,15 +258,15 @@ func (p *Manager) removeAccountJWT(accountPublicKey, accountName string) error {
 		return fmt.Errorf("failed to get system operator: %w", err)
 	}
 
-	// Get system account for connection
-	sysAccount, err := p.getSystemAccount()
+	// Get system user for connection
+	sysUser, err := p.getSystemUser()
 	if err != nil {
-		return fmt.Errorf("failed to get system account: %w", err)
+		return fmt.Errorf("failed to get system user: %w", err)
 	}
 
-	// Connect to NATS using system account
+	// Connect to NATS using system user credentials
 	nc, err := nats.Connect(p.options.NATSServerURL,
-		nats.UserJWTAndSeed(sysAccount.JWT, sysAccount.Seed))
+		nats.UserJWTAndSeed(sysUser.JWT, sysUser.Seed))
 	if err != nil {
 		return fmt.Errorf("failed to connect to NATS: %w", err)
 	}
@@ -325,7 +325,7 @@ func (p *Manager) getSystemOperator() (*pbtypes.SystemOperatorRecord, error) {
 	}, nil
 }
 
-// getSystemAccount gets the system account record (SYS account)
+// getSystemAccount gets the system account record (SYS account) and system user
 func (p *Manager) getSystemAccount() (*pbtypes.OrganizationRecord, error) {
 	records, err := p.app.FindAllRecords(p.options.OrganizationCollectionName,
 		dbx.HashExp{"account_name": "SYS"})
@@ -351,5 +351,41 @@ func (p *Manager) getSystemAccount() (*pbtypes.OrganizationRecord, error) {
 		SigningSeed:       record.GetString("signing_seed"),
 		JWT:               record.GetString("jwt"),
 		Active:            record.GetBool("active"),
+	}, nil
+}
+
+// getSystemUser gets the system user for authentication
+func (p *Manager) getSystemUser() (*pbtypes.NatsUserRecord, error) {
+	// First get the system account
+	sysAccount, err := p.getSystemAccount()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get system account: %w", err)
+	}
+
+	// Find the system user within the system account
+	userRecords, err := p.app.FindAllRecords(p.options.UserCollectionName,
+		dbx.HashExp{
+			"organization_id": sysAccount.ID,
+			"nats_username":   "sys",
+		})
+	if err != nil {
+		return nil, fmt.Errorf("failed to find system user: %w", err)
+	}
+
+	if len(userRecords) == 0 {
+		return nil, fmt.Errorf("system user not found - ensure system user is created")
+	}
+
+	record := userRecords[0]
+	return &pbtypes.NatsUserRecord{
+		ID:             record.Id,
+		NatsUsername:   record.GetString("nats_username"),
+		PublicKey:      record.GetString("public_key"),
+		Seed:           record.GetString("seed"),
+		JWT:            record.GetString("jwt"),
+		CredsFile:      record.GetString("creds_file"),
+		OrganizationID: record.GetString("organization_id"),
+		RoleID:         record.GetString("role_id"),
+		Active:         record.GetBool("active"),
 	}, nil
 }
