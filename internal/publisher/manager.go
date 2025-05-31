@@ -223,13 +223,13 @@ func (p *Manager) processQueueRecord(record *core.Record) error {
 
 // publishAccountJWT publishes an account JWT to NATS
 func (p *Manager) publishAccountJWT(accountJWT, accountName string) error {
-	// Get system user for connection (not just system account)
+	// Get system user for connection (NOT system account)
 	sysUser, err := p.getSystemUser()
 	if err != nil {
 		return fmt.Errorf("failed to get system user: %w", err)
 	}
 
-	// Connect to NATS using system user credentials
+	// Connect to NATS using system user JWT and seed
 	nc, err := nats.Connect(p.options.NATSServerURL,
 		nats.UserJWTAndSeed(sysUser.JWT, sysUser.Seed))
 	if err != nil {
@@ -258,13 +258,13 @@ func (p *Manager) removeAccountJWT(accountPublicKey, accountName string) error {
 		return fmt.Errorf("failed to get system operator: %w", err)
 	}
 
-	// Get system user for connection
+	// Get system user for connection (NOT system account)
 	sysUser, err := p.getSystemUser()
 	if err != nil {
 		return fmt.Errorf("failed to get system user: %w", err)
 	}
 
-	// Connect to NATS using system user credentials
+	// Connect to NATS using system user JWT and seed
 	nc, err := nats.Connect(p.options.NATSServerURL,
 		nats.UserJWTAndSeed(sysUser.JWT, sysUser.Seed))
 	if err != nil {
@@ -325,67 +325,45 @@ func (p *Manager) getSystemOperator() (*pbtypes.SystemOperatorRecord, error) {
 	}, nil
 }
 
-// getSystemAccount gets the system account record (SYS account) and system user
-func (p *Manager) getSystemAccount() (*pbtypes.OrganizationRecord, error) {
-	records, err := p.app.FindAllRecords(p.options.OrganizationCollectionName,
+// getSystemUser gets the system user record (NOT system account)
+// This is the key fix - we need to use a USER to connect to NATS, not an account
+func (p *Manager) getSystemUser() (*pbtypes.NatsUserRecord, error) {
+	// First find the system account
+	sysAccountRecords, err := p.app.FindAllRecords(p.options.OrganizationCollectionName,
 		dbx.HashExp{"account_name": "SYS"})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to find system account: %w", err)
 	}
 	
-	if len(records) == 0 {
+	if len(sysAccountRecords) == 0 {
 		return nil, fmt.Errorf("system account (SYS) not found")
 	}
+	
+	sysAccountID := sysAccountRecords[0].Id
 
-	record := records[0]
-	return &pbtypes.OrganizationRecord{
-		ID:                record.Id,
-		Name:              record.GetString("name"),
-		AccountName:       record.GetString("account_name"),
-		Description:       record.GetString("description"),
-		PublicKey:         record.GetString("public_key"),
-		PrivateKey:        record.GetString("private_key"),
-		Seed:              record.GetString("seed"),
-		SigningPublicKey:  record.GetString("signing_public_key"),
-		SigningPrivateKey: record.GetString("signing_private_key"),
-		SigningSeed:       record.GetString("signing_seed"),
-		JWT:               record.GetString("jwt"),
-		Active:            record.GetBool("active"),
-	}, nil
-}
-
-// getSystemUser gets the system user for authentication
-func (p *Manager) getSystemUser() (*pbtypes.NatsUserRecord, error) {
-	// First get the system account
-	sysAccount, err := p.getSystemAccount()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get system account: %w", err)
-	}
-
-	// Find the system user within the system account
-	userRecords, err := p.app.FindAllRecords(p.options.UserCollectionName,
-		dbx.HashExp{
-			"organization_id": sysAccount.ID,
-			"nats_username":   "sys",
-		})
+	// Now find the system user in that account
+	sysUserRecords, err := p.app.FindAllRecords(p.options.UserCollectionName,
+		dbx.HashExp{"nats_username": "sys", "organization_id": sysAccountID})
 	if err != nil {
 		return nil, fmt.Errorf("failed to find system user: %w", err)
 	}
-
-	if len(userRecords) == 0 {
-		return nil, fmt.Errorf("system user not found - ensure system user is created")
+	
+	if len(sysUserRecords) == 0 {
+		return nil, fmt.Errorf("system user (sys) not found")
 	}
 
-	record := userRecords[0]
+	record := sysUserRecords[0]
 	return &pbtypes.NatsUserRecord{
 		ID:             record.Id,
 		NatsUsername:   record.GetString("nats_username"),
 		PublicKey:      record.GetString("public_key"),
+		PrivateKey:     record.GetString("private_key"),
 		Seed:           record.GetString("seed"),
-		JWT:            record.GetString("jwt"),
-		CredsFile:      record.GetString("creds_file"),
 		OrganizationID: record.GetString("organization_id"),
 		RoleID:         record.GetString("role_id"),
+		JWT:            record.GetString("jwt"),
+		CredsFile:      record.GetString("creds_file"),
+		BearerToken:    record.GetBool("bearer_token"),
 		Active:         record.GetBool("active"),
 	}, nil
 }
