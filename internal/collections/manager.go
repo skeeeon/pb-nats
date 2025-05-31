@@ -209,13 +209,15 @@ func (cm *Manager) createRolesCollection() error {
 		Required: true,
 		Max:      100,
 	})
-	collection.Fields.Add(&core.JsonField{
+	collection.Fields.Add(&core.TextField{
 		Name:     "publish_permissions",
 		Required: false,
+		Max:      5000, // JSON array as text
 	})
-	collection.Fields.Add(&core.JsonField{
-		Name:     "subscribe_permissions",
+	collection.Fields.Add(&core.TextField{
+		Name:     "subscribe_permissions",  
 		Required: false,
+		Max:      5000, // JSON array as text
 	})
 	collection.Fields.Add(&core.TextField{
 		Name: "description",

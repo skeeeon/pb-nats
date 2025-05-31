@@ -28,10 +28,11 @@ func (m *Manager) GenerateOperatorKeyPair() (seed, public, signingKey, signingPu
 		return "", "", "", "", err
 	}
 
-	seed, err = operatorKP.Seed()
+	seedBytes, err := operatorKP.Seed()
 	if err != nil {
 		return "", "", "", "", err
 	}
+	seed = string(seedBytes)
 
 	// Create signing key pair for the operator
 	signingKP, err := nkeys.CreatePair(nkeys.PrefixByteOperator)
@@ -44,12 +45,13 @@ func (m *Manager) GenerateOperatorKeyPair() (seed, public, signingKey, signingPu
 		return "", "", "", "", err
 	}
 
-	signingKey, err = signingKP.Seed()
+	signingKeyBytes, err := signingKP.Seed()
 	if err != nil {
 		return "", "", "", "", err
 	}
+	signingKey = string(signingKeyBytes)
 
-	return string(seed), public, string(signingKey), signingPublic, nil
+	return seed, public, signingKey, signingPublic, nil
 }
 
 // GenerateAccountKeyPair generates a new account key pair with signing keys
@@ -65,10 +67,11 @@ func (m *Manager) GenerateAccountKeyPair() (seed, public, signingKey, signingPub
 		return "", "", "", "", err
 	}
 
-	seed, err = accountKP.Seed()
+	seedBytes, err := accountKP.Seed()
 	if err != nil {
 		return "", "", "", "", err
 	}
+	seed = string(seedBytes)
 
 	// Create signing key pair for the account
 	signingKP, err := nkeys.CreateAccount()
@@ -81,12 +84,13 @@ func (m *Manager) GenerateAccountKeyPair() (seed, public, signingKey, signingPub
 		return "", "", "", "", err
 	}
 
-	signingKey, err = signingKP.Seed()
+	signingKeyBytes, err := signingKP.Seed()
 	if err != nil {
 		return "", "", "", "", err
 	}
+	signingKey = string(signingKeyBytes)
 
-	return string(seed), public, string(signingKey), signingPublic, nil
+	return seed, public, signingKey, signingPublic, nil
 }
 
 // GenerateUserKeyPair generates a new user key pair
@@ -101,12 +105,13 @@ func (m *Manager) GenerateUserKeyPair() (seed, public string, err error) {
 		return "", "", err
 	}
 
-	seed, err = userKP.Seed()
+	seedBytes, err := userKP.Seed()
 	if err != nil {
 		return "", "", err
 	}
+	seed = string(seedBytes)
 
-	return string(seed), public, nil
+	return seed, public, nil
 }
 
 // KeyPairFromSeed creates a key pair from a seed string
@@ -121,10 +126,10 @@ func (m *Manager) GetPrivateKeyFromSeed(seed string) (string, error) {
 		return "", err
 	}
 
-	privateKey, err := kp.PrivateKey()
+	privateKeyBytes, err := kp.PrivateKey()
 	if err != nil {
 		return "", err
 	}
 
-	return string(privateKey), nil
+	return string(privateKeyBytes), nil
 }
