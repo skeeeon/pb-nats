@@ -69,26 +69,6 @@ func (sm *Manager) Setup() error {
 	return nil
 }
 
-// getSystemOperator gets the system operator
-func (sm *Manager) getSystemOperator() (*pbtypes.SystemOperatorRecord, error) {
-	records, err := sm.app.FindAllRecords(pbtypes.SystemOperatorCollectionName)
-	if err != nil {
-		return nil, err
-	}
-	
-	if len(records) == 0 {
-		return nil, fmt.Errorf("system operator not found")
-	}
-
-	record := records[0]
-	return &pbtypes.SystemOperatorRecord{
-		ID:                record.Id,
-		Name:              record.GetString("name"),
-		PublicKey:         record.GetString("public_key"),
-		SigningSeed:       record.GetString("signing_seed"),
-	}, nil
-}
-
 // checkAndFixSystemJWTs verifies system JWTs are correct and fixes them if needed
 // **NEW METHOD**: Handles existing installations that might have incorrect JWTs
 func (sm *Manager) checkAndFixSystemJWTs() error {
@@ -136,6 +116,86 @@ func indexOf(s, substr string) int {
 		}
 	}
 	return -1
+}
+
+// RegenerateSystemJWTs forces regeneration of all system JWTs
+// **NEW METHOD**: Use this to fix existing installations with incorrect JWTs
+func (sm *Manager) RegenerateSystemJWTs() error {
+	if sm.options.LogToConsole {
+		log.Printf("🔄 Force regenerating all system JWTs...")
+	}
+
+	// Get existing system operator
+	operatorRecords, err := sm.app.FindAllRecords(pbtypes.SystemOperatorCollectionName)
+	if err != nil || len(operatorRecords) == 0 {
+		return fmt.Errorf("system operator not found for regeneration")
+	}
+	operatorRecord := operatorRecords[0]
+
+	// Get existing system account
+	sysAccountRecords, err := sm.app.FindAllRecords(sm.options.OrganizationCollectionName,
+		dbx.HashExp{"account_name": "SYS"})
+	if err != nil || len(sysAccountRecords) == 0 {
+		return fmt.Errorf("system account not found for regeneration")
+	}
+	sysAccountRecord := sysAccountRecords[0]
+
+	// Create models
+	operator := &pbtypes.SystemOperatorRecord{
+		ID:                operatorRecord.Id,
+		Name:              operatorRecord.GetString("name"),
+		PublicKey:         operatorRecord.GetString("public_key"),
+		PrivateKey:        operatorRecord.GetString("private_key"),
+		Seed:              operatorRecord.GetString("seed"),
+		SigningPublicKey:  operatorRecord.GetString("signing_public_key"),
+		SigningPrivateKey: operatorRecord.GetString("signing_private_key"),
+		SigningSeed:       operatorRecord.GetString("signing_seed"),
+	}
+
+	sysAccount := &pbtypes.OrganizationRecord{
+		ID:               sysAccountRecord.Id,
+		Name:             sysAccountRecord.GetString("name"),
+		AccountName:      sysAccountRecord.GetString("account_name"),
+		PublicKey:        sysAccountRecord.GetString("public_key"),
+		PrivateKey:       sysAccountRecord.GetString("private_key"),
+		Seed:             sysAccountRecord.GetString("seed"),
+		SigningPublicKey: sysAccountRecord.GetString("signing_public_key"),
+		SigningSeed:      sysAccountRecord.GetString("signing_seed"),
+		Active:           sysAccountRecord.GetBool("active"),
+	}
+
+	// Regenerate system account JWT with proper JetStream disabled
+	sysAccountJWT, err := sm.jwtGen.GenerateSystemAccountJWT(sysAccount, operator.SigningSeed)
+	if err != nil {
+		return fmt.Errorf("failed to regenerate system account JWT: %w", err)
+	}
+
+	// Update system account record
+	sysAccountRecord.Set("jwt", sysAccountJWT)
+	if err := sm.app.Save(sysAccountRecord); err != nil {
+		return fmt.Errorf("failed to save regenerated system account JWT: %w", err)
+	}
+
+	// Regenerate operator JWT with system account reference
+	operatorJWT, err := sm.jwtGen.GenerateOperatorJWT(operator, sysAccount.PublicKey)
+	if err != nil {
+		return fmt.Errorf("failed to regenerate operator JWT: %w", err)
+	}
+
+	// Update operator record
+	operatorRecord.Set("jwt", operatorJWT)
+	if err := sm.app.Save(operatorRecord); err != nil {
+		return fmt.Errorf("failed to save regenerated operator JWT: %w", err)
+	}
+
+	if sm.options.LogToConsole {
+		log.Printf("✅ Successfully regenerated system JWTs")
+		log.Printf("   Operator JWT updated with system account: %s", sysAccount.PublicKey)
+		log.Printf("   System account JWT updated with JetStream disabled")
+		log.Printf("   Please copy the new JWTs to your NATS configuration files")
+	}
+
+	return nil
 }
 
 // initializeSystemComponents creates the system operator, account, role, and user if they don't exist
@@ -873,85 +933,8 @@ func (sm *Manager) recordToRoleModel(record *core.Record) *pbtypes.RoleRecord {
 	}
 }
 
-// RegenerateSystemJWTs forces regeneration of all system JWTs
-// **NEW METHOD**: Use this to fix existing installations with incorrect JWTs
-func (sm *Manager) RegenerateSystemJWTs() error {
-	if sm.options.LogToConsole {
-		log.Printf("🔄 Force regenerating all system JWTs...")
-	}
-
-	// Get existing system operator
-	operatorRecords, err := sm.app.FindAllRecords(pbtypes.SystemOperatorCollectionName)
-	if err != nil || len(operatorRecords) == 0 {
-		return fmt.Errorf("system operator not found for regeneration")
-	}
-	operatorRecord := operatorRecords[0]
-
-	// Get existing system account
-	sysAccountRecords, err := sm.app.FindAllRecords(sm.options.OrganizationCollectionName,
-		dbx.HashExp{"account_name": "SYS"})
-	if err != nil || len(sysAccountRecords) == 0 {
-		return fmt.Errorf("system account not found for regeneration")
-	}
-	sysAccountRecord := sysAccountRecords[0]
-
-	// Create models
-	operator := &pbtypes.SystemOperatorRecord{
-		ID:                operatorRecord.Id,
-		Name:              operatorRecord.GetString("name"),
-		PublicKey:         operatorRecord.GetString("public_key"),
-		PrivateKey:        operatorRecord.GetString("private_key"),
-		Seed:              operatorRecord.GetString("seed"),
-		SigningPublicKey:  operatorRecord.GetString("signing_public_key"),
-		SigningPrivateKey: operatorRecord.GetString("signing_private_key"),
-		SigningSeed:       operatorRecord.GetString("signing_seed"),
-	}
-
-	sysAccount := &pbtypes.OrganizationRecord{
-		ID:               sysAccountRecord.Id,
-		Name:             sysAccountRecord.GetString("name"),
-		AccountName:      sysAccountRecord.GetString("account_name"),
-		PublicKey:        sysAccountRecord.GetString("public_key"),
-		PrivateKey:       sysAccountRecord.GetString("private_key"),
-		Seed:             sysAccountRecord.GetString("seed"),
-		SigningPublicKey: sysAccountRecord.GetString("signing_public_key"),
-		SigningSeed:      sysAccountRecord.GetString("signing_seed"),
-		Active:           sysAccountRecord.GetBool("active"),
-	}
-
-	// Regenerate system account JWT with proper JetStream disabled
-	sysAccountJWT, err := sm.jwtGen.GenerateSystemAccountJWT(sysAccount, operator.SigningSeed)
-	if err != nil {
-		return fmt.Errorf("failed to regenerate system account JWT: %w", err)
-	}
-
-	// Update system account record
-	sysAccountRecord.Set("jwt", sysAccountJWT)
-	if err := sm.app.Save(sysAccountRecord); err != nil {
-		return fmt.Errorf("failed to save regenerated system account JWT: %w", err)
-	}
-
-	// Regenerate operator JWT with system account reference
-	operatorJWT, err := sm.jwtGen.GenerateOperatorJWT(operator, sysAccount.PublicKey)
-	if err != nil {
-		return fmt.Errorf("failed to regenerate operator JWT: %w", err)
-	}
-
-	// Update operator record
-	operatorRecord.Set("jwt", operatorJWT)
-	if err := sm.app.Save(operatorRecord); err != nil {
-		return fmt.Errorf("failed to save regenerated operator JWT: %w", err)
-	}
-
-	if sm.options.LogToConsole {
-		log.Printf("✅ Successfully regenerated system JWTs")
-		log.Printf("   Operator JWT updated with system account: %s", sysAccount.PublicKey)
-		log.Printf("   System account JWT updated with JetStream disabled")
-		log.Printf("   Please copy the new JWTs to your NATS configuration files")
-	}
-
-	return nil
-}
+// getSystemOperator gets the system operator
+func (sm *Manager) getSystemOperator() (*pbtypes.SystemOperatorRecord, error) {
 	records, err := sm.app.FindAllRecords(pbtypes.SystemOperatorCollectionName)
 	if err != nil {
 		return nil, err
