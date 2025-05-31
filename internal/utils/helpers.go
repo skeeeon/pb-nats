@@ -11,6 +11,32 @@ import (
 	"github.com/pocketbase/pocketbase/core"
 )
 
+// String utility functions
+// =====================
+
+// Contains checks if a string contains a substring
+func Contains(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(substr) == 0 || 
+		IndexOf(s, substr) >= 0)
+}
+
+// IndexOf finds the index of substr in s, returns -1 if not found
+func IndexOf(s, substr string) int {
+	if len(substr) == 0 {
+		return 0
+	}
+	if len(s) < len(substr) {
+		return -1
+	}
+	
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return i
+		}
+	}
+	return -1
+}
+
 // NormalizeIdentifier normalizes a string to be used as an identifier
 // Converts to lowercase, replaces spaces and special chars with underscores
 func NormalizeIdentifier(input string) string {
@@ -44,6 +70,52 @@ func NormalizeIdentifier(input string) string {
 	return normalized
 }
 
+// TruncateString truncates a string to a maximum length
+func TruncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	
+	if maxLen <= 3 {
+		return s[:maxLen]
+	}
+	
+	return s[:maxLen-3] + "..."
+}
+
+// UniqueStrings removes duplicates from a string slice
+func UniqueStrings(slice []string) []string {
+	if len(slice) <= 1 {
+		return slice
+	}
+	
+	seen := make(map[string]bool)
+	result := make([]string, 0, len(slice))
+	
+	for _, str := range slice {
+		if !seen[str] {
+			seen[str] = true
+			result = append(result, str)
+		}
+	}
+	
+	return result
+}
+
+// FilterEmptyStrings removes empty strings from a slice
+func FilterEmptyStrings(slice []string) []string {
+	result := make([]string, 0, len(slice))
+	for _, str := range slice {
+		if strings.TrimSpace(str) != "" {
+			result = append(result, str)
+		}
+	}
+	return result
+}
+
+// JSON utility functions
+// =====================
+
 // ParseJSONStringArray parses a JSON string into a string array
 func ParseJSONStringArray(jsonStr string) ([]string, error) {
 	if jsonStr == "" {
@@ -52,7 +124,7 @@ func ParseJSONStringArray(jsonStr string) ([]string, error) {
 	
 	var result []string
 	if err := json.Unmarshal([]byte(jsonStr), &result); err != nil {
-		return nil, fmt.Errorf("failed to parse JSON array: %w", err)
+		return nil, fmt.Errorf("failed to parse JSON array from %q: %w", TruncateString(jsonStr, 50), err)
 	}
 	
 	return result, nil
@@ -71,6 +143,9 @@ func StringArrayToJSON(arr []string) (string, error) {
 	
 	return string(jsonBytes), nil
 }
+
+// NATS utility functions
+// =====================
 
 // ApplySubjectScoping applies organization and user scoping to subject patterns
 func ApplySubjectScoping(subjects []string, orgName, username string) []string {
@@ -108,13 +183,16 @@ func IsValidNATSSubject(subject string) bool {
 
 // ValidateSubjects validates an array of NATS subjects
 func ValidateSubjects(subjects []string) error {
-	for _, subject := range subjects {
+	for i, subject := range subjects {
 		if !IsValidNATSSubject(subject) {
-			return fmt.Errorf("invalid NATS subject: %s", subject)
+			return fmt.Errorf("invalid NATS subject at index %d: %q", i, subject)
 		}
 	}
 	return nil
 }
+
+// PocketBase utility functions
+// ===========================
 
 // SetRecordDefaults sets default values for common fields
 func SetRecordDefaults(record *core.Record) {
@@ -170,6 +248,9 @@ func RecordToMap(record *core.Record) map[string]interface{} {
 	return result
 }
 
+// Type conversion utility functions
+// ================================
+
 // SafeString safely converts an interface to string
 func SafeString(value interface{}) string {
 	if value == nil {
@@ -210,7 +291,7 @@ func SafeInt(value interface{}) int {
 	}
 }
 
-// parseInt is a simple integer parser
+// parseInt is a simple integer parser (internal helper)
 func parseInt(s string) (int, error) {
 	result := 0
 	negative := false
@@ -228,12 +309,12 @@ func parseInt(s string) (int, error) {
 	}
 	
 	if start >= len(s) {
-		return 0, fmt.Errorf("invalid number")
+		return 0, fmt.Errorf("invalid number format")
 	}
 	
 	for i := start; i < len(s); i++ {
 		if s[i] < '0' || s[i] > '9' {
-			return 0, fmt.Errorf("invalid character")
+			return 0, fmt.Errorf("invalid character at position %d", i)
 		}
 		result = result*10 + int(s[i]-'0')
 	}
@@ -263,45 +344,56 @@ func SafeBool(value interface{}) bool {
 	}
 }
 
-// TruncateString truncates a string to a maximum length
-func TruncateString(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
+// Validation utility functions
+// ============================
+
+// ValidateRequired checks that required string fields are not empty
+func ValidateRequired(value, fieldName string) error {
+	if strings.TrimSpace(value) == "" {
+		return fmt.Errorf("%s is required and cannot be empty", fieldName)
 	}
-	
-	if maxLen <= 3 {
-		return s[:maxLen]
-	}
-	
-	return s[:maxLen-3] + "..."
+	return nil
 }
 
-// UniqueStrings removes duplicates from a string slice
-func UniqueStrings(slice []string) []string {
-	if len(slice) <= 1 {
-		return slice
+// ValidatePositiveDuration checks that a duration is positive
+func ValidatePositiveDuration(d time.Duration, fieldName string) error {
+	if d <= 0 {
+		return fmt.Errorf("%s must be positive, got: %v", fieldName, d)
 	}
-	
-	seen := make(map[string]bool)
-	result := make([]string, 0, len(slice))
-	
-	for _, str := range slice {
-		if !seen[str] {
-			seen[str] = true
-			result = append(result, str)
-		}
-	}
-	
-	return result
+	return nil
 }
 
-// FilterEmptyStrings removes empty strings from a slice
-func FilterEmptyStrings(slice []string) []string {
-	result := make([]string, 0, len(slice))
-	for _, str := range slice {
-		if strings.TrimSpace(str) != "" {
-			result = append(result, str)
-		}
+// ValidateURL performs basic URL validation
+func ValidateURL(url, fieldName string) error {
+	if url == "" {
+		return fmt.Errorf("%s cannot be empty", fieldName)
 	}
-	return result
+	
+	// Basic check for protocol
+	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") && 
+	   !strings.HasPrefix(url, "nats://") && !strings.HasPrefix(url, "tls://") {
+		return fmt.Errorf("%s must include a valid protocol (http://, https://, nats://, tls://)", fieldName)
+	}
+	
+	return nil
+}
+
+// Error utility functions  
+// =======================
+
+// WrapError wraps an error with additional context, maintaining the original error
+func WrapError(err error, context string) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%s: %w", context, err)
+}
+
+// WrapErrorf wraps an error with formatted context
+func WrapErrorf(err error, format string, args ...interface{}) error {
+	if err == nil {
+		return nil
+	}
+	context := fmt.Sprintf(format, args...)
+	return fmt.Errorf("%s: %w", context, err)
 }

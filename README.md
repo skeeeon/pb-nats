@@ -10,7 +10,7 @@ A high-performance library for seamless integration between [PocketBase](https:/
 - **🔐 Native PocketBase Security**: Leverage built-in authentication and record-level permissions
 - **📊 Role-Based Permissions**: Flexible permission system with organization scoping
 - **🔧 Zero Configuration Files**: No file management, all data stored in PocketBase database
-- **⚡ Queue-Based Publishing**: Reliable JWT publishing with retry logic
+- **⚡ Queue-Based Publishing**: Reliable JWT publishing with retry logic and debouncing
 - **🛡️ Production Ready**: Built on battle-tested patterns with comprehensive error handling
 
 ## 📈 Performance Benefits
@@ -81,11 +81,17 @@ Maps to NATS accounts and provides organization-level isolation.
 |-------|------|-------------|
 | `name` | Text | Organization display name |
 | `account_name` | Text | NATS account name (auto-normalized) |
-| `description` | Text | Description |
+| `description` | Text | Organization description |
 | `public_key` | Text | Account public key (auto-generated) |
+| `private_key` | Text | Account private key (auto-generated) |
+| `seed` | Text | Account seed (auto-generated) |
+| `signing_public_key` | Text | Account signing public key (auto-generated) |
+| `signing_private_key` | Text | Account signing private key (auto-generated) |
 | `signing_seed` | Text | Account signing seed (auto-generated) |
 | `jwt` | Text | Account JWT (auto-generated) |
 | `active` | Boolean | Whether the organization is active |
+| `created` | DateTime | Auto-managed creation timestamp |
+| `updated` | DateTime | Auto-managed update timestamp |
 
 ### 2. NATS Users Collection (`nats_users`)
 
@@ -95,13 +101,18 @@ PocketBase auth collection with NATS-specific fields.
 |-------|------|-------------|
 | `email` | Email | PocketBase email (standard auth) |
 | `password` | Password | PocketBase password (standard auth) |
+| `verified` | Boolean | PocketBase email verification status |
 | `nats_username` | Text | NATS username |
+| `description` | Text | User description |
 | `organization_id` | Relation | Link to organizations |
 | `role_id` | Relation | Link to nats_roles |
 | `public_key` | Text | User public key (auto-generated) |
+| `private_key` | Text | User private key (auto-generated) |
 | `seed` | Text | User seed (auto-generated) |
 | `jwt` | Text | User JWT (auto-generated) |
 | `creds_file` | Text | Complete .creds file (auto-generated) |
+| `bearer_token` | Boolean | Enable bearer token authentication |
+| `jwt_expires_at` | DateTime | Optional JWT expiration |
 | `active` | Boolean | Whether the user is active |
 
 ### 3. Roles Collection (`nats_roles`)
@@ -111,8 +122,10 @@ Defines permission templates for users.
 | Field | Type | Description |
 |-------|------|-------------|
 | `name` | Text | Role name |
-| `publish_permissions` | JSON | Array of publish topic patterns |
-| `subscribe_permissions` | JSON | Array of subscribe topic patterns |
+| `description` | Text | Role description |
+| `publish_permissions` | Text | JSON array of publish topic patterns |
+| `subscribe_permissions` | Text | JSON array of subscribe topic patterns |
+| `is_default` | Boolean | Whether this is a default role |
 | `max_connections` | Number | Max connections (-1 = unlimited) |
 | `max_data` | Number | Max data limit (-1 = unlimited) |
 | `max_payload` | Number | Max payload size (-1 = unlimited) |
@@ -147,6 +160,9 @@ options.OperatorName = "your-operator-name"
 options.PublishQueueInterval = 30 * time.Second  // Queue processing frequency
 options.DebounceInterval = 3 * time.Second       // Debounce rapid changes
 
+// JWT settings
+options.DefaultJWTExpiry = 24 * time.Hour        // Set expiration (0 = never expires)
+
 // Default permissions (organization-scoped)
 options.DefaultOrgPublish = "{org}.>"            // {org} gets replaced
 options.DefaultOrgSubscribe = []string{"{org}.>", "_INBOX.>"}
@@ -165,9 +181,19 @@ if err := pbnats.Setup(app, options); err != nil {
 
 ## 🔒 Security Model
 
-The library uses PocketBase's native security features:
+⚠️ **Important Security Notice**: This library stores all cryptographic keys as plaintext in the PocketBase database. This is by design for simplicity and performance, but you should secure your PocketBase database appropriately.
+
+### Database Security Requirements
+
+1. **Encrypt PocketBase Database**: Use database-level encryption
+2. **Secure Network Access**: Restrict database access to authorized systems only  
+3. **Access Controls**: Use PocketBase's built-in security rules
+4. **Backup Security**: Ensure backups are encrypted and secured
 
 ### Record-Level Security
+
+The library uses PocketBase's native security features:
+
 ```go
 // Users can only access their own NATS credentials
 collection.ViewRule = "@request.auth.id = id"
@@ -181,6 +207,7 @@ collection.ViewRule = `
 ```
 
 ### Field-Level Visibility
+
 ```go
 // Hide sensitive fields from unauthorized users
 collection.ViewRule = `
@@ -253,7 +280,7 @@ The library automatically applies organization scoping to all permissions:
 
 1. **Collection Changes**: User creates/updates organization, user, or role
 2. **JWT Generation**: Library generates appropriate JWTs using pure Go libraries
-3. **Queue Publishing**: Changes are queued for reliable processing
+3. **Queue Publishing**: Changes are queued for reliable processing with debouncing
 4. **NATS Publishing**: JWTs are published directly to NATS via `$SYS.REQ.CLAIMS.UPDATE`
 5. **Real-time Updates**: Users immediately get new permissions without server restarts
 
@@ -266,6 +293,17 @@ Queue Publishing →
 NATS Server Update → 
 Immediate Permission Changes
 ```
+
+### Initialization Order
+
+The library carefully manages initialization to prevent race conditions:
+
+1. **Collections Creation**: All required collections are created first
+2. **System Components**: Operator, system account, role, and user are initialized
+3. **JWT Generators**: Core JWT generation capabilities are set up
+4. **Publisher**: Background queue processor is started
+5. **Hooks**: PocketBase event hooks are registered
+6. **Ready**: System is ready to process changes
 
 ## 🏭 Production Setup
 
@@ -348,13 +386,16 @@ func main() {
 ### Common Issues
 
 **Q: JWTs not updating in NATS**
-A: Check that your system account has proper permissions and NATS server is reachable.
+A: Check that your system user has proper permissions and NATS server is reachable. Verify the system account JWT is properly configured.
 
 **Q: Users can't connect to NATS** 
-A: Verify the user's organization is active and role has appropriate permissions.
+A: Verify the user's organization is active and role has appropriate permissions. Check that the organization scoping is working correctly.
 
 **Q: Permission denied errors**
 A: Check that organization scoping is working correctly and permissions include the full scoped subject.
+
+**Q: Race conditions during startup**
+A: The library now has proper initialization ordering. If you still see issues, enable console logging to debug the startup sequence.
 
 ### Debug Logging
 
@@ -364,16 +405,37 @@ options.LogToConsole = true  // Enable detailed logging
 
 // Check logs for:
 // - Collection initialization  
+// - System component creation
 // - JWT generation
 // - Queue processing
 // - NATS publishing results
 ```
 
+### Error Classification
+
+The library provides comprehensive error classification:
+
+```go
+import "github.com/skeeeon/pb-nats"
+
+// Check if an error should be retried
+if pbnats.IsTemporaryError(err) {
+    // Retry operation
+}
+
+// Check error severity for logging/monitoring
+severity := pbnats.GetErrorSeverity(err)
+if severity == pbnats.SeverityCritical {
+    // Alert operations team
+}
+```
+
 ## 📚 Examples
 
 Check the `examples/` directory for:
-- `basic/` - Simple setup
-- `advanced/` - Custom configuration with pb-audit integration
+- `basic/` - Simple setup with default options
+- `advanced/` - Custom configuration with pb-audit integration  
+- `integration/` - Complete workflow demonstration
 
 ## 🤝 Contributing
 
