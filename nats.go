@@ -5,7 +5,9 @@ package pbnats
 import (
 	"fmt"
 	"log"
+	"time"
 
+	"github.com/pocketbase/dbx"
 	"github.com/pocketbase/pocketbase"
 	"github.com/pocketbase/pocketbase/core"
 	"github.com/skeeeon/pb-nats/internal/collections"
@@ -202,84 +204,457 @@ func initializeComponents(app *pocketbase.PocketBase, options Options) error {
 }
 
 // initializeSystemComponents creates system operator, account, role, and user
-// This is separated from sync manager to ensure proper initialization order
+// This is the proven working implementation adapted from the original sync/manager.go
 func initializeSystemComponents(app *pocketbase.PocketBase, jwtGen *jwt.Generator, nkeyManager *nkey.Manager, options Options) error {
-	// This logic is moved from sync/manager.go to ensure it happens at the right time
-	// in the initialization sequence, before the publisher starts processing
-	
-	systemInit := &systemComponentInitializer{
-		app:         app,
-		jwtGen:      jwtGen,
-		nkeyManager: nkeyManager,
-		options:     options,
-	}
-	
-	return systemInit.initialize()
-}
-
-// systemComponentInitializer handles the creation of system components
-type systemComponentInitializer struct {
-	app         *pocketbase.PocketBase
-	jwtGen      *jwt.Generator
-	nkeyManager *nkey.Manager
-	options     Options
-}
-
-// initialize creates all system components in the correct order
-func (sci *systemComponentInitializer) initialize() error {
-	// Create system operator first
-	operator, err := sci.ensureSystemOperator()
+	// Check if system operator exists
+	operatorRecords, err := app.FindAllRecords(pbtypes.SystemOperatorCollectionName)
 	if err != nil {
-		return fmt.Errorf("failed to ensure system operator: %w", err)
+		return fmt.Errorf("failed to find system operator records: %w", err)
 	}
 
-	// Create system account
-	sysAccountID, sysAccountPubKey, err := sci.ensureSystemAccount(operator)
+	var operator *pbtypes.SystemOperatorRecord
+	var sysAccountID string
+	var sysAccountPubKey string
+
+	if len(operatorRecords) == 0 {
+		// **WORKING INITIALIZATION FLOW** (adapted from original):
+		// 1. Create operator (without JWT initially)
+		// 2. Create system account 
+		// 3. Update operator JWT with system account reference
+		// 4. Create system role and user
+
+		// Step 1: Create system operator without JWT
+		operator, err = createSystemOperatorWithoutJWT(app, nkeyManager, options)
+		if err != nil {
+			return fmt.Errorf("failed to create system operator: %w", err)
+		}
+
+		// Step 2: Create system account
+		sysAccountID, sysAccountPubKey, err = createSystemAccount(app, jwtGen, nkeyManager, operator, options)
+		if err != nil {
+			return fmt.Errorf("failed to create system account: %w", err)
+		}
+
+		// Step 3: Update operator JWT with system account reference
+		if err := updateOperatorJWT(app, jwtGen, operator.ID, sysAccountPubKey); err != nil {
+			return fmt.Errorf("failed to update operator JWT: %w", err)
+		}
+
+		if options.LogToConsole {
+			log.Printf("✅ Created and configured system operator with system account reference")
+		}
+	} else {
+		// Use existing operator
+		record := operatorRecords[0]
+		operator = &pbtypes.SystemOperatorRecord{
+			ID:                record.Id,
+			Name:              record.GetString("name"),
+			PublicKey:         record.GetString("public_key"),
+			PrivateKey:        record.GetString("private_key"),
+			Seed:              record.GetString("seed"),
+			SigningPublicKey:  record.GetString("signing_public_key"),
+			SigningPrivateKey: record.GetString("signing_private_key"),
+			SigningSeed:       record.GetString("signing_seed"),
+			JWT:               record.GetString("jwt"),
+		}
+
+		// Check if system account exists
+		sysAccountRecords, err := app.FindAllRecords(options.OrganizationCollectionName,
+			dbx.HashExp{"account_name": "SYS"})
+		if err != nil {
+			return fmt.Errorf("failed to find system account records: %w", err)
+		}
+
+		if len(sysAccountRecords) == 0 {
+			// Create system account with existing operator
+			sysAccountID, sysAccountPubKey, err = createSystemAccount(app, jwtGen, nkeyManager, operator, options)
+			if err != nil {
+				return fmt.Errorf("failed to create system account: %w", err)
+			}
+
+			// Update operator JWT with system account reference
+			if err := updateOperatorJWT(app, jwtGen, operator.ID, sysAccountPubKey); err != nil {
+				return fmt.Errorf("failed to update operator JWT: %w", err)
+			}
+		} else {
+			sysAccountID = sysAccountRecords[0].Id
+			sysAccountPubKey = sysAccountRecords[0].GetString("public_key")
+		}
+	}
+
+	// Check if system role exists
+	sysRoleRecords, err := app.FindAllRecords(options.RoleCollectionName,
+		dbx.HashExp{"name": "system_admin"})
 	if err != nil {
-		return fmt.Errorf("failed to ensure system account: %w", err)
+		return fmt.Errorf("failed to find system role records: %w", err)
 	}
 
-	// Update operator JWT with system account reference
-	if err := sci.updateOperatorJWT(operator.ID, sysAccountPubKey); err != nil {
-		return fmt.Errorf("failed to update operator JWT: %w", err)
+	var sysRoleID string
+	if len(sysRoleRecords) == 0 {
+		// Create system role
+		sysRoleID, err = createSystemRole(app, options)
+		if err != nil {
+			return fmt.Errorf("failed to create system role: %w", err)
+		}
+	} else {
+		sysRoleID = sysRoleRecords[0].Id
 	}
 
-	// Create system role
-	sysRoleID, err := sci.ensureSystemRole()
+	// Check if system user exists
+	sysUserRecords, err := app.FindAllRecords(options.UserCollectionName,
+		dbx.HashExp{"nats_username": "sys", "organization_id": sysAccountID})
 	if err != nil {
-		return fmt.Errorf("failed to ensure system role: %w", err)
+		return fmt.Errorf("failed to find system user records: %w", err)
 	}
 
-	// Create system user
-	if err := sci.ensureSystemUser(sysAccountID, sysRoleID); err != nil {
-		return fmt.Errorf("failed to ensure system user: %w", err)
+	if len(sysUserRecords) == 0 {
+		// Create system user
+		if err := createSystemUser(app, jwtGen, nkeyManager, sysAccountID, sysRoleID, options); err != nil {
+			return fmt.Errorf("failed to create system user: %w", err)
+		}
 	}
 
 	return nil
 }
 
-// Placeholder methods - the actual implementation would be moved from sync/manager.go
-// These would contain the system component creation logic but with better error handling
-func (sci *systemComponentInitializer) ensureSystemOperator() (*pbtypes.SystemOperatorRecord, error) {
-	// Implementation would be moved from sync/manager.go
-	// This is just a placeholder to show the structure
-	return nil, fmt.Errorf("implementation needed")
+// createSystemOperatorWithoutJWT creates the system operator without generating JWT initially
+// This is the proven working implementation from the original code
+func createSystemOperatorWithoutJWT(app *pocketbase.PocketBase, nkeyManager *nkey.Manager, options Options) (*pbtypes.SystemOperatorRecord, error) {
+	// Generate operator keys
+	seed, public, signingKey, signingPublic, err := nkeyManager.GenerateOperatorKeyPair()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate operator keys: %w", err)
+	}
+
+	// Get private key
+	privateKey, err := nkeyManager.GetPrivateKeyFromSeed(seed)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get private key: %w", err)
+	}
+
+	// Get signing private key
+	signingPrivateKey, err := nkeyManager.GetPrivateKeyFromSeed(signingKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get signing private key: %w", err)
+	}
+
+	// Create operator record
+	operator := &pbtypes.SystemOperatorRecord{
+		Name:              options.OperatorName,
+		PublicKey:         public,
+		PrivateKey:        privateKey,
+		Seed:              seed,
+		SigningPublicKey:  signingPublic,
+		SigningPrivateKey: signingPrivateKey,
+		SigningSeed:       signingKey,
+		JWT:               "", // Will be generated later
+	}
+
+	// Save to database without JWT initially
+	collection, err := app.FindCollectionByNameOrId(pbtypes.SystemOperatorCollectionName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find system operator collection: %w", err)
+	}
+
+	record := core.NewRecord(collection)
+	record.Set("name", operator.Name)
+	record.Set("public_key", operator.PublicKey)
+	record.Set("private_key", operator.PrivateKey)
+	record.Set("seed", operator.Seed)
+	record.Set("signing_public_key", operator.SigningPublicKey)
+	record.Set("signing_private_key", operator.SigningPrivateKey)
+	record.Set("signing_seed", operator.SigningSeed)
+	record.Set("jwt", "") // Empty initially
+
+	if err := app.Save(record); err != nil {
+		return nil, fmt.Errorf("failed to save system operator: %w", err)
+	}
+
+	operator.ID = record.Id
+
+	if options.LogToConsole {
+		log.Printf("Created system operator (without JWT): %s", operator.Name)
+	}
+
+	return operator, nil
 }
 
-func (sci *systemComponentInitializer) ensureSystemAccount(operator *pbtypes.SystemOperatorRecord) (string, string, error) {
-	return "", "", fmt.Errorf("implementation needed")
+// updateOperatorJWT updates the operator JWT with system account reference
+// This is the proven working implementation from the original code
+func updateOperatorJWT(app *pocketbase.PocketBase, jwtGen *jwt.Generator, operatorID, systemAccountPubKey string) error {
+	// Get the operator record
+	operatorRecord, err := app.FindRecordById(pbtypes.SystemOperatorCollectionName, operatorID)
+	if err != nil {
+		return fmt.Errorf("failed to find operator record: %w", err)
+	}
+
+	// Create operator model
+	operator := &pbtypes.SystemOperatorRecord{
+		ID:                operatorRecord.Id,
+		Name:              operatorRecord.GetString("name"),
+		PublicKey:         operatorRecord.GetString("public_key"),
+		PrivateKey:        operatorRecord.GetString("private_key"),
+		Seed:              operatorRecord.GetString("seed"),
+		SigningPublicKey:  operatorRecord.GetString("signing_public_key"),
+		SigningPrivateKey: operatorRecord.GetString("signing_private_key"),
+		SigningSeed:       operatorRecord.GetString("signing_seed"),
+	}
+
+	// Generate JWT with system account reference
+	jwtValue, err := jwtGen.GenerateOperatorJWT(operator, systemAccountPubKey)
+	if err != nil {
+		return fmt.Errorf("failed to generate operator JWT: %w", err)
+	}
+
+	// Update the record
+	operatorRecord.Set("jwt", jwtValue)
+	if err := app.Save(operatorRecord); err != nil {
+		return fmt.Errorf("failed to save updated operator JWT: %w", err)
+	}
+
+	return nil
 }
 
-func (sci *systemComponentInitializer) updateOperatorJWT(operatorID, systemAccountPubKey string) error {
-	return fmt.Errorf("implementation needed")
+// createSystemAccount creates the system account (SYS)
+// This is the proven working implementation adapted from the original code
+func createSystemAccount(app *pocketbase.PocketBase, jwtGen *jwt.Generator, nkeyManager *nkey.Manager, operator *pbtypes.SystemOperatorRecord, options Options) (string, string, error) {
+	// Generate account keys
+	seed, public, signingKey, signingPublic, err := nkeyManager.GenerateAccountKeyPair()
+	if err != nil {
+		return "", "", fmt.Errorf("failed to generate account keys: %w", err)
+	}
+
+	// Get private keys
+	privateKey, err := nkeyManager.GetPrivateKeyFromSeed(seed)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to get private key: %w", err)
+	}
+
+	signingPrivateKey, err := nkeyManager.GetPrivateKeyFromSeed(signingKey)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to get signing private key: %w", err)
+	}
+
+	// Create organization record for system account
+	sysAccount := &pbtypes.OrganizationRecord{
+		Name:              "System Account",
+		AccountName:       "SYS",
+		Description:       "Automatically created system account for NATS management",
+		PublicKey:         public,
+		PrivateKey:        privateKey,
+		Seed:              seed,
+		SigningPublicKey:  signingPublic,
+		SigningPrivateKey: signingPrivateKey,
+		SigningSeed:       signingKey,
+		Active:            true,
+	}
+
+	// Generate system account JWT (special handling for SYS account)
+	jwtValue, err := jwtGen.GenerateSystemAccountJWT(sysAccount, operator.SigningSeed)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to generate system account JWT: %w", err)
+	}
+	sysAccount.JWT = jwtValue
+
+	// Save to database
+	collection, err := app.FindCollectionByNameOrId(options.OrganizationCollectionName)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to find organizations collection: %w", err)
+	}
+
+	record := core.NewRecord(collection)
+	record.Set("name", sysAccount.Name)
+	record.Set("account_name", sysAccount.AccountName)
+	record.Set("description", sysAccount.Description)
+	record.Set("public_key", sysAccount.PublicKey)
+	record.Set("private_key", sysAccount.PrivateKey)
+	record.Set("seed", sysAccount.Seed)
+	record.Set("signing_public_key", sysAccount.SigningPublicKey)
+	record.Set("signing_private_key", sysAccount.SigningPrivateKey)
+	record.Set("signing_seed", sysAccount.SigningSeed)
+	record.Set("jwt", sysAccount.JWT)
+	record.Set("active", sysAccount.Active)
+
+	if err := app.Save(record); err != nil {
+		return "", "", fmt.Errorf("failed to save system account: %w", err)
+	}
+
+	if options.LogToConsole {
+		log.Printf("Created system account: %s (Public Key: %s)", sysAccount.AccountName, sysAccount.PublicKey)
+	}
+
+	return record.Id, sysAccount.PublicKey, nil
 }
 
-func (sci *systemComponentInitializer) ensureSystemRole() (string, error) {
-	return "", fmt.Errorf("implementation needed")
+// createSystemRole creates the system role for system users
+func createSystemRole(app *pocketbase.PocketBase, options Options) (string, error) {
+	collection, err := app.FindCollectionByNameOrId(options.RoleCollectionName)
+	if err != nil {
+		return "", fmt.Errorf("failed to find roles collection: %w", err)
+	}
+
+	record := core.NewRecord(collection)
+	record.Set("name", "system_admin")
+	record.Set("description", "System administrator role with full NATS access")
+	record.Set("publish_permissions", `["$SYS.>", ">"]`)  // Full system and global access
+	record.Set("subscribe_permissions", `["$SYS.>", ">"]`) // Full system and global access
+	record.Set("is_default", false)
+	record.Set("max_connections", -1) // Unlimited
+	record.Set("max_data", -1)        // Unlimited
+	record.Set("max_payload", -1)     // Unlimited
+
+	if err := app.Save(record); err != nil {
+		return "", fmt.Errorf("failed to save system role: %w", err)
+	}
+
+	if options.LogToConsole {
+		log.Printf("Created system role: system_admin")
+	}
+
+	return record.Id, nil
 }
 
-func (sci *systemComponentInitializer) ensureSystemUser(sysAccountID, sysRoleID string) error {
-	return fmt.Errorf("implementation needed")
+// createSystemUser creates the system user for NATS connections
+func createSystemUser(app *pocketbase.PocketBase, jwtGen *jwt.Generator, nkeyManager *nkey.Manager, sysAccountID, sysRoleID string, options Options) error {
+	collection, err := app.FindCollectionByNameOrId(options.UserCollectionName)
+	if err != nil {
+		return fmt.Errorf("failed to find users collection: %w", err)
+	}
+
+	record := core.NewRecord(collection)
+	
+	// PocketBase auth fields
+	record.Set("email", "system@localhost.com")
+	record.Set("password", "system-generated-password-"+time.Now().Format("20060102150405"))
+	record.Set("verified", true)
+	
+	// NATS-specific fields
+	record.Set("nats_username", "sys")
+	record.Set("description", "System user for NATS management operations")
+	record.Set("organization_id", sysAccountID)
+	record.Set("role_id", sysRoleID)
+	record.Set("bearer_token", false)
+	record.Set("active", true)
+
+	// Generate user keys and JWT
+	if err := generateUserKeys(app, jwtGen, nkeyManager, record, options); err != nil {
+		return fmt.Errorf("failed to generate system user keys: %w", err)
+	}
+
+	if err := app.Save(record); err != nil {
+		return fmt.Errorf("failed to save system user: %w", err)
+	}
+
+	if options.LogToConsole {
+		log.Printf("Created system user: sys")
+	}
+
+	return nil
+}
+
+// generateUserKeys generates keys and JWT for a user
+// This is adapted from the working implementation in sync/manager.go
+func generateUserKeys(app *pocketbase.PocketBase, jwtGen *jwt.Generator, nkeyManager *nkey.Manager, record *core.Record, options Options) error {
+	// Skip if keys already exist
+	if record.GetString("public_key") != "" {
+		return nil
+	}
+
+	// Generate user keys
+	seed, public, err := nkeyManager.GenerateUserKeyPair()
+	if err != nil {
+		return fmt.Errorf("failed to generate user key pair: %w", err)
+	}
+
+	// Get private key
+	privateKey, err := nkeyManager.GetPrivateKeyFromSeed(seed)
+	if err != nil {
+		return fmt.Errorf("failed to get private key from seed: %w", err)
+	}
+
+	// Set the keys
+	record.Set("public_key", public)
+	record.Set("private_key", privateKey)
+	record.Set("seed", seed)
+
+	// Generate JWT and creds file
+	return generateUserJWT(app, jwtGen, record, options)
+}
+
+// generateUserJWT generates JWT and creds file for a user
+// This is adapted from the working implementation in sync/manager.go
+func generateUserJWT(app *pocketbase.PocketBase, jwtGen *jwt.Generator, record *core.Record, options Options) error {
+	// Get organization and role
+	org, err := app.FindRecordById(options.OrganizationCollectionName, record.GetString("organization_id"))
+	if err != nil {
+		return fmt.Errorf("failed to find organization %s: %w", record.GetString("organization_id"), err)
+	}
+
+	role, err := app.FindRecordById(options.RoleCollectionName, record.GetString("role_id"))
+	if err != nil {
+		return fmt.Errorf("failed to find role %s: %w", record.GetString("role_id"), err)
+	}
+
+	// Convert to models
+	user := recordToUserModel(record)
+	orgModel := recordToOrgModel(org)
+	roleModel := recordToRoleModel(role)
+
+	// Generate JWT
+	jwtValue, err := jwtGen.GenerateUserJWT(user, orgModel, roleModel)
+	if err != nil {
+		return fmt.Errorf("failed to generate user JWT: %w", err)
+	}
+
+	record.Set("jwt", jwtValue)
+	user.JWT = jwtValue
+
+	// Generate creds file
+	credsFile, err := jwtGen.GenerateCredsFile(user)
+	if err != nil {
+		return fmt.Errorf("failed to generate creds file: %w", err)
+	}
+
+	record.Set("creds_file", credsFile)
+	return nil
+}
+
+// Helper methods to convert records to models (from original sync/manager.go)
+func recordToUserModel(record *core.Record) *pbtypes.NatsUserRecord {
+	return &pbtypes.NatsUserRecord{
+		ID:             record.Id,
+		NatsUsername:   record.GetString("nats_username"),
+		PublicKey:      record.GetString("public_key"),
+		Seed:           record.GetString("seed"),
+		OrganizationID: record.GetString("organization_id"),
+		RoleID:         record.GetString("role_id"),
+		JWT:            record.GetString("jwt"),
+		BearerToken:    record.GetBool("bearer_token"),
+		Active:         record.GetBool("active"),
+	}
+}
+
+func recordToOrgModel(record *core.Record) *pbtypes.OrganizationRecord {
+	return &pbtypes.OrganizationRecord{
+		ID:               record.Id,
+		Name:             record.GetString("name"),
+		AccountName:      record.GetString("account_name"),
+		PublicKey:        record.GetString("public_key"),
+		SigningSeed:      record.GetString("signing_seed"),
+		JWT:              record.GetString("jwt"),
+	}
+}
+
+func recordToRoleModel(record *core.Record) *pbtypes.RoleRecord {
+	return &pbtypes.RoleRecord{
+		ID:                   record.Id,
+		Name:                 record.GetString("name"),
+		PublishPermissions:   []byte(record.GetString("publish_permissions")),
+		SubscribePermissions: []byte(record.GetString("subscribe_permissions")),
+		MaxConnections:       int64(record.GetInt("max_connections")),
+		MaxData:              int64(record.GetInt("max_data")),
+		MaxPayload:           int64(record.GetInt("max_payload")),
+	}
 }
 
 // validateOptions validates the provided options with consistent error handling
