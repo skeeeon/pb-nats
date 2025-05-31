@@ -9,7 +9,6 @@ import (
 
 	"github.com/pocketbase/pocketbase"
 	"github.com/pocketbase/pocketbase/core"
-	"github.com/skeeeon/pb-nats"
 	"github.com/skeeeon/pb-nats/internal/jwt"
 	"github.com/skeeeon/pb-nats/internal/nkey"
 	"github.com/skeeeon/pb-nats/internal/publisher"

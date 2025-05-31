@@ -8,7 +8,6 @@ import (
 	jwt "github.com/nats-io/jwt/v2"
 	"github.com/nats-io/nkeys"
 	"github.com/pocketbase/pocketbase"
-	"github.com/skeeeon/pb-nats"
 	"github.com/skeeeon/pb-nats/internal/nkey"
 )
 

@@ -7,7 +7,6 @@ import (
 	"github.com/pocketbase/pocketbase"
 	"github.com/pocketbase/pocketbase/core"
 	"github.com/pocketbase/pocketbase/tools/types"
-	"github.com/skeeeon/pb-nats"
 )
 
 // Manager handles collection initialization and management
