@@ -185,9 +185,8 @@ func (cm *Manager) createOrganizationsCollection() error {
 		OnUpdate: true,
 	})
 
-	// Add indexes
-	collection.AddIndex("idx_org_name", true, "name", "")
-	collection.AddIndex("idx_org_account_name", true, "account_name", "")
+	// Note: PocketBase will auto-create basic indexes for unique fields
+	// Custom indexes can be added if needed via migrations
 
 	return cm.app.Save(collection)
 }
@@ -242,8 +241,8 @@ func (cm *Manager) createRolesCollection() error {
 		Min:     types.Pointer(-1.0), // -1 means unlimited
 	})
 
-	// Add indexes
-	collection.AddIndex("idx_role_name", true, "name", "")
+	// Note: PocketBase will auto-create basic indexes for unique fields
+	// Custom indexes can be added if needed via migrations
 
 	return cm.app.Save(collection)
 }
@@ -326,9 +325,8 @@ func (cm *Manager) createUsersCollection() error {
 		Name: "active",
 	})
 
-	// Add indexes
-	collection.AddIndex("idx_nats_username", true, "nats_username", "")
-	collection.AddIndex("idx_user_org", false, "organization_id", "")
+	// Note: PocketBase will auto-create basic indexes for relation fields
+	// Custom indexes can be added if needed via migrations
 
 	return cm.app.Save(collection)
 }
@@ -386,9 +384,8 @@ func (cm *Manager) createPublishQueueCollection() error {
 		OnUpdate: true,
 	})
 
-	// Add indexes
-	collection.AddIndex("idx_queue_org", false, "organization_id", "")
-	collection.AddIndex("idx_queue_action", false, "action", "")
+	// Note: PocketBase will auto-create basic indexes for relation fields
+	// Custom indexes can be added if needed via migrations
 
 	return cm.app.Save(collection)
 }

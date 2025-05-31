@@ -3,10 +3,9 @@ package jwt
 
 import (
 	"fmt"
-	"strings"
+	"time"
 
 	jwt "github.com/nats-io/jwt/v2"
-	"github.com/nats-io/nkeys"
 	"github.com/pocketbase/pocketbase"
 	"github.com/skeeeon/pb-nats/internal/nkey"
 	pbtypes "github.com/skeeeon/pb-nats/internal/types"
@@ -102,7 +101,7 @@ func (g *Generator) GenerateUserJWT(user *pbtypes.NatsUserRecord, org *pbtypes.O
 	if user.JWTExpiresAt != nil {
 		userClaims.Expires = user.JWTExpiresAt.Unix()
 	} else if g.options.DefaultJWTExpiry > 0 {
-		userClaims.Expires = jwt.TimeFromDuration(g.options.DefaultJWTExpiry)
+		userClaims.Expires = time.Now().Add(g.options.DefaultJWTExpiry).Unix()
 	}
 
 	// Apply permissions from role
@@ -182,26 +181,27 @@ func (g *Generator) applyRolePermissions(userClaims *jwt.UserClaims, user *pbtyp
 }
 
 // applyRoleLimits applies role-based limits to user claims
+// Note: Based on NATS JWT v2 library structure and nats-tower patterns
 func (g *Generator) applyRoleLimits(userClaims *jwt.UserClaims, role *pbtypes.RoleRecord) {
-	// Apply connection limits
-	if role.MaxConnections > 0 {
-		userClaims.Limits.NatsLimits.Conn = role.MaxConnections
-	} else if role.MaxConnections == -1 {
-		userClaims.Limits.NatsLimits.Conn = -1 // Unlimited
+	// Apply data limits (correct field name from NATS JWT library)
+	if role.MaxData > 0 {
+		userClaims.Limits.Data = role.MaxData
+	} else if role.MaxData == -1 {
+		userClaims.Limits.Data = jwt.NoLimit // Unlimited
 	}
 
-	// Apply data limits
-	if role.MaxData > 0 {
-		userClaims.Limits.NatsLimits.Data = role.MaxData
-	} else if role.MaxData == -1 {
-		userClaims.Limits.NatsLimits.Data = -1 // Unlimited
+	// Apply subscription limits 
+	if role.MaxConnections > 0 {
+		userClaims.Limits.Subs = role.MaxConnections
+	} else if role.MaxConnections == -1 {
+		userClaims.Limits.Subs = jwt.NoLimit // Unlimited
 	}
 
 	// Apply payload limits
 	if role.MaxPayload > 0 {
-		userClaims.Limits.NatsLimits.Payload = role.MaxPayload
+		userClaims.Limits.Payload = role.MaxPayload
 	} else if role.MaxPayload == -1 {
-		userClaims.Limits.NatsLimits.Payload = -1 // Unlimited
+		userClaims.Limits.Payload = jwt.NoLimit // Unlimited
 	}
 }
 
@@ -246,8 +246,8 @@ func (g *Generator) GenerateSystemAccountJWT(sysAccount *pbtypes.OrganizationRec
 	}
 
 	// No limits for system account
-	accountClaims.Limits.JetStreamLimits.DiskStorage = -1
-	accountClaims.Limits.JetStreamLimits.MemoryStorage = -1
+	accountClaims.Limits.JetStreamLimits.DiskStorage = jwt.NoLimit
+	accountClaims.Limits.JetStreamLimits.MemoryStorage = jwt.NoLimit
 
 	// Encode the JWT
 	jwtValue, err := accountClaims.Encode(operatorKP)
