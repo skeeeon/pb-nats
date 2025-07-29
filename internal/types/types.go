@@ -7,19 +7,18 @@ import (
 	"time"
 )
 
-// OrganizationRecord represents an organization that maps to a NATS account
-type OrganizationRecord struct {
+// AccountRecord represents a NATS account that provides isolation boundary
+type AccountRecord struct {
 	ID                string    `json:"id"`
-	Name              string    `json:"name"`               // Display name
-	AccountName       string    `json:"account_name"`       // NATS account name (normalized)
+	Name              string    `json:"name"`                // Display name (also used as NATS account name when normalized)
 	Description       string    `json:"description"`
-	PublicKey         string    `json:"public_key"`         // Account public key
-	PrivateKey        string    `json:"private_key"`        // Account private key (plaintext)
-	Seed              string    `json:"seed"`               // Account seed (plaintext)
-	SigningPublicKey  string    `json:"signing_public_key"` // Account signing public key
-	SigningPrivateKey string    `json:"signing_private_key"`// Account signing private key (plaintext)
-	SigningSeed       string    `json:"signing_seed"`       // Account signing seed (plaintext)
-	JWT               string    `json:"jwt"`                // Generated account JWT
+	PublicKey         string    `json:"public_key"`          // Account public key
+	PrivateKey        string    `json:"private_key"`         // Account private key (plaintext)
+	Seed              string    `json:"seed"`                // Account seed (plaintext)
+	SigningPublicKey  string    `json:"signing_public_key"`  // Account signing public key
+	SigningPrivateKey string    `json:"signing_private_key"` // Account signing private key (plaintext)
+	SigningSeed       string    `json:"signing_seed"`        // Account signing seed (plaintext)
+	JWT               string    `json:"jwt"`                 // Generated account JWT
 	Active            bool      `json:"active"`
 	Created           time.Time `json:"created"`
 	Updated           time.Time `json:"updated"`
@@ -39,12 +38,13 @@ type NatsUserRecord struct {
 	PublicKey        string     `json:"public_key"`        // User public key
 	PrivateKey       string     `json:"private_key"`       // User private key (plaintext)
 	Seed             string     `json:"seed"`              // User seed (plaintext)
-	OrganizationID   string     `json:"organization_id"`   // FK to organizations
+	AccountID        string     `json:"account_id"`        // FK to accounts
 	RoleID           string     `json:"role_id"`           // FK to nats_roles
 	JWT              string     `json:"jwt"`               // Generated user JWT
 	CredsFile        string     `json:"creds_file"`        // Complete .creds file
 	BearerToken      bool       `json:"bearer_token"`      // Bearer token flag
 	JWTExpiresAt     *time.Time `json:"jwt_expires_at"`    // Optional expiration
+	Regenerate       bool       `json:"regenerate"`        // Triggers JWT regeneration when set to true
 	Active           bool       `json:"active"`
 }
 
@@ -64,35 +64,35 @@ type RoleRecord struct {
 // SystemOperatorRecord represents the system operator (single record)
 type SystemOperatorRecord struct {
 	ID                string `json:"id"`
-	Name              string `json:"name"`               // Always "stone-age.io"
-	PublicKey         string `json:"public_key"`         // Operator public key
-	PrivateKey        string `json:"private_key"`        // Operator private key (plaintext)
-	Seed              string `json:"seed"`               // Operator seed (plaintext)
-	SigningPublicKey  string `json:"signing_public_key"` // Operator signing public key
-	SigningPrivateKey string `json:"signing_private_key"`// Operator signing private key (plaintext)
-	SigningSeed       string `json:"signing_seed"`       // Operator signing seed (plaintext)
-	JWT               string `json:"jwt"`                // Generated operator JWT
+	Name              string `json:"name"`                // Default operator name
+	PublicKey         string `json:"public_key"`          // Operator public key
+	PrivateKey        string `json:"private_key"`         // Operator private key (plaintext)
+	Seed              string `json:"seed"`                // Operator seed (plaintext)
+	SigningPublicKey  string `json:"signing_public_key"`  // Operator signing public key
+	SigningPrivateKey string `json:"signing_private_key"` // Operator signing private key (plaintext)
+	SigningSeed       string `json:"signing_seed"`        // Operator signing seed (plaintext)
+	JWT               string `json:"jwt"`                 // Generated operator JWT
 	Created           time.Time `json:"created"`
 	Updated           time.Time `json:"updated"`
 }
 
 // PublishQueueRecord represents a queued account publish operation
 type PublishQueueRecord struct {
-	ID             string    `json:"id"`
-	OrganizationID string    `json:"organization_id"` // FK to organizations
-	Action         string    `json:"action"`          // "upsert" or "delete"
-	Message        string    `json:"message"`         // Error message if failed
-	Attempts       int       `json:"attempts"`        // Number of retry attempts
-	Created        time.Time `json:"created"`
-	Updated        time.Time `json:"updated"`
+	ID        string    `json:"id"`
+	AccountID string    `json:"account_id"` // FK to accounts
+	Action    string    `json:"action"`     // "upsert" or "delete"
+	Message   string    `json:"message"`    // Error message if failed
+	Attempts  int       `json:"attempts"`   // Number of retry attempts
+	Created   time.Time `json:"created"`
+	Updated   time.Time `json:"updated"`
 }
 
 // Options allows customizing the behavior of the NATS JWT synchronization
 type Options struct {
 	// Collection names
-	UserCollectionName         string
-	RoleCollectionName         string
-	OrganizationCollectionName string
+	UserCollectionName    string
+	RoleCollectionName    string
+	AccountCollectionName string
 	
 	// NATS configuration  
 	OperatorName              string
@@ -107,20 +107,20 @@ type Options struct {
 	DebounceInterval     time.Duration // Wait time after changes before processing
 	LogToConsole         bool
 	
-	// Default permissions (organization-scoped)
-	DefaultOrgPublish     string   // "{org}.>"
-	DefaultOrgSubscribe   []string // ["{org}.>", "_INBOX.>"]
-	DefaultUserPublish    string   // "{org}.user.{user}.>"
-	DefaultUserSubscribe  []string // ["{org}.>", "_INBOX.>"]
+	// Default permissions (no scoping - accounts provide isolation)
+	DefaultAccountPublish     string   // Simple subject pattern
+	DefaultAccountSubscribe   []string // Simple subject patterns
+	DefaultUserPublish        string   // Simple subject pattern
+	DefaultUserSubscribe      []string // Simple subject patterns
 	
 	// Custom event filter function
 	// Return true to process the event, false to ignore
 	EventFilter func(collectionName, eventType string) bool
 }
 
-// Collection names
+// Collection names with nats_ prefix
 const (
-	DefaultOrganizationCollectionName = "nats_accounts"
+	DefaultAccountCollectionName      = "nats_accounts"
 	DefaultUserCollectionName         = "nats_users"
 	DefaultRoleCollectionName         = "nats_roles"
 	SystemOperatorCollectionName      = "nats_system_operator"
@@ -140,22 +140,22 @@ const (
 
 // Event types for logging and filtering
 const (
-	EventTypeOrgCreate    = "org_create"
-	EventTypeOrgUpdate    = "org_update"
-	EventTypeOrgDelete    = "org_delete"
-	EventTypeUserCreate   = "user_create"
-	EventTypeUserUpdate   = "user_update"
-	EventTypeUserDelete   = "user_delete"
-	EventTypeRoleCreate   = "role_create"
-	EventTypeRoleUpdate   = "role_update"
-	EventTypeRoleDelete   = "role_delete"
+	EventTypeAccountCreate = "account_create"
+	EventTypeAccountUpdate = "account_update"
+	EventTypeAccountDelete = "account_delete"
+	EventTypeUserCreate    = "user_create"
+	EventTypeUserUpdate    = "user_update"
+	EventTypeUserDelete    = "user_delete"
+	EventTypeRoleCreate    = "role_create"
+	EventTypeRoleUpdate    = "role_update"
+	EventTypeRoleDelete    = "role_delete"
 )
 
-// Default permissions
+// Default permissions without scoping (accounts provide isolation)
 const (
-	DefaultOrgPublish      = "{org}.>"
-	DefaultUserPublish     = "{org}.user.{user}.>"
-	DefaultInboxSubscribe  = "_INBOX.>"
+	DefaultAccountPublish  = ">"           // Full access within account
+	DefaultUserPublish     = "user.>"      // User-scoped subjects within account
+	DefaultInboxSubscribe  = "_INBOX.>"    // Standard inbox pattern
 )
 
 // Timeout and retry constants to eliminate magic numbers
@@ -168,9 +168,9 @@ const (
 	DefaultProcessingTimeout  = 30 * time.Second
 )
 
-// Default subscribe permissions
-var DefaultOrgSubscribe = []string{"{org}.>", "_INBOX.>"}
-var DefaultUserSubscribe = []string{"{org}.>", "_INBOX.>"}
+// Default subscribe permissions without scoping
+var DefaultAccountSubscribe = []string{">", "_INBOX.>"}         // Full account access + inbox
+var DefaultUserSubscribe = []string{">", "_INBOX.>"}           // Full account access + inbox
 
 // GetPublishPermissions extracts the string array from the JSON field
 func (r *RoleRecord) GetPublishPermissions() ([]string, error) {
@@ -198,14 +198,11 @@ func (r *RoleRecord) GetSubscribePermissions() ([]string, error) {
 	return permissions, nil
 }
 
-// NormalizeAccountName creates a valid NATS account name from organization name
-func (o *OrganizationRecord) NormalizeAccountName() string {
-	if o.AccountName != "" {
-		return o.AccountName
-	}
-	
+// NormalizeName creates a valid NATS account name from the account name
+// Accounts provide isolation, so no additional scoping needed
+func (a *AccountRecord) NormalizeName() string {
 	// Convert to lowercase and replace spaces/special chars with underscores
-	name := strings.ToLower(o.Name)
+	name := strings.ToLower(a.Name)
 	name = strings.ReplaceAll(name, " ", "_")
 	name = strings.ReplaceAll(name, "-", "_")
 	
@@ -217,24 +214,12 @@ func (o *OrganizationRecord) NormalizeAccountName() string {
 		}
 	}
 	
-	return result.String()
-}
-
-// ApplyOrganizationScope applies organization scoping to permission patterns
-func ApplyOrganizationScope(permissions []string, orgName string) []string {
-	result := make([]string, len(permissions))
-	for i, perm := range permissions {
-		result[i] = strings.ReplaceAll(perm, "{org}", orgName)
+	normalized := result.String()
+	
+	// Ensure it's not empty
+	if normalized == "" {
+		return "unnamed_account"
 	}
-	return result
-}
-
-// ApplyUserScope applies user scoping to permission patterns
-func ApplyUserScope(permissions []string, orgName, username string) []string {
-	result := make([]string, len(permissions))
-	for i, perm := range permissions {
-		result[i] = strings.ReplaceAll(perm, "{org}", orgName)
-		result[i] = strings.ReplaceAll(result[i], "{user}", username)
-	}
-	return result
+	
+	return normalized
 }

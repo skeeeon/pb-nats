@@ -20,7 +20,7 @@ import (
 
 // Re-export types for external use
 type Options = pbtypes.Options
-type OrganizationRecord = pbtypes.OrganizationRecord
+type AccountRecord = pbtypes.AccountRecord
 type NatsUserRecord = pbtypes.NatsUserRecord
 type RoleRecord = pbtypes.RoleRecord
 type SystemOperatorRecord = pbtypes.SystemOperatorRecord
@@ -28,7 +28,7 @@ type PublishQueueRecord = pbtypes.PublishQueueRecord
 
 // Re-export constants for external use  
 const (
-	DefaultOrganizationCollectionName = pbtypes.DefaultOrganizationCollectionName
+	DefaultAccountCollectionName      = pbtypes.DefaultAccountCollectionName
 	DefaultUserCollectionName         = pbtypes.DefaultUserCollectionName
 	DefaultRoleCollectionName         = pbtypes.DefaultRoleCollectionName
 	SystemOperatorCollectionName      = pbtypes.SystemOperatorCollectionName
@@ -39,31 +39,25 @@ const (
 	PublishActionUpsert = pbtypes.PublishActionUpsert
 	PublishActionDelete = pbtypes.PublishActionDelete
 	
-	EventTypeOrgCreate    = pbtypes.EventTypeOrgCreate
-	EventTypeOrgUpdate    = pbtypes.EventTypeOrgUpdate
-	EventTypeOrgDelete    = pbtypes.EventTypeOrgDelete
-	EventTypeUserCreate   = pbtypes.EventTypeUserCreate
-	EventTypeUserUpdate   = pbtypes.EventTypeUserUpdate
-	EventTypeUserDelete   = pbtypes.EventTypeUserDelete
-	EventTypeRoleCreate   = pbtypes.EventTypeRoleCreate
-	EventTypeRoleUpdate   = pbtypes.EventTypeRoleUpdate
-	EventTypeRoleDelete   = pbtypes.EventTypeRoleDelete
+	EventTypeAccountCreate = pbtypes.EventTypeAccountCreate
+	EventTypeAccountUpdate = pbtypes.EventTypeAccountUpdate
+	EventTypeAccountDelete = pbtypes.EventTypeAccountDelete
+	EventTypeUserCreate    = pbtypes.EventTypeUserCreate
+	EventTypeUserUpdate    = pbtypes.EventTypeUserUpdate
+	EventTypeUserDelete    = pbtypes.EventTypeUserDelete
+	EventTypeRoleCreate    = pbtypes.EventTypeRoleCreate
+	EventTypeRoleUpdate    = pbtypes.EventTypeRoleUpdate
+	EventTypeRoleDelete    = pbtypes.EventTypeRoleDelete
 	
-	DefaultOrgPublish      = pbtypes.DefaultOrgPublish
+	DefaultAccountPublish  = pbtypes.DefaultAccountPublish
 	DefaultUserPublish     = pbtypes.DefaultUserPublish
 	DefaultInboxSubscribe  = pbtypes.DefaultInboxSubscribe
 )
 
 // Re-export variables for external use
 var (
-	DefaultOrgSubscribe  = pbtypes.DefaultOrgSubscribe
-	DefaultUserSubscribe = pbtypes.DefaultUserSubscribe
-)
-
-// Re-export utility functions
-var (
-	ApplyOrganizationScope = pbtypes.ApplyOrganizationScope
-	ApplyUserScope         = pbtypes.ApplyUserScope
+	DefaultAccountSubscribe = pbtypes.DefaultAccountSubscribe
+	DefaultUserSubscribe    = pbtypes.DefaultUserSubscribe
 )
 
 // Setup initializes the NATS JWT synchronization for a PocketBase instance.
@@ -110,7 +104,7 @@ func Setup(app *pocketbase.PocketBase, options Options) error {
 	logger.Start("PocketBase NATS JWT sync scheduled for initialization")
 	logger.Info("   User collection: %s", options.UserCollectionName)
 	logger.Info("   Role collection: %s", options.RoleCollectionName)
-	logger.Info("   Organization collection: %s", options.OrganizationCollectionName)
+	logger.Info("   Account collection: %s", options.AccountCollectionName)
 	logger.Info("   NATS server: %s", options.NATSServerURL)
 	logger.Info("   Operator: %s", options.OperatorName)
 
@@ -225,8 +219,8 @@ func initializeSystemComponents(app *pocketbase.PocketBase, jwtGen *jwt.Generato
 		}
 
 		// Check if system account exists
-		sysAccountRecords, err := app.FindAllRecords(options.OrganizationCollectionName,
-			dbx.HashExp{"account_name": "SYS"})
+		sysAccountRecords, err := app.FindAllRecords(options.AccountCollectionName,
+			dbx.HashExp{"name": "System Account"})
 		if err != nil {
 			return utils.WrapError(err, "failed to find system account records")
 		}
@@ -268,7 +262,7 @@ func initializeSystemComponents(app *pocketbase.PocketBase, jwtGen *jwt.Generato
 
 	// Check if system user exists
 	sysUserRecords, err := app.FindAllRecords(options.UserCollectionName,
-		dbx.HashExp{"nats_username": "sys", "organization_id": sysAccountID})
+		dbx.HashExp{"nats_username": "sys", "account_id": sysAccountID})
 	if err != nil {
 		return utils.WrapError(err, "failed to find system user records")
 	}
@@ -399,10 +393,9 @@ func createSystemAccount(app *pocketbase.PocketBase, jwtGen *jwt.Generator, nkey
 		return "", "", utils.WrapError(err, "failed to get signing private key")
 	}
 
-	// Create organization record for system account
-	sysAccount := &pbtypes.OrganizationRecord{
+	// Create account record for system account
+	sysAccount := &pbtypes.AccountRecord{
 		Name:              "System Account",
-		AccountName:       "SYS",
 		Description:       "Automatically created system account for NATS management",
 		PublicKey:         public,
 		PrivateKey:        privateKey,
@@ -421,14 +414,13 @@ func createSystemAccount(app *pocketbase.PocketBase, jwtGen *jwt.Generator, nkey
 	sysAccount.JWT = jwtValue
 
 	// Save to database
-	collection, err := app.FindCollectionByNameOrId(options.OrganizationCollectionName)
+	collection, err := app.FindCollectionByNameOrId(options.AccountCollectionName)
 	if err != nil {
-		return "", "", utils.WrapError(err, "failed to find organizations collection")
+		return "", "", utils.WrapError(err, "failed to find accounts collection")
 	}
 
 	record := core.NewRecord(collection)
 	record.Set("name", sysAccount.Name)
-	record.Set("account_name", sysAccount.AccountName)
 	record.Set("description", sysAccount.Description)
 	record.Set("public_key", sysAccount.PublicKey)
 	record.Set("private_key", sysAccount.PrivateKey)
@@ -443,7 +435,7 @@ func createSystemAccount(app *pocketbase.PocketBase, jwtGen *jwt.Generator, nkey
 		return "", "", utils.WrapError(err, "failed to save system account")
 	}
 
-	logger.Success("Created system account: %s (Public Key: %s)", sysAccount.AccountName, sysAccount.PublicKey)
+	logger.Success("Created system account: %s (Public Key: %s)", sysAccount.NormalizeName(), sysAccount.PublicKey)
 
 	return record.Id, sysAccount.PublicKey, nil
 }
@@ -491,9 +483,10 @@ func createSystemUser(app *pocketbase.PocketBase, jwtGen *jwt.Generator, nkeyMan
 	// NATS-specific fields
 	record.Set("nats_username", "sys")
 	record.Set("description", "System user for NATS management operations")
-	record.Set("organization_id", sysAccountID)
+	record.Set("account_id", sysAccountID)
 	record.Set("role_id", sysRoleID)
 	record.Set("bearer_token", false)
+	record.Set("regenerate", false)
 	record.Set("active", true)
 
 	// Generate user keys and JWT
@@ -542,10 +535,10 @@ func generateUserKeys(app *pocketbase.PocketBase, jwtGen *jwt.Generator, nkeyMan
 // generateUserJWT generates JWT and creds file for a user
 // This is adapted from the working implementation in sync/manager.go
 func generateUserJWT(app *pocketbase.PocketBase, jwtGen *jwt.Generator, record *core.Record, options Options) error {
-	// Get organization and role
-	org, err := app.FindRecordById(options.OrganizationCollectionName, record.GetString("organization_id"))
+	// Get account and role
+	account, err := app.FindRecordById(options.AccountCollectionName, record.GetString("account_id"))
 	if err != nil {
-		return utils.WrapErrorf(err, "failed to find organization %s", record.GetString("organization_id"))
+		return utils.WrapErrorf(err, "failed to find account %s", record.GetString("account_id"))
 	}
 
 	role, err := app.FindRecordById(options.RoleCollectionName, record.GetString("role_id"))
@@ -555,11 +548,11 @@ func generateUserJWT(app *pocketbase.PocketBase, jwtGen *jwt.Generator, record *
 
 	// Convert to models
 	user := recordToUserModel(record)
-	orgModel := recordToOrgModel(org)
+	accountModel := recordToAccountModel(account)
 	roleModel := recordToRoleModel(role)
 
 	// Generate JWT
-	jwtValue, err := jwtGen.GenerateUserJWT(user, orgModel, roleModel)
+	jwtValue, err := jwtGen.GenerateUserJWT(user, accountModel, roleModel)
 	if err != nil {
 		return utils.WrapError(err, "failed to generate user JWT")
 	}
@@ -580,23 +573,23 @@ func generateUserJWT(app *pocketbase.PocketBase, jwtGen *jwt.Generator, record *
 // Helper methods to convert records to models (from original sync/manager.go)
 func recordToUserModel(record *core.Record) *pbtypes.NatsUserRecord {
 	return &pbtypes.NatsUserRecord{
-		ID:             record.Id,
-		NatsUsername:   record.GetString("nats_username"),
-		PublicKey:      record.GetString("public_key"),
-		Seed:           record.GetString("seed"),
-		OrganizationID: record.GetString("organization_id"),
-		RoleID:         record.GetString("role_id"),
-		JWT:            record.GetString("jwt"),
-		BearerToken:    record.GetBool("bearer_token"),
-		Active:         record.GetBool("active"),
+		ID:           record.Id,
+		NatsUsername: record.GetString("nats_username"),
+		PublicKey:    record.GetString("public_key"),
+		Seed:         record.GetString("seed"),
+		AccountID:    record.GetString("account_id"),
+		RoleID:       record.GetString("role_id"),
+		JWT:          record.GetString("jwt"),
+		BearerToken:  record.GetBool("bearer_token"),
+		Active:       record.GetBool("active"),
+		Regenerate:   record.GetBool("regenerate"),
 	}
 }
 
-func recordToOrgModel(record *core.Record) *pbtypes.OrganizationRecord {
-	return &pbtypes.OrganizationRecord{
+func recordToAccountModel(record *core.Record) *pbtypes.AccountRecord {
+	return &pbtypes.AccountRecord{
 		ID:               record.Id,
 		Name:             record.GetString("name"),
-		AccountName:      record.GetString("account_name"),
 		PublicKey:        record.GetString("public_key"),
 		SigningSeed:      record.GetString("signing_seed"),
 		JWT:              record.GetString("jwt"),
@@ -625,7 +618,7 @@ func validateOptions(options Options) error {
 		return err
 	}
 	
-	if err := utils.ValidateRequired(options.OrganizationCollectionName, "organization collection name"); err != nil {
+	if err := utils.ValidateRequired(options.AccountCollectionName, "account collection name"); err != nil {
 		return err
 	}
 	
@@ -661,8 +654,8 @@ func GetDefaultOperatorName() string {
 }
 
 // GetDefaultCollectionNames returns the default collection names
-func GetDefaultCollectionNames() (user, role, org string) {
-	return DefaultUserCollectionName, DefaultRoleCollectionName, DefaultOrganizationCollectionName
+func GetDefaultCollectionNames() (user, role, account string) {
+	return DefaultUserCollectionName, DefaultRoleCollectionName, DefaultAccountCollectionName
 }
 
 // Version information

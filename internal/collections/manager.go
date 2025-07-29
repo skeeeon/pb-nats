@@ -31,8 +31,8 @@ func (cm *Manager) InitializeCollections() error {
 		return fmt.Errorf("failed to create system operator collection: %w", err)
 	}
 	
-	if err := cm.createOrganizationsCollection(); err != nil {
-		return fmt.Errorf("failed to create organizations collection: %w", err)
+	if err := cm.createAccountsCollection(); err != nil {
+		return fmt.Errorf("failed to create accounts collection: %w", err)
 	}
 	
 	if err := cm.createRolesCollection(); err != nil {
@@ -123,18 +123,18 @@ func (cm *Manager) createSystemOperatorCollection() error {
 	return cm.app.Save(collection)
 }
 
-// createOrganizationsCollection creates the organizations collection
-func (cm *Manager) createOrganizationsCollection() error {
+// createAccountsCollection creates the NATS accounts collection
+func (cm *Manager) createAccountsCollection() error {
 	// Check if collection already exists
-	_, err := cm.app.FindCollectionByNameOrId(cm.options.OrganizationCollectionName)
+	_, err := cm.app.FindCollectionByNameOrId(cm.options.AccountCollectionName)
 	if err == nil {
 		// Collection already exists
 		return nil
 	}
 
-	collection := core.NewBaseCollection(cm.options.OrganizationCollectionName)
+	collection := core.NewBaseCollection(cm.options.AccountCollectionName)
 	
-	// Security rules - authenticated users can list/view active orgs
+	// Security rules - authenticated users can list/view active accounts
 	// Only authenticated users with proper permissions can create/update/delete
 	collection.ListRule = types.Pointer("@request.auth.id != '' && active = true")
 	collection.ViewRule = types.Pointer("@request.auth.id != '' && active = true")
@@ -147,10 +147,6 @@ func (cm *Manager) createOrganizationsCollection() error {
 		Name:     "name",
 		Required: true,
 		Max:      100,
-	})
-	collection.Fields.Add(&core.TextField{
-		Name: "account_name",
-		Max:  100,
 	})
 	collection.Fields.Add(&core.TextField{
 		Name: "description",
@@ -281,10 +277,6 @@ func (cm *Manager) createUsersCollection() error {
 	collection.UpdateRule = types.Pointer("@request.auth.id = id")
 	collection.DeleteRule = types.Pointer("@request.auth.id = id")
 
-	// We need to get the organizations and roles collections after they're created
-	// This is a bit tricky since we have a dependency chain
-	// We'll handle this by looking up the collections when we save this one
-
 	// Add NATS-specific fields
 	collection.Fields.Add(&core.TextField{
 		Name:     "nats_username",
@@ -308,16 +300,15 @@ func (cm *Manager) createUsersCollection() error {
 		Max:  200,
 	})
 
-	// We need to add the relation fields after we save the collection
-	// because we need the collection IDs
+	// Save collection first to get ID for relations
 	if err := cm.app.Save(collection); err != nil {
 		return fmt.Errorf("failed to save user collection: %w", err)
 	}
 
 	// Now add relation fields
-	orgsCollection, err := cm.app.FindCollectionByNameOrId(cm.options.OrganizationCollectionName)
+	accountsCollection, err := cm.app.FindCollectionByNameOrId(cm.options.AccountCollectionName)
 	if err != nil {
-		return fmt.Errorf("organizations collection not found: %w", err)
+		return fmt.Errorf("accounts collection not found: %w", err)
 	}
 
 	rolesCollection, err := cm.app.FindCollectionByNameOrId(cm.options.RoleCollectionName)
@@ -326,10 +317,10 @@ func (cm *Manager) createUsersCollection() error {
 	}
 
 	collection.Fields.Add(&core.RelationField{
-		Name:          "organization_id",
+		Name:          "account_id",
 		Required:      true,
 		MaxSelect:     1,
-		CollectionId:  orgsCollection.Id,
+		CollectionId:  accountsCollection.Id,
 		CascadeDelete: false,
 	})
 	collection.Fields.Add(&core.RelationField{
@@ -352,6 +343,10 @@ func (cm *Manager) createUsersCollection() error {
 	})
 	collection.Fields.Add(&core.DateField{
 		Name: "jwt_expires_at",
+	})
+	// Add regenerate field to trigger JWT regeneration
+	collection.Fields.Add(&core.BoolField{
+		Name: "regenerate",
 	})
 	collection.Fields.Add(&core.BoolField{
 		Name: "active",
@@ -384,18 +379,18 @@ func (cm *Manager) createPublishQueueCollection() error {
 		return fmt.Errorf("failed to save publish queue collection: %w", err)
 	}
 
-	// Get organizations collection for relation
-	orgsCollection, err := cm.app.FindCollectionByNameOrId(cm.options.OrganizationCollectionName)
+	// Get accounts collection for relation
+	accountsCollection, err := cm.app.FindCollectionByNameOrId(cm.options.AccountCollectionName)
 	if err != nil {
-		return fmt.Errorf("organizations collection not found: %w", err)
+		return fmt.Errorf("accounts collection not found: %w", err)
 	}
 
 	// Add fields
 	collection.Fields.Add(&core.RelationField{
-		Name:          "organization_id",
+		Name:          "account_id",
 		Required:      true,
 		MaxSelect:     1,
-		CollectionId:  orgsCollection.Id,
+		CollectionId:  accountsCollection.Id,
 		CascadeDelete: true,
 	})
 	collection.Fields.Add(&core.SelectField{

@@ -64,8 +64,8 @@ func (g *Generator) GenerateOperatorJWTWithoutSystemAccount(operator *pbtypes.Sy
 	return g.GenerateOperatorJWT(operator, "")
 }
 
-// GenerateAccountJWT generates a JWT for an organization (NATS account)
-func (g *Generator) GenerateAccountJWT(org *pbtypes.OrganizationRecord, operatorSigningSeed string) (string, error) {
+// GenerateAccountJWT generates a JWT for an account
+func (g *Generator) GenerateAccountJWT(account *pbtypes.AccountRecord, operatorSigningSeed string) (string, error) {
 	// Create operator signing key pair
 	operatorKP, err := g.nkeyManager.KeyPairFromSeed(operatorSigningSeed)
 	if err != nil {
@@ -73,11 +73,11 @@ func (g *Generator) GenerateAccountJWT(org *pbtypes.OrganizationRecord, operator
 	}
 
 	// Create account claims
-	accountClaims := jwt.NewAccountClaims(org.PublicKey)
-	accountClaims.Name = org.NormalizeAccountName()
+	accountClaims := jwt.NewAccountClaims(account.PublicKey)
+	accountClaims.Name = account.NormalizeName()
 	
 	// Add signing key
-	accountClaims.SigningKeys.Add(org.SigningPublicKey)
+	accountClaims.SigningKeys.Add(account.SigningPublicKey)
 
 	// Set default limits (unlimited)
 	accountClaims.Limits.JetStreamLimits.DiskStorage = -1
@@ -96,10 +96,10 @@ func (g *Generator) GenerateAccountJWT(org *pbtypes.OrganizationRecord, operator
 	return jwtValue, nil
 }
 
-// GenerateUserJWT generates a JWT for a user
-func (g *Generator) GenerateUserJWT(user *pbtypes.NatsUserRecord, org *pbtypes.OrganizationRecord, role *pbtypes.RoleRecord) (string, error) {
+// GenerateUserJWT generates a JWT for a user within an account
+func (g *Generator) GenerateUserJWT(user *pbtypes.NatsUserRecord, account *pbtypes.AccountRecord, role *pbtypes.RoleRecord) (string, error) {
 	// Create account signing key pair
-	accountKP, err := g.nkeyManager.KeyPairFromSeed(org.SigningSeed)
+	accountKP, err := g.nkeyManager.KeyPairFromSeed(account.SigningSeed)
 	if err != nil {
 		return "", fmt.Errorf("failed to create account signing key pair: %w", err)
 	}
@@ -107,7 +107,7 @@ func (g *Generator) GenerateUserJWT(user *pbtypes.NatsUserRecord, org *pbtypes.O
 	// Create user claims
 	userClaims := jwt.NewUserClaims(user.PublicKey)
 	userClaims.Name = user.NatsUsername
-	userClaims.IssuerAccount = org.PublicKey
+	userClaims.IssuerAccount = account.PublicKey
 	userClaims.BearerToken = user.BearerToken
 
 	// Set expiration if specified
@@ -117,8 +117,8 @@ func (g *Generator) GenerateUserJWT(user *pbtypes.NatsUserRecord, org *pbtypes.O
 		userClaims.Expires = time.Now().Add(g.options.DefaultJWTExpiry).Unix()
 	}
 
-	// Apply permissions from role
-	if err := g.applyRolePermissions(userClaims, user, org, role); err != nil {
+	// Apply permissions from role (no scoping - account provides isolation)
+	if err := g.applyRolePermissions(userClaims, user, account, role); err != nil {
 		return "", fmt.Errorf("failed to apply role permissions: %w", err)
 	}
 
@@ -154,12 +154,13 @@ func (g *Generator) GenerateCredsFile(user *pbtypes.NatsUserRecord) (string, err
 }
 
 // isSystemUser checks if a user is a system user that needs unscoped permissions
-func (g *Generator) isSystemUser(user *pbtypes.NatsUserRecord, org *pbtypes.OrganizationRecord) bool {
-	return org.AccountName == "SYS" && user.NatsUsername == "sys"
+func (g *Generator) isSystemUser(user *pbtypes.NatsUserRecord, account *pbtypes.AccountRecord) bool {
+	return account.NormalizeName() == "SYS" && user.NatsUsername == "sys"
 }
 
 // applyRolePermissions applies role-based permissions to user claims
-func (g *Generator) applyRolePermissions(userClaims *jwt.UserClaims, user *pbtypes.NatsUserRecord, org *pbtypes.OrganizationRecord, role *pbtypes.RoleRecord) error {
+// No scoping applied - accounts provide isolation boundary
+func (g *Generator) applyRolePermissions(userClaims *jwt.UserClaims, user *pbtypes.NatsUserRecord, account *pbtypes.AccountRecord, role *pbtypes.RoleRecord) error {
 	// Get publish permissions from role
 	publishPerms, err := role.GetPublishPermissions()
 	if err != nil {
@@ -174,7 +175,7 @@ func (g *Generator) applyRolePermissions(userClaims *jwt.UserClaims, user *pbtyp
 
 	// Apply default permissions if role permissions are empty
 	if len(publishPerms) == 0 {
-		if g.isSystemUser(user, org) {
+		if g.isSystemUser(user, account) {
 			// System users get unrestricted access
 			publishPerms = []string{"$SYS.>", ">"}
 		} else {
@@ -182,7 +183,7 @@ func (g *Generator) applyRolePermissions(userClaims *jwt.UserClaims, user *pbtyp
 		}
 	}
 	if len(subscribePerms) == 0 {
-		if g.isSystemUser(user, org) {
+		if g.isSystemUser(user, account) {
 			// System users get unrestricted access
 			subscribePerms = []string{"$SYS.>", ">"}
 		} else {
@@ -190,19 +191,17 @@ func (g *Generator) applyRolePermissions(userClaims *jwt.UserClaims, user *pbtyp
 		}
 	}
 
+	// Apply permissions directly - no scoping needed since accounts provide isolation
 	var finalPublishPerms, finalSubscribePerms []string
 
-	// Check if this is a system user - if so, don't apply scoping
-	if g.isSystemUser(user, org) {
-		// System users get raw permissions without any scoping
+	if g.isSystemUser(user, account) {
+		// System users get raw permissions without any modification
 		finalPublishPerms = publishPerms
 		finalSubscribePerms = subscribePerms
 	} else {
-		// Regular users get organization and user scoping
-		orgName := org.NormalizeAccountName()
-		username := user.NatsUsername
-		finalPublishPerms = pbtypes.ApplyUserScope(publishPerms, orgName, username)
-		finalSubscribePerms = pbtypes.ApplyUserScope(subscribePerms, orgName, username)
+		// Regular users get permissions as-is within their account boundary
+		finalPublishPerms = publishPerms
+		finalSubscribePerms = subscribePerms
 	}
 
 	// Set permissions in claims
@@ -242,7 +241,7 @@ func (g *Generator) applyRoleLimits(userClaims *jwt.UserClaims, role *pbtypes.Ro
 }
 
 // GenerateSystemAccountJWT generates a JWT for the system account
-func (g *Generator) GenerateSystemAccountJWT(sysAccount *pbtypes.OrganizationRecord, operatorSigningSeed string) (string, error) {
+func (g *Generator) GenerateSystemAccountJWT(sysAccount *pbtypes.AccountRecord, operatorSigningSeed string) (string, error) {
 	// Create operator signing key pair
 	operatorKP, err := g.nkeyManager.KeyPairFromSeed(operatorSigningSeed)
 	if err != nil {

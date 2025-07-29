@@ -61,35 +61,35 @@ func (p *Manager) Stop() {
 	p.logger.Success("NATS account publisher stopped")
 }
 
-// PublishAccount publishes an organization's account JWT to NATS
-func (p *Manager) PublishAccount(org *pbtypes.OrganizationRecord) error {
-	if org == nil {
-		return utils.WrapError(fmt.Errorf("organization record is nil"), "publish account validation failed")
+// PublishAccount publishes an account's JWT to NATS
+func (p *Manager) PublishAccount(account *pbtypes.AccountRecord) error {
+	if account == nil {
+		return utils.WrapError(fmt.Errorf("account record is nil"), "publish account validation failed")
 	}
 
-	if err := p.validateOrganization(org); err != nil {
-		return utils.WrapErrorf(err, "invalid organization %s", org.ID)
+	if err := p.validateAccount(account); err != nil {
+		return utils.WrapErrorf(err, "invalid account %s", account.ID)
 	}
 
-	return p.publishAccountJWT(org.JWT, org.NormalizeAccountName())
+	return p.publishAccountJWT(account.JWT, account.NormalizeName())
 }
 
-// RemoveAccount removes an organization's account from NATS
-func (p *Manager) RemoveAccount(org *pbtypes.OrganizationRecord) error {
-	if org == nil {
-		return utils.WrapError(fmt.Errorf("organization record is nil"), "remove account validation failed")
+// RemoveAccount removes an account from NATS
+func (p *Manager) RemoveAccount(account *pbtypes.AccountRecord) error {
+	if account == nil {
+		return utils.WrapError(fmt.Errorf("account record is nil"), "remove account validation failed")
 	}
 
-	if err := p.validateOrganization(org); err != nil {
-		return utils.WrapErrorf(err, "invalid organization %s", org.ID)
+	if err := p.validateAccount(account); err != nil {
+		return utils.WrapErrorf(err, "invalid account %s", account.ID)
 	}
 
-	return p.removeAccountJWT(org.PublicKey, org.NormalizeAccountName())
+	return p.removeAccountJWT(account.PublicKey, account.NormalizeName())
 }
 
 // QueueAccountUpdate adds an account update to the publish queue with deduplication
-func (p *Manager) QueueAccountUpdate(orgID string, action string) error {
-	if err := utils.ValidateRequired(orgID, "organization ID"); err != nil {
+func (p *Manager) QueueAccountUpdate(accountID string, action string) error {
+	if err := utils.ValidateRequired(accountID, "account ID"); err != nil {
 		return utils.WrapError(err, "queue account update validation failed")
 	}
 
@@ -102,11 +102,11 @@ func (p *Manager) QueueAccountUpdate(orgID string, action string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// Check if there's already a queued operation for this organization
+	// Check if there's already a queued operation for this account
 	existingRecords, err := p.app.FindAllRecords(pbtypes.PublishQueueCollectionName, 
-		dbx.HashExp{"organization_id": orgID})
+		dbx.HashExp{"account_id": accountID})
 	if err != nil {
-		return utils.WrapErrorf(err, "failed to check existing queue records for org %s", orgID)
+		return utils.WrapErrorf(err, "failed to check existing queue records for account %s", accountID)
 	}
 
 	if len(existingRecords) > 0 {
@@ -117,17 +117,17 @@ func (p *Manager) QueueAccountUpdate(orgID string, action string) error {
 		record.Set("message", "")  // Clear previous error message
 		
 		if err := p.app.Save(record); err != nil {
-			return utils.WrapErrorf(err, "failed to update queue record for org %s", orgID)
+			return utils.WrapErrorf(err, "failed to update queue record for account %s", accountID)
 		}
 		
-		p.logger.Info("Updated queue record for org %s: action=%s", orgID, action)
+		p.logger.Info("Updated queue record for account %s: action=%s", accountID, action)
 	} else {
 		// Create new record
-		if err := p.createQueueRecord(orgID, action); err != nil {
-			return utils.WrapErrorf(err, "failed to create queue record for org %s", orgID)
+		if err := p.createQueueRecord(accountID, action); err != nil {
+			return utils.WrapErrorf(err, "failed to create queue record for account %s", accountID)
 		}
 		
-		p.logger.Info("Created queue record for org %s: action=%s", orgID, action)
+		p.logger.Info("Created queue record for account %s: action=%s", accountID, action)
 	}
 
 	return nil
@@ -186,7 +186,7 @@ func (p *Manager) processQueuePeriodically() {
 
 // processQueueRecord processes a single queue record with retry logic
 func (p *Manager) processQueueRecord(record *core.Record) error {
-	orgID := record.GetString("organization_id")
+	accountID := record.GetString("account_id")
 	action := record.GetString("action")
 	attempts := record.GetInt("attempts")
 
@@ -195,24 +195,24 @@ func (p *Manager) processQueueRecord(record *core.Record) error {
 		return nil // Don't retry further
 	}
 
-	// Get organization record
-	org, err := p.app.FindRecordById(p.options.OrganizationCollectionName, orgID)
+	// Get account record
+	account, err := p.app.FindRecordById(p.options.AccountCollectionName, accountID)
 	if err != nil {
-		// Organization might have been deleted - remove queue record
-		p.logger.Delete("Organization %s not found, removing queue record", orgID)
+		// Account might have been deleted - remove queue record
+		p.logger.Delete("Account %s not found, removing queue record", accountID)
 		return p.app.Delete(record)
 	}
 
-	// Convert to organization model
-	orgRecord := p.recordToOrgModel(org)
+	// Convert to account model
+	accountRecord := p.recordToAccountModel(account)
 
 	// Process based on action
 	var processErr error
 	switch action {
 	case pbtypes.PublishActionUpsert:
-		processErr = p.PublishAccount(orgRecord)
+		processErr = p.PublishAccount(accountRecord)
 	case pbtypes.PublishActionDelete:
-		processErr = p.RemoveAccount(orgRecord)
+		processErr = p.RemoveAccount(accountRecord)
 	default:
 		processErr = fmt.Errorf("unknown action: %s", action)
 	}
@@ -230,7 +230,7 @@ func (p *Manager) processQueueRecord(record *core.Record) error {
 	}
 
 	// Success - remove from queue
-	p.logger.Success("Successfully processed %s for organization %s", action, orgRecord.Name)
+	p.logger.Success("Successfully processed %s for account %s", action, accountRecord.Name)
 	
 	return p.app.Delete(record)
 }
@@ -331,14 +331,14 @@ func (p *Manager) removeAccountJWT(accountPublicKey, accountName string) error {
 // Helper methods
 
 // createQueueRecord creates a new queue record
-func (p *Manager) createQueueRecord(orgID, action string) error {
+func (p *Manager) createQueueRecord(accountID, action string) error {
 	collection, err := p.app.FindCollectionByNameOrId(pbtypes.PublishQueueCollectionName)
 	if err != nil {
 		return utils.WrapError(err, "failed to find publish queue collection")
 	}
 
 	record := core.NewRecord(collection)
-	record.Set("organization_id", orgID)
+	record.Set("account_id", accountID)
 	record.Set("action", action)
 	record.Set("attempts", 0)
 	record.Set("message", "")
@@ -350,43 +350,42 @@ func (p *Manager) createQueueRecord(orgID, action string) error {
 	return nil
 }
 
-// validateOrganization validates an organization record with enhanced validation
-func (p *Manager) validateOrganization(org *pbtypes.OrganizationRecord) error {
-	if err := utils.ValidateRequired(org.ID, "organization ID"); err != nil {
+// validateAccount validates an account record with enhanced validation
+func (p *Manager) validateAccount(account *pbtypes.AccountRecord) error {
+	if err := utils.ValidateRequired(account.ID, "account ID"); err != nil {
 		return err
 	}
 	
-	if err := utils.ValidateRequired(org.Name, "organization name"); err != nil {
+	if err := utils.ValidateRequired(account.Name, "account name"); err != nil {
 		return err
 	}
 	
-	if err := utils.ValidateRequired(org.PublicKey, "organization public key"); err != nil {
+	if err := utils.ValidateRequired(account.PublicKey, "account public key"); err != nil {
 		return err
 	}
 
-	if err := utils.ValidateRequired(org.JWT, "organization JWT"); err != nil {
+	if err := utils.ValidateRequired(account.JWT, "account JWT"); err != nil {
 		return err
 	}
 
-	if !org.Active {
-		return fmt.Errorf("organization %s is inactive", org.Name)
+	if !account.Active {
+		return fmt.Errorf("account %s is inactive", account.Name)
 	}
 
 	// Validate account name format
-	accountName := org.NormalizeAccountName()
+	accountName := account.NormalizeName()
 	if accountName == "" {
-		return fmt.Errorf("organization %s has invalid account name", org.Name)
+		return fmt.Errorf("account %s has invalid name", account.Name)
 	}
 
 	return nil
 }
 
-// recordToOrgModel converts a PocketBase record to an organization model
-func (p *Manager) recordToOrgModel(record *core.Record) *pbtypes.OrganizationRecord {
-	return &pbtypes.OrganizationRecord{
+// recordToAccountModel converts a PocketBase record to an account model
+func (p *Manager) recordToAccountModel(record *core.Record) *pbtypes.AccountRecord {
+	return &pbtypes.AccountRecord{
 		ID:                record.Id,
 		Name:              record.GetString("name"),
-		AccountName:       record.GetString("account_name"),
 		Description:       record.GetString("description"),
 		PublicKey:         record.GetString("public_key"),
 		PrivateKey:        record.GetString("private_key"),
@@ -443,8 +442,8 @@ func (p *Manager) getSystemOperator() (*pbtypes.SystemOperatorRecord, error) {
 // getSystemUser gets the system user record for NATS connections with enhanced validation
 func (p *Manager) getSystemUser() (*pbtypes.NatsUserRecord, error) {
 	// First find the system account
-	sysAccountRecords, err := p.app.FindAllRecords(p.options.OrganizationCollectionName,
-		dbx.HashExp{"account_name": "SYS"})
+	sysAccountRecords, err := p.app.FindAllRecords(p.options.AccountCollectionName,
+		dbx.HashExp{"name": "System Account"})
 	if err != nil {
 		return nil, utils.WrapError(err, "failed to find system account")
 	}
@@ -458,7 +457,7 @@ func (p *Manager) getSystemUser() (*pbtypes.NatsUserRecord, error) {
 
 	// Find the system user in that account
 	sysUserRecords, err := p.app.FindAllRecords(p.options.UserCollectionName,
-		dbx.HashExp{"nats_username": "sys", "organization_id": sysAccountID})
+		dbx.HashExp{"nats_username": "sys", "account_id": sysAccountID})
 	if err != nil {
 		return nil, utils.WrapError(err, "failed to find system user")
 	}
@@ -470,17 +469,17 @@ func (p *Manager) getSystemUser() (*pbtypes.NatsUserRecord, error) {
 
 	record := sysUserRecords[0]
 	user := &pbtypes.NatsUserRecord{
-		ID:             record.Id,
-		NatsUsername:   record.GetString("nats_username"),
-		PublicKey:      record.GetString("public_key"),
-		PrivateKey:     record.GetString("private_key"),
-		Seed:           record.GetString("seed"),
-		OrganizationID: record.GetString("organization_id"),
-		RoleID:         record.GetString("role_id"),
-		JWT:            record.GetString("jwt"),
-		CredsFile:      record.GetString("creds_file"),
-		BearerToken:    record.GetBool("bearer_token"),
-		Active:         record.GetBool("active"),
+		ID:           record.Id,
+		NatsUsername: record.GetString("nats_username"),
+		PublicKey:    record.GetString("public_key"),
+		PrivateKey:   record.GetString("private_key"),
+		Seed:         record.GetString("seed"),
+		AccountID:    record.GetString("account_id"),
+		RoleID:       record.GetString("role_id"),
+		JWT:          record.GetString("jwt"),
+		CredsFile:    record.GetString("creds_file"),
+		BearerToken:  record.GetBool("bearer_token"),
+		Active:       record.GetBool("active"),
 	}
 
 	// Enhanced validation for critical fields

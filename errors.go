@@ -23,9 +23,9 @@ var (
 	ErrJWTInvalid    = errors.New("invalid JWT")
 	ErrJWTExpired    = errors.New("JWT expired")
 
-	// Organization errors
-	ErrOrganizationNotFound   = errors.New("organization not found")
-	ErrOrganizationInactive   = errors.New("organization is inactive")
+	// Account errors (updated terminology)
+	ErrAccountNotFound        = errors.New("account not found")
+	ErrAccountInactive        = errors.New("account is inactive")
 	ErrSystemAccountProtected = errors.New("cannot modify system account")
 
 	// User errors

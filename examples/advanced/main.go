@@ -31,7 +31,7 @@ func main() {
 	// Use custom collection names
 	natsOptions.UserCollectionName = "company_nats_users"
 	natsOptions.RoleCollectionName = "nats_permission_roles"
-	natsOptions.OrganizationCollectionName = "business_units"
+	natsOptions.AccountCollectionName = "business_accounts"
 	
 	// Production NATS configuration
 	natsOptions.NATSServerURL = "nats://nats-cluster.company.com:4222"
@@ -46,20 +46,21 @@ func main() {
 	natsOptions.DebounceInterval = 5 * time.Second      // Longer debounce for stability
 	
 	// Custom default permissions for production security
-	natsOptions.DefaultOrgPublish = "{org}.events.>"     // More restrictive
-	natsOptions.DefaultOrgSubscribe = []string{
-		"{org}.events.>",      // Organization events
-		"{org}.notifications.>", // Organization notifications  
-		"_INBOX.>",            // Standard inbox
-		"global.announcements.>", // Company-wide announcements
+	// Note: No scoping needed - accounts provide isolation
+	natsOptions.DefaultAccountPublish = "events.>"       // More restrictive than full access
+	natsOptions.DefaultAccountSubscribe = []string{
+		"events.>",           // Account events
+		"notifications.>",    // Account notifications  
+		"_INBOX.>",           // Standard inbox
+		"global.announcements.>", // Company-wide announcements (if using imports/exports)
 	}
 	
 	// More restrictive user defaults
-	natsOptions.DefaultUserPublish = "{org}.user.{user}.events.>"
+	natsOptions.DefaultUserPublish = "user.events.>"
 	natsOptions.DefaultUserSubscribe = []string{
-		"{org}.user.{user}.>",  // User's personal channels
-		"{org}.events.>",       // Organization events
-		"_INBOX.>",             // Standard inbox
+		"user.>",       // User's personal channels within account
+		"events.>",     // Account events
+		"_INBOX.>",     // Standard inbox
 	}
 	
 	// Custom event filtering for production
@@ -80,12 +81,19 @@ func main() {
 	}
 	
 	log.Println("✅ pb-audit and pb-nats initialized successfully")
-	log.Println("🏢 Custom collections:", natsOptions.OrganizationCollectionName, 
+	log.Println("🏢 Custom collections:", natsOptions.AccountCollectionName, 
 		natsOptions.UserCollectionName, natsOptions.RoleCollectionName)
 	log.Println("🔗 NATS server:", natsOptions.NATSServerURL)
 	log.Println("👤 Operator:", natsOptions.OperatorName)
 	log.Println("⚡ Queue interval:", natsOptions.PublishQueueInterval)
 	log.Println("📝 Comprehensive audit logging enabled")
+	log.Println("")
+	log.Println("🔒 Production Security Features:")
+	log.Println("   - Account-based isolation (no subject scoping needed)")
+	log.Println("   - Restricted default permissions")
+	log.Println("   - Custom event filtering")
+	log.Println("   - Multiple NATS server fallbacks")
+	log.Println("   - JWT regeneration via 'regenerate' field")
 	
 	// Start the PocketBase app as usual
 	if err := app.Start(); err != nil {

@@ -53,7 +53,7 @@ func (sm *Manager) SetupHooks() error {
 	sm.logger.Info("Setting up PocketBase hooks for NATS sync...")
 
 	// Setup hooks for each collection type
-	sm.setupOrganizationHooks()
+	sm.setupAccountHooks()
 	sm.setupUserHooks()
 	sm.setupRoleHooks()
 
@@ -62,60 +62,60 @@ func (sm *Manager) SetupHooks() error {
 	return nil
 }
 
-// setupOrganizationHooks sets up hooks for organization changes
-func (sm *Manager) setupOrganizationHooks() {
-	// Organization creation
+// setupAccountHooks sets up hooks for account changes
+func (sm *Manager) setupAccountHooks() {
+	// Account creation
 	sm.app.OnRecordCreateRequest().BindFunc(func(e *core.RecordRequestEvent) error {
-		if e.Collection.Name != sm.options.OrganizationCollectionName {
+		if e.Collection.Name != sm.options.AccountCollectionName {
 			return e.Next()
 		}
 
-		if err := sm.generateOrganizationKeys(e.Record); err != nil {
-			return utils.WrapError(err, "failed to generate organization keys")
+		if err := sm.generateAccountKeys(e.Record); err != nil {
+			return utils.WrapError(err, "failed to generate account keys")
 		}
 		return e.Next()
 	})
 
 	sm.app.OnRecordAfterCreateSuccess().BindFunc(func(e *core.RecordEvent) error {
-		if e.Record.Collection().Name != sm.options.OrganizationCollectionName {
+		if e.Record.Collection().Name != sm.options.AccountCollectionName {
 			return e.Next()
 		}
 
-		if sm.shouldHandleEvent(sm.options.OrganizationCollectionName, pbtypes.EventTypeOrgCreate) {
+		if sm.shouldHandleEvent(sm.options.AccountCollectionName, pbtypes.EventTypeAccountCreate) {
 			sm.scheduleSync(e.Record.Id, pbtypes.PublishActionUpsert)
 		}
 		return e.Next()
 	})
 
-	// Organization updates
+	// Account updates
 	sm.app.OnRecordAfterUpdateSuccess().BindFunc(func(e *core.RecordEvent) error {
-		if e.Record.Collection().Name != sm.options.OrganizationCollectionName {
+		if e.Record.Collection().Name != sm.options.AccountCollectionName {
 			return e.Next()
 		}
 
 		// Skip system account to prevent infinite loops
-		if e.Record.GetString("account_name") == "SYS" {
+		if e.Record.GetString("name") == "System Account" {
 			return e.Next()
 		}
 
-		if sm.shouldHandleEvent(sm.options.OrganizationCollectionName, pbtypes.EventTypeOrgUpdate) {
+		if sm.shouldHandleEvent(sm.options.AccountCollectionName, pbtypes.EventTypeAccountUpdate) {
 			sm.scheduleSync(e.Record.Id, pbtypes.PublishActionUpsert)
 		}
 		return e.Next()
 	})
 
-	// Organization deletion
+	// Account deletion
 	sm.app.OnRecordDeleteRequest().BindFunc(func(e *core.RecordRequestEvent) error {
-		if e.Collection.Name != sm.options.OrganizationCollectionName {
+		if e.Collection.Name != sm.options.AccountCollectionName {
 			return e.Next()
 		}
 
 		// Prevent deletion of system account
-		if e.Record.GetString("account_name") == "SYS" {
-			return utils.WrapError(fmt.Errorf("cannot delete system account"), "organization deletion validation failed")
+		if e.Record.GetString("name") == "System Account" {
+			return utils.WrapError(fmt.Errorf("cannot delete system account"), "account deletion validation failed")
 		}
 
-		if sm.shouldHandleEvent(sm.options.OrganizationCollectionName, pbtypes.EventTypeOrgDelete) {
+		if sm.shouldHandleEvent(sm.options.AccountCollectionName, pbtypes.EventTypeAccountDelete) {
 			sm.scheduleSync(e.Record.Id, pbtypes.PublishActionDelete)
 		}
 		return e.Next()
@@ -142,24 +142,38 @@ func (sm *Manager) setupUserHooks() {
 		}
 
 		if sm.shouldHandleEvent(sm.options.UserCollectionName, pbtypes.EventTypeUserCreate) {
-			orgID := e.Record.GetString("organization_id")
-			if orgID != "" {
-				sm.scheduleSync(orgID, pbtypes.PublishActionUpsert)
+			accountID := e.Record.GetString("account_id")
+			if accountID != "" {
+				sm.scheduleSync(accountID, pbtypes.PublishActionUpsert)
 			}
 		}
 		return e.Next()
 	})
 
-	// User updates
+	// User updates - handle regenerate field and normal updates
 	sm.app.OnRecordUpdateRequest().BindFunc(func(e *core.RecordRequestEvent) error {
 		if e.Collection.Name != sm.options.UserCollectionName {
 			return e.Next()
 		}
 
-		// Regenerate JWT on any update to ensure consistency
-		if err := sm.regenerateUserJWT(e.Record); err != nil {
-			return utils.WrapError(err, "failed to regenerate user JWT")
+		// Check if regenerate field was set to true
+		if e.Record.GetBool("regenerate") {
+			// Clear the regenerate flag immediately to prevent loops
+			e.Record.Set("regenerate", false)
+			
+			// Force JWT regeneration
+			if err := sm.regenerateUserJWT(e.Record); err != nil {
+				return utils.WrapError(err, "failed to regenerate user JWT")
+			}
+			
+			sm.logger.Info("JWT regenerated for user %s due to regenerate flag", e.Record.GetString("nats_username"))
+		} else {
+			// Regular update - regenerate JWT to ensure consistency
+			if err := sm.regenerateUserJWT(e.Record); err != nil {
+				return utils.WrapError(err, "failed to regenerate user JWT")
+			}
 		}
+		
 		return e.Next()
 	})
 
@@ -169,9 +183,9 @@ func (sm *Manager) setupUserHooks() {
 		}
 
 		if sm.shouldHandleEvent(sm.options.UserCollectionName, pbtypes.EventTypeUserUpdate) {
-			orgID := e.Record.GetString("organization_id")
-			if orgID != "" {
-				sm.scheduleSync(orgID, pbtypes.PublishActionUpsert)
+			accountID := e.Record.GetString("account_id")
+			if accountID != "" {
+				sm.scheduleSync(accountID, pbtypes.PublishActionUpsert)
 			}
 		}
 		return e.Next()
@@ -184,9 +198,9 @@ func (sm *Manager) setupUserHooks() {
 		}
 
 		if sm.shouldHandleEvent(sm.options.UserCollectionName, pbtypes.EventTypeUserDelete) {
-			orgID := e.Record.GetString("organization_id")
-			if orgID != "" {
-				sm.scheduleSync(orgID, pbtypes.PublishActionUpsert)
+			accountID := e.Record.GetString("account_id")
+			if accountID != "" {
+				sm.scheduleSync(accountID, pbtypes.PublishActionUpsert)
 			}
 		}
 		return e.Next()
@@ -207,9 +221,9 @@ func (sm *Manager) setupRoleHooks() {
 				sm.logger.Warning("Failed to regenerate users with role %s: %v", e.Record.Id, err)
 			}
 			
-			// Trigger publish for all affected organizations
-			if err := sm.scheduleOrganizationsWithRole(e.Record.Id); err != nil {
-				sm.logger.Warning("Failed to schedule organizations with role %s: %v", e.Record.Id, err)
+			// Trigger publish for all affected accounts
+			if err := sm.scheduleAccountsWithRole(e.Record.Id); err != nil {
+				sm.logger.Warning("Failed to schedule accounts with role %s: %v", e.Record.Id, err)
 			}
 		}
 		return e.Next()
@@ -225,7 +239,7 @@ func (sm *Manager) shouldHandleEvent(collectionName, eventType string) bool {
 }
 
 // scheduleSync schedules a sync operation with debouncing
-func (sm *Manager) scheduleSync(orgID, action string) {
+func (sm *Manager) scheduleSync(accountID, action string) {
 	sm.timerMutex.Lock()
 	defer sm.timerMutex.Unlock()
 
@@ -235,8 +249,8 @@ func (sm *Manager) scheduleSync(orgID, action string) {
 	}
 
 	// Queue the operation immediately
-	if err := sm.publisher.QueueAccountUpdate(orgID, action); err != nil {
-		sm.logger.Warning("Failed to queue account update for org %s: %v", orgID, err)
+	if err := sm.publisher.QueueAccountUpdate(accountID, action); err != nil {
+		sm.logger.Warning("Failed to queue account update for account %s: %v", accountID, err)
 	}
 
 	// Schedule processing after debounce interval
@@ -247,8 +261,8 @@ func (sm *Manager) scheduleSync(orgID, action string) {
 	})
 }
 
-// generateOrganizationKeys generates keys and JWT for an organization
-func (sm *Manager) generateOrganizationKeys(record *core.Record) error {
+// generateAccountKeys generates keys and JWT for an account
+func (sm *Manager) generateAccountKeys(record *core.Record) error {
 	// Skip if keys already exist
 	if record.GetString("public_key") != "" {
 		return nil
@@ -279,34 +293,27 @@ func (sm *Manager) generateOrganizationKeys(record *core.Record) error {
 	record.Set("signing_private_key", signingPrivateKey)
 	record.Set("signing_seed", signingKey)
 
-	// Normalize account name if not set
-	if record.GetString("account_name") == "" {
-		orgRecord := &pbtypes.OrganizationRecord{Name: record.GetString("name")}
-		record.Set("account_name", orgRecord.NormalizeAccountName())
-	}
-
 	// Generate JWT
-	return sm.generateOrganizationJWT(record)
+	return sm.generateAccountJWT(record)
 }
 
-// generateOrganizationJWT generates JWT for an organization
-func (sm *Manager) generateOrganizationJWT(record *core.Record) error {
+// generateAccountJWT generates JWT for an account
+func (sm *Manager) generateAccountJWT(record *core.Record) error {
 	// Get system operator
 	operator, err := sm.getSystemOperator()
 	if err != nil {
 		return utils.WrapError(err, "failed to get system operator")
 	}
 
-	// Create organization record
-	org := &pbtypes.OrganizationRecord{
+	// Create account record
+	account := &pbtypes.AccountRecord{
 		PublicKey:        record.GetString("public_key"),
 		SigningPublicKey: record.GetString("signing_public_key"),
 		Name:             record.GetString("name"),
-		AccountName:      record.GetString("account_name"),
 	}
 
 	// Generate JWT
-	jwtValue, err := sm.jwtGen.GenerateAccountJWT(org, operator.SigningSeed)
+	jwtValue, err := sm.jwtGen.GenerateAccountJWT(account, operator.SigningSeed)
 	if err != nil {
 		return utils.WrapError(err, "failed to generate account JWT")
 	}
@@ -345,10 +352,10 @@ func (sm *Manager) generateUserKeys(record *core.Record) error {
 
 // generateUserJWT generates JWT and creds file for a user
 func (sm *Manager) generateUserJWT(record *core.Record) error {
-	// Get organization and role
-	org, err := sm.app.FindRecordById(sm.options.OrganizationCollectionName, record.GetString("organization_id"))
+	// Get account and role
+	account, err := sm.app.FindRecordById(sm.options.AccountCollectionName, record.GetString("account_id"))
 	if err != nil {
-		return utils.WrapErrorf(err, "failed to find organization %s", record.GetString("organization_id"))
+		return utils.WrapErrorf(err, "failed to find account %s", record.GetString("account_id"))
 	}
 
 	role, err := sm.app.FindRecordById(sm.options.RoleCollectionName, record.GetString("role_id"))
@@ -358,11 +365,11 @@ func (sm *Manager) generateUserJWT(record *core.Record) error {
 
 	// Convert to models
 	user := sm.recordToUserModel(record)
-	orgModel := sm.recordToOrgModel(org)
+	accountModel := sm.recordToAccountModel(account)
 	roleModel := sm.recordToRoleModel(role)
 
 	// Generate JWT
-	jwtValue, err := sm.jwtGen.GenerateUserJWT(user, orgModel, roleModel)
+	jwtValue, err := sm.jwtGen.GenerateUserJWT(user, accountModel, roleModel)
 	if err != nil {
 		return utils.WrapError(err, "failed to generate user JWT")
 	}
@@ -380,7 +387,7 @@ func (sm *Manager) generateUserJWT(record *core.Record) error {
 	return nil
 }
 
-// regenerateUserJWT regenerates JWT for a user (when role/org changes)
+// regenerateUserJWT regenerates JWT for a user (when role/account changes or regenerate flag is set)
 func (sm *Manager) regenerateUserJWT(record *core.Record) error {
 	// Clear existing JWT and creds
 	record.Set("jwt", "")
@@ -393,23 +400,23 @@ func (sm *Manager) regenerateUserJWT(record *core.Record) error {
 // Helper methods to convert records to models
 func (sm *Manager) recordToUserModel(record *core.Record) *pbtypes.NatsUserRecord {
 	return &pbtypes.NatsUserRecord{
-		ID:             record.Id,
-		NatsUsername:   record.GetString("nats_username"),
-		PublicKey:      record.GetString("public_key"),
-		Seed:           record.GetString("seed"),
-		OrganizationID: record.GetString("organization_id"),
-		RoleID:         record.GetString("role_id"),
-		JWT:            record.GetString("jwt"),
-		BearerToken:    record.GetBool("bearer_token"),
-		Active:         record.GetBool("active"),
+		ID:           record.Id,
+		NatsUsername: record.GetString("nats_username"),
+		PublicKey:    record.GetString("public_key"),
+		Seed:         record.GetString("seed"),
+		AccountID:    record.GetString("account_id"),
+		RoleID:       record.GetString("role_id"),
+		JWT:          record.GetString("jwt"),
+		BearerToken:  record.GetBool("bearer_token"),
+		Active:       record.GetBool("active"),
+		Regenerate:   record.GetBool("regenerate"),
 	}
 }
 
-func (sm *Manager) recordToOrgModel(record *core.Record) *pbtypes.OrganizationRecord {
-	return &pbtypes.OrganizationRecord{
+func (sm *Manager) recordToAccountModel(record *core.Record) *pbtypes.AccountRecord {
+	return &pbtypes.AccountRecord{
 		ID:               record.Id,
 		Name:             record.GetString("name"),
-		AccountName:      record.GetString("account_name"),
 		PublicKey:        record.GetString("public_key"),
 		SigningSeed:      record.GetString("signing_seed"),
 		JWT:              record.GetString("jwt"),
@@ -481,25 +488,25 @@ func (sm *Manager) regenerateUsersWithRole(roleID string) error {
 	return nil
 }
 
-// scheduleOrganizationsWithRole schedules sync for all organizations that have users with a specific role
-func (sm *Manager) scheduleOrganizationsWithRole(roleID string) error {
+// scheduleAccountsWithRole schedules sync for all accounts that have users with a specific role
+func (sm *Manager) scheduleAccountsWithRole(roleID string) error {
 	users, err := sm.app.FindAllRecords(sm.options.UserCollectionName, dbx.HashExp{"role_id": roleID})
 	if err != nil {
 		return utils.WrapErrorf(err, "failed to find users with role %s", roleID)
 	}
 
-	// Collect unique organization IDs
-	orgIDs := make(map[string]bool)
+	// Collect unique account IDs
+	accountIDs := make(map[string]bool)
 	for _, user := range users {
-		orgID := user.GetString("organization_id")
-		if orgID != "" {
-			orgIDs[orgID] = true
+		accountID := user.GetString("account_id")
+		if accountID != "" {
+			accountIDs[accountID] = true
 		}
 	}
 
-	// Schedule sync for each organization
-	for orgID := range orgIDs {
-		sm.scheduleSync(orgID, pbtypes.PublishActionUpsert)
+	// Schedule sync for each account
+	for accountID := range accountIDs {
+		sm.scheduleSync(accountID, pbtypes.PublishActionUpsert)
 	}
 
 	return nil

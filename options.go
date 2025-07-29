@@ -8,9 +8,9 @@ import (
 // DefaultOptions returns sensible defaults for the NATS JWT synchronization options
 func DefaultOptions() Options {
 	return Options{
-		UserCollectionName:         pbtypes.DefaultUserCollectionName,
-		RoleCollectionName:         pbtypes.DefaultRoleCollectionName,
-		OrganizationCollectionName: pbtypes.DefaultOrganizationCollectionName,
+		UserCollectionName:    pbtypes.DefaultUserCollectionName,
+		RoleCollectionName:    pbtypes.DefaultRoleCollectionName,
+		AccountCollectionName: pbtypes.DefaultAccountCollectionName,
 		
 		OperatorName:              pbtypes.DefaultOperatorName,
 		NATSServerURL:             "nats://localhost:4222",
@@ -21,10 +21,11 @@ func DefaultOptions() Options {
 		DebounceInterval:          3 * time.Second,
 		LogToConsole:              true,
 		
-		DefaultOrgPublish:     pbtypes.DefaultOrgPublish,
-		DefaultOrgSubscribe:   pbtypes.DefaultOrgSubscribe,
-		DefaultUserPublish:    pbtypes.DefaultUserPublish,
-		DefaultUserSubscribe:  pbtypes.DefaultUserSubscribe,
+		// Default permissions without scoping - accounts provide isolation
+		DefaultAccountPublish:     pbtypes.DefaultAccountPublish,
+		DefaultAccountSubscribe:   pbtypes.DefaultAccountSubscribe,
+		DefaultUserPublish:        pbtypes.DefaultUserPublish,
+		DefaultUserSubscribe:      pbtypes.DefaultUserSubscribe,
 		
 		EventFilter:               nil, // No filter by default, process all events
 	}
@@ -41,8 +42,8 @@ func applyDefaultOptions(options Options) Options {
 	if options.RoleCollectionName == "" {
 		options.RoleCollectionName = defaults.RoleCollectionName
 	}
-	if options.OrganizationCollectionName == "" {
-		options.OrganizationCollectionName = defaults.OrganizationCollectionName
+	if options.AccountCollectionName == "" {
+		options.AccountCollectionName = defaults.AccountCollectionName
 	}
 
 	// Apply NATS configuration
@@ -62,11 +63,11 @@ func applyDefaultOptions(options Options) Options {
 	}
 
 	// Apply default permissions if not provided
-	if options.DefaultOrgPublish == "" {
-		options.DefaultOrgPublish = defaults.DefaultOrgPublish
+	if options.DefaultAccountPublish == "" {
+		options.DefaultAccountPublish = defaults.DefaultAccountPublish
 	}
-	if len(options.DefaultOrgSubscribe) == 0 {
-		options.DefaultOrgSubscribe = defaults.DefaultOrgSubscribe
+	if len(options.DefaultAccountSubscribe) == 0 {
+		options.DefaultAccountSubscribe = defaults.DefaultAccountSubscribe
 	}
 	if options.DefaultUserPublish == "" {
 		options.DefaultUserPublish = defaults.DefaultUserPublish

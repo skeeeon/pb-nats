@@ -6,11 +6,12 @@ A high-performance library for seamless integration between [PocketBase](https:/
 
 - **⚡ High-Performance JWT Generation**: Sub-millisecond operations using pure Go libraries
 - **🔄 Real-time Synchronization**: Direct JWT publishing to NATS servers via `$SYS.REQ.CLAIMS.UPDATE`
-- **🏢 Organization-Based Architecture**: Map PocketBase organizations to NATS accounts
+- **🏢 Account-Based Architecture**: Map PocketBase accounts to NATS accounts with built-in isolation
 - **🔐 Native PocketBase Security**: Leverage built-in authentication and record-level permissions
-- **📊 Role-Based Permissions**: Flexible permission system with organization scoping
+- **📊 Role-Based Permissions**: Flexible permission system within account boundaries
 - **🔧 Zero Configuration Files**: No file management, all data stored in PocketBase database
 - **⚡ Queue-Based Publishing**: Reliable JWT publishing with retry logic and debouncing
+- **🔄 JWT Regeneration**: Simple regeneration via boolean field trigger
 - **🛡️ Production Ready**: Built on battle-tested patterns with comprehensive error handling
 
 ## 📈 Performance Benefits
@@ -31,8 +32,8 @@ NEW: PocketBase Collections → Direct JWT Generation → NATS Account Publishin
 ```
 
 ### Core Components
-- **Organizations** → NATS Accounts (with isolated permissions)
-- **Users** → NATS Users (with role-based permissions)  
+- **Accounts** → NATS Accounts (with built-in isolation boundaries)
+- **Users** → NATS Users (with role-based permissions within accounts)  
 - **Roles** → Permission templates
 - **System Components** → Auto-managed operator and system account
 
@@ -73,15 +74,14 @@ func main() {
 
 The library automatically creates and manages the following collections:
 
-### 1. Organizations Collection (`organizations`)
+### 1. Accounts Collection (`nats_accounts`)
 
-Maps to NATS accounts and provides organization-level isolation.
+Maps to NATS accounts and provides account-level isolation.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `name` | Text | Organization display name |
-| `account_name` | Text | NATS account name (auto-normalized) |
-| `description` | Text | Organization description |
+| `name` | Text | Account display name (also used as NATS account name when normalized) |
+| `description` | Text | Account description |
 | `public_key` | Text | Account public key (auto-generated) |
 | `private_key` | Text | Account private key (auto-generated) |
 | `seed` | Text | Account seed (auto-generated) |
@@ -89,7 +89,7 @@ Maps to NATS accounts and provides organization-level isolation.
 | `signing_private_key` | Text | Account signing private key (auto-generated) |
 | `signing_seed` | Text | Account signing seed (auto-generated) |
 | `jwt` | Text | Account JWT (auto-generated) |
-| `active` | Boolean | Whether the organization is active |
+| `active` | Boolean | Whether the account is active |
 | `created` | DateTime | Auto-managed creation timestamp |
 | `updated` | DateTime | Auto-managed update timestamp |
 
@@ -104,7 +104,7 @@ PocketBase auth collection with NATS-specific fields.
 | `verified` | Boolean | PocketBase email verification status |
 | `nats_username` | Text | NATS username |
 | `description` | Text | User description |
-| `organization_id` | Relation | Link to organizations |
+| `account_id` | Relation | Link to nats_accounts |
 | `role_id` | Relation | Link to nats_roles |
 | `public_key` | Text | User public key (auto-generated) |
 | `private_key` | Text | User private key (auto-generated) |
@@ -113,6 +113,7 @@ PocketBase auth collection with NATS-specific fields.
 | `creds_file` | Text | Complete .creds file (auto-generated) |
 | `bearer_token` | Boolean | Enable bearer token authentication |
 | `jwt_expires_at` | DateTime | Optional JWT expiration |
+| `regenerate` | Boolean | **NEW**: Triggers JWT regeneration when set to true |
 | `active` | Boolean | Whether the user is active |
 
 ### 3. Roles Collection (`nats_roles`)
@@ -123,8 +124,8 @@ Defines permission templates for users.
 |-------|------|-------------|
 | `name` | Text | Role name |
 | `description` | Text | Role description |
-| `publish_permissions` | Text | JSON array of publish topic patterns |
-| `subscribe_permissions` | Text | JSON array of subscribe topic patterns |
+| `publish_permissions` | Text | JSON array of publish subject patterns |
+| `subscribe_permissions` | Text | JSON array of subscribe subject patterns |
 | `is_default` | Boolean | Whether this is a default role |
 | `max_connections` | Number | Max connections (-1 = unlimited) |
 | `max_data` | Number | Max data limit (-1 = unlimited) |
@@ -132,14 +133,20 @@ Defines permission templates for users.
 
 ### Permission Examples
 
-For the JSON permission fields, store values as properly formatted JSON arrays:
+Permissions are simple subject patterns - **no scoping needed** since accounts provide isolation:
 
 ```json
-// Publish permissions
-["acme.sensors.*.telemetry", "acme.alerts.>"]
+// Simple permissions within account
+{
+  "publish_permissions": ["sensors.*.telemetry", "alerts.>"],
+  "subscribe_permissions": ["sensors.>", "alerts.>", "_INBOX.>"]
+}
 
-// Subscribe permissions  
-["acme.>", "_INBOX.>"]
+// User-specific permissions within account
+{
+  "publish_permissions": ["user.reports.>"],
+  "subscribe_permissions": [">", "_INBOX.>"]
+}
 ```
 
 ## ⚙️ Configuration Options
@@ -147,10 +154,10 @@ For the JSON permission fields, store values as properly formatted JSON arrays:
 ```go
 options := pbnats.DefaultOptions()
 
-// Collection names (if you want custom names)
-options.UserCollectionName = "my_nats_users"
-options.RoleCollectionName = "my_nats_roles"
-options.OrganizationCollectionName = "my_organizations"
+// Collection names (all prefixed with nats_)
+options.UserCollectionName = "nats_users"
+options.RoleCollectionName = "nats_roles"
+options.AccountCollectionName = "nats_accounts"
 
 // NATS configuration
 options.NATSServerURL = "nats://your-server:4222"
@@ -163,9 +170,11 @@ options.DebounceInterval = 3 * time.Second       // Debounce rapid changes
 // JWT settings
 options.DefaultJWTExpiry = 24 * time.Hour        // Set expiration (0 = never expires)
 
-// Default permissions (organization-scoped)
-options.DefaultOrgPublish = "{org}.>"            // {org} gets replaced
-options.DefaultOrgSubscribe = []string{"{org}.>", "_INBOX.>"}
+// Default permissions (no scoping - accounts provide isolation)
+options.DefaultAccountPublish = ">"               // Full access within account
+options.DefaultAccountSubscribe = []string{">", "_INBOX.>"}
+options.DefaultUserPublish = "user.>"            // User-scoped within account
+options.DefaultUserSubscribe = []string{">", "_INBOX.>"}
 
 // Custom event filtering
 options.EventFilter = func(collectionName, eventType string) bool {
@@ -198,10 +207,10 @@ The library uses PocketBase's native security features:
 // Users can only access their own NATS credentials
 collection.ViewRule = "@request.auth.id = id"
 
-// Organization admins can access users in their org
+// Account admins can access users in their account
 collection.ViewRule = `
   (@request.auth.id = id) ||
-  (@request.auth.role = 'org_admin' && @request.auth.organization_id = organization_id) ||
+  (@request.auth.role = 'account_admin' && @request.auth.account_id = account_id) ||
   @request.auth.role = 'admin'
 `
 ```
@@ -212,7 +221,7 @@ collection.ViewRule = `
 // Hide sensitive fields from unauthorized users
 collection.ViewRule = `
   @request.auth.id = id ? "*" : 
-  "id,nats_username,active,organization_id"
+  "id,nats_username,active,account_id"
 `
 ```
 
@@ -235,9 +244,16 @@ Authorization: Bearer {user_token}
 GET /api/collections/nats_users/records
 Authorization: Bearer {admin_token}
 
-# List users in specific organization
-GET /api/collections/nats_users/records?filter=organization_id="{org_id}"
+# List users in specific account
+GET /api/collections/nats_users/records?filter=account_id="{account_id}"
 Authorization: Bearer {admin_token}
+
+# Regenerate user JWT
+PATCH /api/collections/nats_users/records/{user_id}
+Authorization: Bearer {user_token}
+Content-Type: application/json
+
+{"regenerate": true}
 ```
 
 ### Client Connection Example
@@ -260,25 +276,45 @@ const nc = await connect({
     authenticator: credsAuthenticator(new TextEncoder().encode(user.creds_file))
 });
 
-// Now you can publish/subscribe with your permissions
-await nc.publish("your.org.sensors.temp", JSON.stringify({temp: 23.5}));
+// Now you can publish/subscribe with your permissions (within your account)
+await nc.publish("sensors.temperature", JSON.stringify({temp: 23.5}));
+await nc.publish("alerts.high_temp", JSON.stringify({location: "server_room"}));
 ```
 
-## 🔧 Organization Scoping
+### JWT Regeneration
 
-The library automatically applies organization scoping to all permissions:
+```javascript
+// Regenerate JWT when needed (e.g., security rotation, permission updates)
+await pb.collection('nats_users').update(pb.authStore.model.id, {
+    regenerate: true
+});
+
+// Fetch updated credentials
+const updatedUser = await pb.collection('nats_users').getOne(pb.authStore.model.id, {
+    fields: 'jwt,creds_file'
+});
+
+// Reconnect with fresh credentials
+```
+
+## 🏭 Account Isolation
+
+Accounts provide natural isolation boundaries - **no subject scoping needed**:
 
 ```go
-// Role permission: "sensors.*.telemetry"
-// Gets scoped to: "acme_corp.sensors.*.telemetry" for organization "acme-corp"
+// Account: "company-a"
+// Users can simply use: "sensors.temperature", "alerts.critical"
 
-// User permission: "{org}.user.{user}.>"  
-// Gets scoped to: "acme_corp.user.john_doe.>" for user "john.doe" in "acme-corp"
+// Account: "company-b"  
+// Users can use the same subjects: "sensors.temperature", "alerts.critical"
+// But they're completely isolated from company-a
+
+// No need for: "company_a.sensors.temperature" vs "company_b.sensors.temperature"
 ```
 
 ## 📊 How It Works
 
-1. **Collection Changes**: User creates/updates organization, user, or role
+1. **Collection Changes**: User creates/updates account, user, or role
 2. **JWT Generation**: Library generates appropriate JWTs using pure Go libraries
 3. **Queue Publishing**: Changes are queued for reliable processing with debouncing
 4. **NATS Publishing**: JWTs are published directly to NATS via `$SYS.REQ.CLAIMS.UPDATE`
@@ -357,25 +393,25 @@ func main() {
 
 ### IoT Data Platform
 ```go
-// Organization: "smart-building-corp"
+// Account: "smart-building-corp"
 // Users: sensor managers, data analysts, operators
 // Permissions: 
-//   - Sensors can publish: "smart_building_corp.sensors.*.telemetry"  
-//   - Analysts can subscribe: "smart_building_corp.sensors.>"
-//   - Operators can publish alerts: "smart_building_corp.alerts.>"
+//   - Sensors can publish: "sensors.*.telemetry"  
+//   - Analysts can subscribe: "sensors.>"
+//   - Operators can publish alerts: "alerts.>"
 ```
 
 ### Multi-Tenant SaaS
 ```go
-// Each tenant gets their own organization
-// Users isolated to their tenant's data streams
-// Admins can access cross-tenant monitoring streams
+// Each tenant gets their own account
+// Users isolated to their account's data streams
+// Admins can access cross-account monitoring streams via imports/exports
 // Real-time permission updates as subscriptions change
 ```
 
 ### Development Teams
 ```go
-// Organizations: "frontend-team", "backend-team", "devops-team"  
+// Accounts: "frontend-team", "backend-team", "devops-team"  
 // Each team gets isolated communication channels
 // Cross-team collaboration channels with explicit permissions
 // CI/CD systems get service account access
@@ -389,13 +425,13 @@ func main() {
 A: Check that your system user has proper permissions and NATS server is reachable. Verify the system account JWT is properly configured.
 
 **Q: Users can't connect to NATS** 
-A: Verify the user's organization is active and role has appropriate permissions. Check that the organization scoping is working correctly.
+A: Verify the user's account is active and role has appropriate permissions. Check that permissions don't include invalid subject patterns.
 
 **Q: Permission denied errors**
-A: Check that organization scoping is working correctly and permissions include the full scoped subject.
+A: Check that permissions are valid NATS subject patterns and don't include scoping placeholders (accounts provide isolation).
 
-**Q: Race conditions during startup**
-A: The library now has proper initialization ordering. If you still see issues, enable console logging to debug the startup sequence.
+**Q: JWT regeneration not working**
+A: Ensure the `regenerate` field is being set to `true` and the user has permission to update their own record.
 
 ### Debug Logging
 
@@ -435,7 +471,24 @@ if severity == pbnats.SeverityCritical {
 Check the `examples/` directory for:
 - `basic/` - Simple setup with default options
 - `advanced/` - Custom configuration with pb-audit integration  
-- `integration/` - Complete workflow demonstration
+- `integration/` - Complete workflow demonstration with JWT regeneration
+
+## 🔄 Migration from v0.x
+
+### Key Changes in v1.0
+
+1. **Terminology**: `organizations` → `accounts` (aligns with NATS)
+2. **Scoping Removed**: No more `{org}` placeholders - accounts provide isolation
+3. **Collection Names**: All collections now have `nats_` prefix
+4. **JWT Regeneration**: New `regenerate` boolean field
+5. **Simplified Permissions**: Use simple subject patterns like `sensors.>` instead of `{org}.sensors.>`
+
+### Migration Steps
+
+1. **Update collection references** in your code
+2. **Remove scoping** from permission templates
+3. **Test JWT regeneration** via the new `regenerate` field
+4. **Update client code** to use simple subject names
 
 ## 🤝 Contributing
 

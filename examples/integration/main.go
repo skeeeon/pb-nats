@@ -1,251 +1,102 @@
 package main
 
 import (
-	"encoding/json"
 	"log"
 	"time"
 
 	"github.com/pocketbase/pocketbase"
-	"github.com/pocketbase/pocketbase/core"
+	"github.com/skeeeon/pb-audit"
 	"github.com/skeeeon/pb-nats"
 )
 
-// This example demonstrates a complete integration workflow:
-// 1. Setup PocketBase with NATS JWT authentication
-// 2. Create an organization
-// 3. Create roles with permissions
-// 4. Create users and assign them to organizations and roles
-// 5. Show how JWTs are automatically generated and managed
-
 func main() {
-	log.Println("🚀 Starting PocketBase NATS JWT Integration Example")
-
 	// Initialize PocketBase
 	app := pocketbase.New()
-
-	// Configure NATS JWT options
-	options := pbnats.DefaultOptions()
-	options.NATSServerURL = "nats://localhost:4222"
-	options.OperatorName = "demo-company"
-	options.LogToConsole = true
-	options.DebounceInterval = 2 * time.Second
-
-	// Custom default permissions for this demo
-	options.DefaultOrgPublish = "{org}.events.>"
-	options.DefaultOrgSubscribe = []string{
-		"{org}.>",           // Full organization access
-		"_INBOX.>",          // Standard inbox
-		"global.alerts.>",   // Global alerts
+	
+	// =========================================================
+	// Configure pb-audit with custom options
+	// =========================================================
+	auditOptions := pbaudit.DefaultOptions()
+	
+	// Setup audit logging
+	if err := pbaudit.Setup(app, auditOptions); err != nil {
+		log.Fatalf("Failed to setup audit logging: %v", err)
 	}
-
+	
+	// =========================================================
+	// Configure pb-nats with custom options for production
+	// =========================================================
+	natsOptions := pbnats.DefaultOptions()
+	
+	// Use custom collection names
+	natsOptions.UserCollectionName = "company_nats_users"
+	natsOptions.RoleCollectionName = "nats_permission_roles"
+	natsOptions.AccountCollectionName = "business_accounts"
+	
+	// Production NATS configuration
+	natsOptions.NATSServerURL = "nats://nats-cluster.company.com:4222"
+	natsOptions.BackupNATSServerURLs = []string{
+		"nats://nats-backup1.company.com:4222",
+		"nats://nats-backup2.company.com:4222",
+	}
+	natsOptions.OperatorName = "company-production"
+	
+	// Performance tuning for production
+	natsOptions.PublishQueueInterval = 15 * time.Second // More frequent processing
+	natsOptions.DebounceInterval = 5 * time.Second      // Longer debounce for stability
+	
+	// Custom default permissions for production security
+	// Note: No scoping needed - accounts provide isolation
+	natsOptions.DefaultAccountPublish = "events.>"       // More restrictive than full access
+	natsOptions.DefaultAccountSubscribe = []string{
+		"events.>",           // Account events
+		"notifications.>",    // Account notifications  
+		"_INBOX.>",           // Standard inbox
+		"global.announcements.>", // Company-wide announcements (if using imports/exports)
+	}
+	
+	// More restrictive user defaults
+	natsOptions.DefaultUserPublish = "user.events.>"
+	natsOptions.DefaultUserSubscribe = []string{
+		"user.>",       // User's personal channels within account
+		"events.>",     // Account events
+		"_INBOX.>",     // Standard inbox
+	}
+	
+	// Custom event filtering for production
+	natsOptions.EventFilter = func(collectionName, eventType string) bool {
+		// Skip processing user deletions (handle manually)
+		if eventType == pbnats.EventTypeUserDelete {
+			log.Printf("User deletion detected - manual intervention required")
+			return false
+		}
+		
+		// Process all other events
+		return true
+	}
+	
 	// Setup NATS JWT integration
-	if err := pbnats.Setup(app, options); err != nil {
-		log.Fatalf("❌ Failed to setup NATS JWT sync: %v", err)
+	if err := pbnats.Setup(app, natsOptions); err != nil {
+		log.Fatalf("Failed to setup NATS JWT sync: %v", err)
 	}
-
-	log.Println("✅ NATS JWT sync configured successfully")
-
-	// Setup demo data after the app starts
-	app.OnServe().BindFunc(func(e *core.ServeEvent) error {
-		// Give the app a moment to fully initialize
-		time.Sleep(2 * time.Second)
-		
-		// Create demo data
-		go createDemoData(app)
-		
-		return e.Next()
-	})
-
-	log.Println("🌐 Starting PocketBase server...")
-	log.Println("📝 Demo data will be created automatically")
-	log.Println("🔗 Access admin UI at: http://localhost:8090/_/")
-	log.Println("📚 API available at: http://localhost:8090/api/")
-
-	// Start the server
+	
+	log.Println("✅ pb-audit and pb-nats initialized successfully")
+	log.Println("🏢 Custom collections:", natsOptions.AccountCollectionName, 
+		natsOptions.UserCollectionName, natsOptions.RoleCollectionName)
+	log.Println("🔗 NATS server:", natsOptions.NATSServerURL)
+	log.Println("👤 Operator:", natsOptions.OperatorName)
+	log.Println("⚡ Queue interval:", natsOptions.PublishQueueInterval)
+	log.Println("📝 Comprehensive audit logging enabled")
+	log.Println("")
+	log.Println("🔒 Production Security Features:")
+	log.Println("   - Account-based isolation (no subject scoping needed)")
+	log.Println("   - Restricted default permissions")
+	log.Println("   - Custom event filtering")
+	log.Println("   - Multiple NATS server fallbacks")
+	log.Println("   - JWT regeneration via 'regenerate' field")
+	
+	// Start the PocketBase app as usual
 	if err := app.Start(); err != nil {
 		log.Fatal(err)
 	}
-}
-
-func createDemoData(app *pocketbase.PocketBase) {
-	log.Println("📊 Creating demo data...")
-
-	// Wait a bit more for collections to be fully ready
-	time.Sleep(3 * time.Second)
-
-	// Create demo organization
-	org, err := createDemoOrganization(app)
-	if err != nil {
-		log.Printf("❌ Failed to create demo organization: %v", err)
-		return
-	}
-	log.Printf("✅ Created organization: %s (Account: %s)", org.GetString("name"), org.GetString("account_name"))
-
-	// Create demo roles
-	adminRole, err := createRole(app, "Administrator", 
-		[]string{"{org}.>"},                    // Can publish anywhere in org
-		[]string{"{org}.>", "global.>"},        // Can subscribe to org and global
-		-1, -1, -1) // Unlimited limits
-	if err != nil {
-		log.Printf("❌ Failed to create admin role: %v", err)
-		return
-	}
-	log.Printf("✅ Created role: %s", adminRole.GetString("name"))
-
-	sensorRole, err := createRole(app, "Sensor Manager",
-		[]string{"{org}.sensors.*.telemetry", "{org}.sensors.*.status"}, // Can publish sensor data
-		[]string{"{org}.sensors.>", "{org}.alerts.>"},                   // Can subscribe to sensors and alerts
-		10, 1024*1024, 1024) // Limited connections and data
-	if err != nil {
-		log.Printf("❌ Failed to create sensor role: %v", err)
-		return
-	}
-	log.Printf("✅ Created role: %s", sensorRole.GetString("name"))
-
-	analystRole, err := createRole(app, "Data Analyst",
-		[]string{"{org}.reports.>"},                     // Can publish reports
-		[]string{"{org}.sensors.>", "{org}.reports.>"}, // Can subscribe to sensors and reports
-		5, 512*1024, 512) // Moderate limits
-	if err != nil {
-		log.Printf("❌ Failed to create analyst role: %v", err)
-		return
-	}
-	log.Printf("✅ Created role: %s", analystRole.GetString("name"))
-
-	// Create demo users
-	adminUser, err := createUser(app, "admin@demo.com", "admin123!", 
-		"admin_user", "System Administrator", org.Id, adminRole.Id)
-	if err != nil {
-		log.Printf("❌ Failed to create admin user: %v", err)
-		return
-	}
-	log.Printf("✅ Created user: %s (%s)", adminUser.GetString("nats_username"), adminUser.GetString("email"))
-
-	sensorUser, err := createUser(app, "sensor@demo.com", "sensor123!",
-		"sensor_manager", "Sensor Data Manager", org.Id, sensorRole.Id)
-	if err != nil {
-		log.Printf("❌ Failed to create sensor user: %v", err)
-		return
-	}
-	log.Printf("✅ Created user: %s (%s)", sensorUser.GetString("nats_username"), sensorUser.GetString("email"))
-
-	analystUser, err := createUser(app, "analyst@demo.com", "analyst123!",
-		"data_analyst", "Data Analysis Specialist", org.Id, analystRole.Id)
-	if err != nil {
-		log.Printf("❌ Failed to create analyst user: %v", err)
-		return
-	}
-	log.Printf("✅ Created user: %s (%s)", analystUser.GetString("nats_username"), analystUser.GetString("email"))
-
-	log.Println("🎉 Demo data creation completed!")
-	log.Println("")
-	log.Println("📋 Demo Summary:")
-	log.Printf("   Organization: %s", org.GetString("name"))
-	log.Printf("   NATS Account: %s", org.GetString("account_name"))
-	log.Printf("   Users Created: 3 (admin, sensor manager, analyst)")
-	log.Printf("   Roles Created: 3 (admin, sensor, analyst)")
-	log.Println("")
-	log.Println("🔑 Login Credentials:")
-	log.Println("   admin@demo.com / admin123!")
-	log.Println("   sensor@demo.com / sensor123!")
-	log.Println("   analyst@demo.com / analyst123!")
-	log.Println("")
-	log.Println("📊 Each user has automatically generated:")
-	log.Println("   - NATS public/private key pair")
-	log.Println("   - Signed JWT with role-based permissions")
-	log.Println("   - Complete .creds file for NATS connection")
-	log.Println("   - Organization-scoped subject permissions")
-	log.Println("")
-	log.Println("🔗 Access via API:")
-	log.Println("   GET /api/collections/nats_users/records (list users)")
-	log.Println("   GET /api/collections/organizations/records (list orgs)")
-	log.Println("   GET /api/collections/nats_roles/records (list roles)")
-}
-
-func createDemoOrganization(app *pocketbase.PocketBase) (*core.Record, error) {
-	collection, err := app.FindCollectionByNameOrId("organizations")
-	if err != nil {
-		return nil, err
-	}
-
-	// Check if demo org already exists
-	existing, err := app.FindAllRecords("organizations", `name = "Demo Company"`)
-	if err == nil && len(existing) > 0 {
-		return existing[0], nil
-	}
-
-	record := core.NewRecord(collection)
-	record.Set("name", "Demo Company")
-	record.Set("description", "Demonstration organization for NATS JWT integration")
-	record.Set("active", true)
-
-	if err := app.Save(record); err != nil {
-		return nil, err
-	}
-
-	return record, nil
-}
-
-func createRole(app *pocketbase.PocketBase, name string, publishPerms, subscribePerms []string, 
-	maxConn, maxData, maxPayload int64) (*core.Record, error) {
-	collection, err := app.FindCollectionByNameOrId("nats_roles")
-	if err != nil {
-		return nil, err
-	}
-
-	// Check if role already exists
-	existing, err := app.FindAllRecords("nats_roles", `name = "`+name+`"`)
-	if err == nil && len(existing) > 0 {
-		return existing[0], nil
-	}
-
-	record := core.NewRecord(collection)
-	record.Set("name", name)
-	record.Set("description", "Auto-generated role for "+name)
-
-	// Convert permissions to JSON
-	publishJSON, _ := json.Marshal(publishPerms)
-	subscribeJSON, _ := json.Marshal(subscribePerms)
-	
-	record.Set("publish_permissions", string(publishJSON))
-	record.Set("subscribe_permissions", string(subscribeJSON))
-	record.Set("max_connections", maxConn)
-	record.Set("max_data", maxData)
-	record.Set("max_payload", maxPayload)
-
-	if err := app.Save(record); err != nil {
-		return nil, err
-	}
-
-	return record, nil
-}
-
-func createUser(app *pocketbase.PocketBase, email, password, natsUsername, description, 
-	orgID, roleID string) (*core.Record, error) {
-	collection, err := app.FindCollectionByNameOrId("nats_users")
-	if err != nil {
-		return nil, err
-	}
-
-	// Check if user already exists
-	existing, err := app.FindAllRecords("nats_users", `email = "`+email+`"`)
-	if err == nil && len(existing) > 0 {
-		return existing[0], nil
-	}
-
-	record := core.NewRecord(collection)
-	record.Set("email", email)
-	record.Set("password", password)
-	record.Set("nats_username", natsUsername)
-	record.Set("description", description)
-	record.Set("organization_id", orgID)
-	record.Set("role_id", roleID)
-	record.Set("active", true)
-	record.Set("verified", true) // Auto-verify for demo
-
-	if err := app.Save(record); err != nil {
-		return nil, err
-	}
-
-	return record, nil
 }
