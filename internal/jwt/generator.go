@@ -179,7 +179,7 @@ func (g *Generator) applyRolePermissions(userClaims *jwt.UserClaims, user *pbtyp
 			// System users get unrestricted access
 			publishPerms = []string{"$SYS.>", ">"}
 		} else {
-			publishPerms = []string{g.options.DefaultUserPublish}
+			publishPerms = g.options.DefaultPublishPermissions
 		}
 	}
 	if len(subscribePerms) == 0 {
@@ -187,7 +187,7 @@ func (g *Generator) applyRolePermissions(userClaims *jwt.UserClaims, user *pbtyp
 			// System users get unrestricted access
 			subscribePerms = []string{"$SYS.>", ">"}
 		} else {
-			subscribePerms = g.options.DefaultUserSubscribe
+			subscribePerms = g.options.DefaultSubscribePermissions
 		}
 	}
 

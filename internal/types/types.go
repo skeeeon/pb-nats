@@ -107,11 +107,10 @@ type Options struct {
 	DebounceInterval     time.Duration // Wait time after changes before processing
 	LogToConsole         bool
 	
-	// Default permissions (no scoping - accounts provide isolation)
-	DefaultAccountPublish     string   // Simple subject pattern
-	DefaultAccountSubscribe   []string // Simple subject patterns
-	DefaultUserPublish        string   // Simple subject pattern
-	DefaultUserSubscribe      []string // Simple subject patterns
+	// Default permissions for users when role permissions are empty
+	// Note: Accounts provide isolation boundaries, these are user defaults within accounts
+	DefaultPublishPermissions   []string // Default publish permissions when role is empty
+	DefaultSubscribePermissions []string // Default subscribe permissions when role is empty
 	
 	// Custom event filter function
 	// Return true to process the event, false to ignore
@@ -153,10 +152,12 @@ const (
 
 // Default permissions without scoping (accounts provide isolation)
 const (
-	DefaultAccountPublish  = ">"           // Full access within account
-	DefaultUserPublish     = "user.>"      // User-scoped subjects within account
-	DefaultInboxSubscribe  = "_INBOX.>"    // Standard inbox pattern
+	DefaultInboxSubscribe = "_INBOX.>" // Standard inbox pattern
 )
+
+// Default permission arrays for users when role permissions are empty
+var DefaultPublishPermissions = []string{">"}                    // Full access within account
+var DefaultSubscribePermissions = []string{">", "_INBOX.>"}      // Full access + inbox within account
 
 // Timeout and retry constants to eliminate magic numbers
 const (
@@ -167,10 +168,6 @@ const (
 	MaxQueueAttempts          = 10
 	DefaultProcessingTimeout  = 30 * time.Second
 )
-
-// Default subscribe permissions without scoping
-var DefaultAccountSubscribe = []string{">", "_INBOX.>"}         // Full account access + inbox
-var DefaultUserSubscribe = []string{">", "_INBOX.>"}           // Full account access + inbox
 
 // GetPublishPermissions extracts the string array from the JSON field
 func (r *RoleRecord) GetPublishPermissions() ([]string, error) {

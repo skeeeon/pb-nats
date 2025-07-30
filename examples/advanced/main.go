@@ -47,20 +47,12 @@ func main() {
 	
 	// Custom default permissions for production security
 	// Note: No scoping needed - accounts provide isolation
-	natsOptions.DefaultAccountPublish = "events.>"       // More restrictive than full access
-	natsOptions.DefaultAccountSubscribe = []string{
+	natsOptions.DefaultPublishPermissions = []string{"events.>"} // More restrictive than full access
+	natsOptions.DefaultSubscribePermissions = []string{
 		"events.>",           // Account events
 		"notifications.>",    // Account notifications  
 		"_INBOX.>",           // Standard inbox
 		"global.announcements.>", // Company-wide announcements (if using imports/exports)
-	}
-	
-	// More restrictive user defaults
-	natsOptions.DefaultUserPublish = "user.events.>"
-	natsOptions.DefaultUserSubscribe = []string{
-		"user.>",       // User's personal channels within account
-		"events.>",     // Account events
-		"_INBOX.>",     // Standard inbox
 	}
 	
 	// Custom event filtering for production

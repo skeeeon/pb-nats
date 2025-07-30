@@ -21,11 +21,9 @@ func DefaultOptions() Options {
 		DebounceInterval:          3 * time.Second,
 		LogToConsole:              true,
 		
-		// Default permissions without scoping - accounts provide isolation
-		DefaultAccountPublish:     pbtypes.DefaultAccountPublish,
-		DefaultAccountSubscribe:   pbtypes.DefaultAccountSubscribe,
-		DefaultUserPublish:        pbtypes.DefaultUserPublish,
-		DefaultUserSubscribe:      pbtypes.DefaultUserSubscribe,
+		// Default permissions for users when role permissions are empty
+		DefaultPublishPermissions:   pbtypes.DefaultPublishPermissions,
+		DefaultSubscribePermissions: pbtypes.DefaultSubscribePermissions,
 		
 		EventFilter:               nil, // No filter by default, process all events
 	}
@@ -63,17 +61,11 @@ func applyDefaultOptions(options Options) Options {
 	}
 
 	// Apply default permissions if not provided
-	if options.DefaultAccountPublish == "" {
-		options.DefaultAccountPublish = defaults.DefaultAccountPublish
+	if len(options.DefaultPublishPermissions) == 0 {
+		options.DefaultPublishPermissions = defaults.DefaultPublishPermissions
 	}
-	if len(options.DefaultAccountSubscribe) == 0 {
-		options.DefaultAccountSubscribe = defaults.DefaultAccountSubscribe
-	}
-	if options.DefaultUserPublish == "" {
-		options.DefaultUserPublish = defaults.DefaultUserPublish
-	}
-	if len(options.DefaultUserSubscribe) == 0 {
-		options.DefaultUserSubscribe = defaults.DefaultUserSubscribe
+	if len(options.DefaultSubscribePermissions) == 0 {
+		options.DefaultSubscribePermissions = defaults.DefaultSubscribePermissions
 	}
 
 	return options

@@ -49,15 +49,13 @@ const (
 	EventTypeRoleUpdate    = pbtypes.EventTypeRoleUpdate
 	EventTypeRoleDelete    = pbtypes.EventTypeRoleDelete
 	
-	DefaultAccountPublish  = pbtypes.DefaultAccountPublish
-	DefaultUserPublish     = pbtypes.DefaultUserPublish
-	DefaultInboxSubscribe  = pbtypes.DefaultInboxSubscribe
+	DefaultInboxSubscribe = pbtypes.DefaultInboxSubscribe
 )
 
 // Re-export variables for external use
 var (
-	DefaultAccountSubscribe = pbtypes.DefaultAccountSubscribe
-	DefaultUserSubscribe    = pbtypes.DefaultUserSubscribe
+	DefaultPublishPermissions   = pbtypes.DefaultPublishPermissions
+	DefaultSubscribePermissions = pbtypes.DefaultSubscribePermissions
 )
 
 // Setup initializes the NATS JWT synchronization for a PocketBase instance.

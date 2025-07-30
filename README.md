@@ -27,8 +27,8 @@ A high-performance library for seamless integration between [PocketBase](https:/
 ## 🏗️ Architecture
 
 ```
-OLD: PocketBase Collections → Config File Generation → NATS Reload
-NEW: PocketBase Collections → Direct JWT Generation → NATS Account Publishing
+Traditional: PocketBase Collections → Config File Generation → NATS Reload
+pb-nats: PocketBase Collections → Direct JWT Generation → NATS Account Publishing
 ```
 
 ### Core Components
@@ -113,7 +113,7 @@ PocketBase auth collection with NATS-specific fields.
 | `creds_file` | Text | Complete .creds file (auto-generated) |
 | `bearer_token` | Boolean | Enable bearer token authentication |
 | `jwt_expires_at` | DateTime | Optional JWT expiration |
-| `regenerate` | Boolean | **NEW**: Triggers JWT regeneration when set to true |
+| `regenerate` | Boolean | Triggers JWT regeneration when set to true |
 | `active` | Boolean | Whether the user is active |
 
 ### 3. Roles Collection (`nats_roles`)
@@ -170,13 +170,16 @@ options.DebounceInterval = 3 * time.Second       // Debounce rapid changes
 // JWT settings
 options.DefaultJWTExpiry = 24 * time.Hour        // Set expiration (0 = never expires)
 
-// Default permissions (no scoping - accounts provide isolation)
-options.DefaultAccountPublish = ">"               // Full access within account
-options.DefaultAccountSubscribe = []string{">", "_INBOX.>"}
-options.DefaultUserPublish = "user.>"            // User-scoped within account
-options.DefaultUserSubscribe = []string{">", "_INBOX.>"}
+// Default permissions for users when role permissions are empty
+// Note: Accounts provide isolation boundaries, no scoping needed
+options.DefaultPublishPermissions = []string{">"}               // Full access within account
+options.DefaultSubscribePermissions = []string{">", "_INBOX.>"}  // Full access + inbox within account
 
 // Custom event filtering
+options.EventFilter = func(collectionName, eventType string) bool {
+    // Only process certain events
+    return true
+}
 options.EventFilter = func(collectionName, eventType string) bool {
     // Only process certain events
     return true
@@ -472,23 +475,6 @@ Check the `examples/` directory for:
 - `basic/` - Simple setup with default options
 - `advanced/` - Custom configuration with pb-audit integration  
 - `integration/` - Complete workflow demonstration with JWT regeneration
-
-## 🔄 Migration from v0.x
-
-### Key Changes in v1.0
-
-1. **Terminology**: `organizations` → `accounts` (aligns with NATS)
-2. **Scoping Removed**: No more `{org}` placeholders - accounts provide isolation
-3. **Collection Names**: All collections now have `nats_` prefix
-4. **JWT Regeneration**: New `regenerate` boolean field
-5. **Simplified Permissions**: Use simple subject patterns like `sensors.>` instead of `{org}.sensors.>`
-
-### Migration Steps
-
-1. **Update collection references** in your code
-2. **Remove scoping** from permission templates
-3. **Test JWT regeneration** via the new `regenerate` field
-4. **Update client code** to use simple subject names
 
 ## 🤝 Contributing
 

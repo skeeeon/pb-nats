@@ -17,10 +17,8 @@ func main() {
 	options.NATSServerURL = "nats://localhost:4222"           // Your NATS server
 	options.OperatorName = "my-company"                       // Your operator name
 	options.DebounceInterval = 3 * time.Second                // Wait 3 seconds after changes before updating
-	options.DefaultAccountPublish = ">"                       // Default account publish permission (full access within account)
-	options.DefaultAccountSubscribe = []string{">", "_INBOX.>"} // Default account subscribe permissions
-	options.DefaultUserPublish = "user.>"                     // Default user publish permission (user-scoped within account)
-	options.DefaultUserSubscribe = []string{">", "_INBOX.>"}   // Default user subscribe permissions
+	options.DefaultPublishPermissions = []string{">"}         // Default publish permissions when role is empty (full access within account)
+	options.DefaultSubscribePermissions = []string{">", "_INBOX.>"} // Default subscribe permissions when role is empty
 	options.PublishQueueInterval = 30 * time.Second           // Process queue every 30 seconds
 
 	// Initialize pb-nats
