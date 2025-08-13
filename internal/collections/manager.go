@@ -410,6 +410,11 @@ func (cm *Manager) createPublishQueueCollection() error {
 		Max:     types.Pointer(10.0), // Max 10 retry attempts
 	})
 	
+	// Add failed_at field for tracking permanently failed records
+	collection.Fields.Add(&core.DateField{
+		Name: "failed_at",
+	})
+	
 	// Add timestamps
 	collection.Fields.Add(&core.AutodateField{
 		Name:     "created",

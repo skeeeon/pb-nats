@@ -158,6 +158,8 @@ func initializeComponents(app *pocketbase.PocketBase, options Options, logger *u
 	logger.Info("   System operator: %s", options.OperatorName)
 	logger.Info("   Queue processing: %v intervals", options.PublishQueueInterval)
 	logger.Info("   Debounce delay: %v", options.DebounceInterval)
+	logger.Info("   Failed record cleanup: %v intervals", options.FailedRecordCleanupInterval)
+	logger.Info("   Failed record retention: %v", options.FailedRecordRetentionTime)
 	logger.Info("   Resource cleanup: automatic via context cancellation")
 
 	return nil
@@ -640,6 +642,15 @@ func validateOptions(options Options) error {
 	}
 	
 	if err := utils.ValidatePositiveDuration(options.DebounceInterval, "debounce interval"); err != nil {
+		return err
+	}
+
+	// Validate failed record cleanup options
+	if err := utils.ValidatePositiveDuration(options.FailedRecordCleanupInterval, "failed record cleanup interval"); err != nil {
+		return err
+	}
+	
+	if err := utils.ValidatePositiveDuration(options.FailedRecordRetentionTime, "failed record retention time"); err != nil {
 		return err
 	}
 

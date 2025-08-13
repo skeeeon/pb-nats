@@ -102,9 +102,15 @@ func (p *Manager) QueueAccountUpdate(accountID string, action string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// Check if there's already a queued operation for this account
+	// Check if there's already a queued operation for this account (excluding failed records)
 	existingRecords, err := p.app.FindAllRecords(pbtypes.PublishQueueCollectionName, 
-		dbx.HashExp{"account_id": accountID})
+		dbx.And(
+			dbx.HashExp{"account_id": accountID},
+			dbx.Or(
+				dbx.NewExp("failed_at IS NULL"),
+				dbx.HashExp{"failed_at": ""},
+			),
+		))
 	if err != nil {
 		return utils.WrapErrorf(err, "failed to check existing queue records for account %s", accountID)
 	}
@@ -133,12 +139,17 @@ func (p *Manager) QueueAccountUpdate(accountID string, action string) error {
 	return nil
 }
 
-// ProcessPublishQueue processes all pending publish operations
+// ProcessPublishQueue processes all pending publish operations (excludes failed records)
 func (p *Manager) ProcessPublishQueue() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	records, err := p.app.FindAllRecords(pbtypes.PublishQueueCollectionName)
+	// Only get non-failed records (failed_at is empty or null)
+	records, err := p.app.FindAllRecords(pbtypes.PublishQueueCollectionName, 
+		dbx.Or(
+			dbx.NewExp("failed_at IS NULL"),
+			dbx.HashExp{"failed_at": ""},
+		))
 	if err != nil {
 		return utils.WrapError(err, "failed to retrieve publish queue records")
 	}
@@ -166,17 +177,72 @@ func (p *Manager) ProcessPublishQueue() error {
 	return nil
 }
 
-// processQueuePeriodically runs the queue processor on a timer
+// CleanupFailedRecords removes old failed records from the queue
+func (p *Manager) CleanupFailedRecords() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	cutoffTime := time.Now().Add(-p.options.FailedRecordRetentionTime)
+	
+	// Find old failed records using dbx expressions (consistent with existing patterns)
+	failedRecords, err := p.app.FindAllRecords(pbtypes.PublishQueueCollectionName,
+		dbx.And(
+			dbx.NewExp("failed_at IS NOT NULL"),
+			dbx.NewExp("failed_at != ''"),
+			dbx.NewExp("failed_at < {:cutoff}", dbx.Params{"cutoff": cutoffTime.Format(time.RFC3339)}),
+		))
+	if err != nil {
+		return utils.WrapError(err, "failed to find old failed records")
+	}
+
+	if len(failedRecords) == 0 {
+		return nil // Nothing to clean up
+	}
+
+	p.logger.Info("Cleaning up %d old failed queue records older than %v", 
+		len(failedRecords), p.options.FailedRecordRetentionTime)
+
+	cleaned := 0
+	errors := 0
+
+	// Delete old failed records
+	for _, record := range failedRecords {
+		if err := p.app.Delete(record); err != nil {
+			errors++
+			p.logger.Warning("Failed to delete old failed record %s: %v", record.Id, err)
+		} else {
+			cleaned++
+		}
+	}
+
+	if errors > 0 {
+		p.logger.Warning("Cleanup completed: %d cleaned, %d errors", cleaned, errors)
+	} else {
+		p.logger.Success("Cleanup completed: %d old failed records removed", cleaned)
+	}
+
+	return nil
+}
+
+// processQueuePeriodically runs the queue processor and cleanup on separate timers
 func (p *Manager) processQueuePeriodically() {
-	ticker := time.NewTicker(p.options.PublishQueueInterval)
-	defer ticker.Stop()
+	queueTicker := time.NewTicker(p.options.PublishQueueInterval)
+	cleanupTicker := time.NewTicker(p.options.FailedRecordCleanupInterval)
+	defer queueTicker.Stop()
+	defer cleanupTicker.Stop()
 
 	for {
 		select {
-		case <-ticker.C:
+		case <-queueTicker.C:
 			if err := p.ProcessPublishQueue(); err != nil {
 				p.logger.Warning("Queue processing error: %v", err)
 			}
+			
+		case <-cleanupTicker.C:
+			if err := p.CleanupFailedRecords(); err != nil {
+				p.logger.Warning("Failed record cleanup error: %v", err)
+			}
+			
 		case <-p.ctx.Done():
 			p.logger.Info("Queue processor shutting down...")
 			return
@@ -190,9 +256,19 @@ func (p *Manager) processQueueRecord(record *core.Record) error {
 	action := record.GetString("action")
 	attempts := record.GetInt("attempts")
 
+	// Check if this record has exceeded max attempts
 	if attempts >= pbtypes.MaxQueueAttempts {
-		p.logger.Warning("Skipping queue record %s after %d attempts", record.Id, attempts)
-		return nil // Don't retry further
+		p.logger.Warning("Marking queue record %s as permanently failed after %d attempts", record.Id, attempts)
+		
+		// Mark as failed with timestamp instead of just skipping
+		record.Set("failed_at", time.Now())
+		record.Set("message", "Exceeded maximum retry attempts")
+		
+		if err := p.app.Save(record); err != nil {
+			return utils.WrapError(err, "failed to mark queue record as failed")
+		}
+		
+		return nil // Successfully handled by marking as failed
 	}
 
 	// Get account record
@@ -342,6 +418,7 @@ func (p *Manager) createQueueRecord(accountID, action string) error {
 	record.Set("action", action)
 	record.Set("attempts", 0)
 	record.Set("message", "")
+	record.Set("failed_at", "") // Ensure failed_at is empty for new records
 
 	if err := p.app.Save(record); err != nil {
 		return utils.WrapError(err, "failed to save queue record")

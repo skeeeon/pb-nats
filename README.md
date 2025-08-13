@@ -12,6 +12,7 @@ A high-performance library for seamless integration between [PocketBase](https:/
 - **🔧 Zero Configuration Files**: No file management, all data stored in PocketBase database
 - **⚡ Queue-Based Publishing**: Reliable JWT publishing with retry logic and debouncing
 - **🔄 JWT Regeneration**: Simple regeneration via boolean field trigger
+- **🧹 Smart Cleanup**: Automatic cleanup of failed records with configurable retention
 - **🛡️ Production Ready**: Built on battle-tested patterns with comprehensive error handling
 
 ## 📈 Performance Benefits
@@ -23,6 +24,7 @@ A high-performance library for seamless integration between [PocketBase](https:/
 | **Concurrent operations** | Limited by OS | Thousands |
 | **Startup time** | Process spawn | Immediate |
 | **File management** | Complex | None |
+| **Failed record handling** | Manual cleanup | Automatic |
 
 ## 🏗️ Architecture
 
@@ -36,6 +38,7 @@ pb-nats: PocketBase Collections → Direct JWT Generation → NATS Account Publi
 - **Users** → NATS Users (with role-based permissions within accounts)  
 - **Roles** → Permission templates
 - **System Components** → Auto-managed operator and system account
+- **Failed Record Management** → Automatic cleanup with configurable retention
 
 ## 📦 Installation
 
@@ -60,7 +63,7 @@ func main() {
     
     // Setup NATS JWT integration with default options
     if err := pbnats.Setup(app, pbnats.DefaultOptions()); err != nil {
-        log.Fatalf("Failed to setup NATS JWT sync: %v", err)
+        log.Fatalf("Failed to setup NATS sync: %v", err)
     }
     
     // Start the PocketBase app as usual
@@ -131,6 +134,20 @@ Defines permission templates for users.
 | `max_data` | Number | Max data limit (-1 = unlimited) |
 | `max_payload` | Number | Max payload size (-1 = unlimited) |
 
+### 4. Publish Queue Collection (`nats_publish_queue`) - Hidden
+
+Internal queue for reliable NATS publishing with automatic cleanup.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `account_id` | Relation | Link to nats_accounts |
+| `action` | Select | "upsert" or "delete" |
+| `message` | Text | Error message if failed |
+| `attempts` | Number | Number of retry attempts |
+| `failed_at` | DateTime | Timestamp when marked as permanently failed |
+| `created` | DateTime | Queue record creation time |
+| `updated` | DateTime | Last update time |
+
 ### Permission Examples
 
 Permissions are simple subject patterns - **no scoping needed** since accounts provide isolation:
@@ -167,19 +184,19 @@ options.OperatorName = "your-operator-name"
 options.PublishQueueInterval = 30 * time.Second  // Queue processing frequency
 options.DebounceInterval = 3 * time.Second       // Debounce rapid changes
 
+// Failed record management (NEW)
+options.FailedRecordCleanupInterval = 6 * time.Hour   // How often to run cleanup
+options.FailedRecordRetentionTime = 24 * time.Hour    // Keep failed records for debugging
+
 // JWT settings
 options.DefaultJWTExpiry = 24 * time.Hour        // Set expiration (0 = never expires)
 
 // Default permissions for users when role permissions are empty
 // Note: Accounts provide isolation boundaries, no scoping needed
 options.DefaultPublishPermissions = []string{">"}               // Full access within account
-options.DefaultSubscribePermissions = []string{">", "_INBOX.>"}  // Full access + inbox within account
+options.DefaultSubscribePermissions = []string{">", "_INBOX.>"} // Full access + inbox within account
 
 // Custom event filtering
-options.EventFilter = func(collectionName, eventType string) bool {
-    // Only process certain events
-    return true
-}
 options.EventFilter = func(collectionName, eventType string) bool {
     // Only process certain events
     return true
@@ -189,6 +206,24 @@ options.EventFilter = func(collectionName, eventType string) bool {
 if err := pbnats.Setup(app, options); err != nil {
     log.Fatalf("Failed to setup NATS JWT sync: %v", err)
 }
+```
+
+### Failed Record Management Configuration
+
+The library now includes intelligent failed record management:
+
+```go
+// Conservative: Check frequently, keep longer for debugging
+options.FailedRecordCleanupInterval = 1 * time.Hour     // Check every hour
+options.FailedRecordRetentionTime = 7 * 24 * time.Hour  // Keep for 7 days
+
+// Aggressive: Clean up quickly to save space
+options.FailedRecordCleanupInterval = 12 * time.Hour    // Check twice daily
+options.FailedRecordRetentionTime = 6 * time.Hour       // Delete after 6 hours
+
+// Balanced (default): Good for most production use cases
+options.FailedRecordCleanupInterval = 6 * time.Hour     // Check 4 times daily
+options.FailedRecordRetentionTime = 24 * time.Hour      // Keep 1 day for debugging
 ```
 
 ## 🔒 Security Model
@@ -317,11 +352,19 @@ Accounts provide natural isolation boundaries - **no subject scoping needed**:
 
 ## 📊 How It Works
 
+### Main Processing Flow
 1. **Collection Changes**: User creates/updates account, user, or role
 2. **JWT Generation**: Library generates appropriate JWTs using pure Go libraries
 3. **Queue Publishing**: Changes are queued for reliable processing with debouncing
 4. **NATS Publishing**: JWTs are published directly to NATS via `$SYS.REQ.CLAIMS.UPDATE`
 5. **Real-time Updates**: Users immediately get new permissions without server restarts
+
+### Failed Record Management (NEW)
+1. **Retry Logic**: Failed operations are retried up to 10 times with incremental backoff
+2. **Intelligent Marking**: Records exceeding max attempts are marked with `failed_at` timestamp
+3. **Efficient Processing**: Main queue ignores failed records, preventing wasted cycles
+4. **Automatic Cleanup**: Old failed records are automatically removed after retention period
+5. **Configurable Retention**: Keep failed records for debugging (default: 24 hours)
 
 ### Event Flow
 ```
@@ -331,6 +374,12 @@ JWT Generation →
 Queue Publishing → 
 NATS Server Update → 
 Immediate Permission Changes
+
+Failed Records →
+Mark with Timestamp →
+Exclude from Processing →
+Periodic Cleanup →
+Database Optimization
 ```
 
 ### Initialization Order
@@ -363,6 +412,21 @@ system_account: <AUTO_GENERATED_SYS_ACCOUNT_KEY>
 port: 4222
 http_port: 8222
 jetstream: enabled
+```
+
+### Production Monitoring
+
+The library provides comprehensive logging for production monitoring:
+
+```go
+options := pbnats.DefaultOptions()
+options.LogToConsole = true  // Enable detailed logging
+
+// Monitor these log patterns:
+// - "Queue processing complete: X processed, Y failed"
+// - "Cleaning up N old failed queue records"
+// - "Marked queue record as permanently failed"
+// - "Successfully processed [action] for account [name]"
 ```
 
 ### Combined with pb-audit
@@ -410,6 +474,7 @@ func main() {
 // Users isolated to their account's data streams
 // Admins can access cross-account monitoring streams via imports/exports
 // Real-time permission updates as subscriptions change
+// Automatic cleanup of failed synchronization attempts
 ```
 
 ### Development Teams
@@ -436,6 +501,12 @@ A: Check that permissions are valid NATS subject patterns and don't include scop
 **Q: JWT regeneration not working**
 A: Ensure the `regenerate` field is being set to `true` and the user has permission to update their own record.
 
+**Q: Failed records building up in database**
+A: Check your `FailedRecordCleanupInterval` and `FailedRecordRetentionTime` settings. Ensure the cleanup process is running (check logs for "Cleaning up N old failed queue records").
+
+**Q: Queue processing seems slow**
+A: Failed records are now automatically excluded from processing. If you see "Marked queue record as permanently failed" messages, those records won't slow down future processing.
+
 ### Debug Logging
 
 ```go
@@ -448,6 +519,7 @@ options.LogToConsole = true  // Enable detailed logging
 // - JWT generation
 // - Queue processing
 // - NATS publishing results
+// - Failed record cleanup operations
 ```
 
 ### Error Classification
@@ -468,6 +540,15 @@ if severity == pbnats.SeverityCritical {
     // Alert operations team
 }
 ```
+
+### Failed Record Investigation
+
+When troubleshooting failed records:
+
+1. **Check the publish queue**: Look at the `nats_publish_queue` collection
+2. **Review error messages**: Failed records contain detailed error information
+3. **Check timing**: Failed records are kept for the retention period (default: 24 hours)
+4. **Monitor cleanup**: Look for cleanup log messages in your application logs
 
 ## 📚 Examples
 

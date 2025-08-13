@@ -21,6 +21,10 @@ func DefaultOptions() Options {
 		DebounceInterval:          3 * time.Second,
 		LogToConsole:              true,
 		
+		// Failed record cleanup configuration
+		FailedRecordCleanupInterval: 6 * time.Hour,  // Run cleanup 4 times per day
+		FailedRecordRetentionTime:   24 * time.Hour, // Keep failed records for 1 day for debugging
+		
 		// Default permissions for users when role permissions are empty
 		DefaultPublishPermissions:   pbtypes.DefaultPublishPermissions,
 		DefaultSubscribePermissions: pbtypes.DefaultSubscribePermissions,
@@ -58,6 +62,14 @@ func applyDefaultOptions(options Options) Options {
 	}
 	if options.DebounceInterval <= 0 {
 		options.DebounceInterval = defaults.DebounceInterval
+	}
+
+	// Apply failed record cleanup intervals
+	if options.FailedRecordCleanupInterval <= 0 {
+		options.FailedRecordCleanupInterval = defaults.FailedRecordCleanupInterval
+	}
+	if options.FailedRecordRetentionTime <= 0 {
+		options.FailedRecordRetentionTime = defaults.FailedRecordRetentionTime
 	}
 
 	// Apply default permissions if not provided

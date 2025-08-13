@@ -78,13 +78,14 @@ type SystemOperatorRecord struct {
 
 // PublishQueueRecord represents a queued account publish operation
 type PublishQueueRecord struct {
-	ID        string    `json:"id"`
-	AccountID string    `json:"account_id"` // FK to accounts
-	Action    string    `json:"action"`     // "upsert" or "delete"
-	Message   string    `json:"message"`    // Error message if failed
-	Attempts  int       `json:"attempts"`   // Number of retry attempts
-	Created   time.Time `json:"created"`
-	Updated   time.Time `json:"updated"`
+	ID        string     `json:"id"`
+	AccountID string     `json:"account_id"` // FK to accounts
+	Action    string     `json:"action"`     // "upsert" or "delete"
+	Message   string     `json:"message"`    // Error message if failed
+	Attempts  int        `json:"attempts"`   // Number of retry attempts
+	FailedAt  *time.Time `json:"failed_at"`  // When the record was marked as permanently failed
+	Created   time.Time  `json:"created"`
+	Updated   time.Time  `json:"updated"`
 }
 
 // Options allows customizing the behavior of the NATS JWT synchronization
@@ -106,6 +107,10 @@ type Options struct {
 	PublishQueueInterval time.Duration // How often to process the publish queue
 	DebounceInterval     time.Duration // Wait time after changes before processing
 	LogToConsole         bool
+	
+	// Failed record cleanup
+	FailedRecordCleanupInterval time.Duration // How often to run cleanup job
+	FailedRecordRetentionTime   time.Duration // How old records must be before deletion
 	
 	// Default permissions for users when role permissions are empty
 	// Note: Accounts provide isolation boundaries, these are user defaults within accounts
