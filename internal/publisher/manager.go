@@ -8,60 +8,88 @@ import (
 	"time"
 
 	jwt "github.com/nats-io/jwt/v2"
-	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
 	"github.com/pocketbase/dbx"
 	"github.com/pocketbase/pocketbase"
 	"github.com/pocketbase/pocketbase/core"
+	"github.com/skeeeon/pb-nats/internal/connection"
 	"github.com/skeeeon/pb-nats/internal/utils"
 	pbtypes "github.com/skeeeon/pb-nats/internal/types"
 )
 
-// Manager handles publishing account JWTs to NATS servers
+// Manager handles publishing account JWTs to NATS servers with persistent connections and graceful bootstrap
 type Manager struct {
-	app       *pocketbase.PocketBase
-	options   pbtypes.Options
-	logger    *utils.Logger
-	mu        sync.Mutex
-	ctx       context.Context
-	cancelCtx context.CancelFunc
+	app         *pocketbase.PocketBase
+	options     pbtypes.Options
+	logger      *utils.Logger
+	connManager *connection.Manager
+	mu          sync.Mutex
+	ctx         context.Context
+	cancelCtx   context.CancelFunc
 }
 
-// NewManager creates a new account publisher
+// NewManager creates a new account publisher with persistent NATS connection and graceful bootstrap
 func NewManager(app *pocketbase.PocketBase, options pbtypes.Options) *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
 	
+	logger := utils.NewLogger(options.LogToConsole)
+	
+	// Create connection manager
+	connManager := connection.NewManager(
+		options.NATSServerURL,
+		options.BackupNATSServerURLs,
+		options.ConnectionRetryConfig,
+		options.ConnectionTimeouts,
+		logger,
+	)
+	
 	return &Manager{
-		app:       app,
-		options:   options,
-		logger:    utils.NewLogger(options.LogToConsole),
-		ctx:       ctx,
-		cancelCtx: cancel,
+		app:         app,
+		options:     options,
+		logger:      logger,
+		connManager: connManager,
+		ctx:         ctx,
+		cancelCtx:   cancel,
 	}
 }
 
-// Start begins the publish queue processor
+// Start begins the publish queue processor and attempts NATS connection (graceful bootstrap)
 func (p *Manager) Start() error {
-	p.logger.Start("Starting NATS account publisher...")
+	p.logger.Start("Starting NATS account publisher with graceful bootstrap...")
+
+	// Initialize connection in bootstrap mode (won't fail if NATS is unavailable)
+	if err := p.initializeBootstrapConnection(); err != nil {
+		// Log warning but don't fail - this is expected during bootstrap
+		p.logger.Warning("NATS connection not available during startup (bootstrap mode): %v", err)
+		p.logger.Info("Publisher will continue operating - connection will be established when NATS becomes available")
+	}
 
 	// Start the queue processor as a background goroutine
 	go p.processQueuePeriodically()
 	
-	p.logger.Success("NATS account publisher started with %v intervals", p.options.PublishQueueInterval)
+	p.logger.Success("NATS account publisher started (bootstrap mode enabled)")
 	
 	return nil
 }
 
-// Stop stops the publish queue processor
+// Stop stops the publish queue processor and closes NATS connection
 func (p *Manager) Stop() {
 	p.logger.Stop("Stopping NATS account publisher...")
 	
+	// Cancel context first to signal background processes to stop
 	p.cancelCtx()
+	
+	// Close connection manager safely
+	if p.connManager != nil {
+		if err := p.connManager.Close(); err != nil {
+			p.logger.Warning("Error closing connection manager: %v", err)
+		}
+	}
 	
 	p.logger.Success("NATS account publisher stopped")
 }
 
-// PublishAccount publishes an account's JWT to NATS
+// PublishAccount publishes an account's JWT to NATS using persistent connection
 func (p *Manager) PublishAccount(account *pbtypes.AccountRecord) error {
 	if account == nil {
 		return utils.WrapError(fmt.Errorf("account record is nil"), "publish account validation failed")
@@ -74,7 +102,7 @@ func (p *Manager) PublishAccount(account *pbtypes.AccountRecord) error {
 	return p.publishAccountJWT(account.JWT, account.NormalizeName())
 }
 
-// RemoveAccount removes an account from NATS
+// RemoveAccount removes an account from NATS using persistent connection
 func (p *Manager) RemoveAccount(account *pbtypes.AccountRecord) error {
 	if account == nil {
 		return utils.WrapError(fmt.Errorf("account record is nil"), "remove account validation failed")
@@ -139,7 +167,7 @@ func (p *Manager) QueueAccountUpdate(accountID string, action string) error {
 	return nil
 }
 
-// ProcessPublishQueue processes all pending publish operations (excludes failed records)
+// ProcessPublishQueue processes all pending publish operations with bootstrap mode awareness
 func (p *Manager) ProcessPublishQueue() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -158,6 +186,13 @@ func (p *Manager) ProcessPublishQueue() error {
 		return nil // No work to do
 	}
 
+	// Check if we're in bootstrap mode
+	isBootstrapping := p.connManager.IsBootstrapping()
+	if isBootstrapping {
+		p.logger.Info("Bootstrap mode: %d operations queued, waiting for NATS connection", len(records))
+		return nil // Don't process queue during bootstrap
+	}
+
 	p.logger.Process("Processing %d queued publish operations...", len(records))
 
 	processed := 0
@@ -172,7 +207,9 @@ func (p *Manager) ProcessPublishQueue() error {
 		}
 	}
 
-	p.logger.Success("Queue processing complete: %d processed, %d failed", processed, failed)
+	if processed > 0 || failed > 0 {
+		p.logger.Success("Queue processing complete: %d processed, %d failed", processed, failed)
+	}
 
 	return nil
 }
@@ -217,10 +254,32 @@ func (p *Manager) CleanupFailedRecords() error {
 
 	if errors > 0 {
 		p.logger.Warning("Cleanup completed: %d cleaned, %d errors", cleaned, errors)
-	} else {
+	} else if cleaned > 0 {
 		p.logger.Success("Cleanup completed: %d old failed records removed", cleaned)
 	}
 
+	return nil
+}
+
+// initializeBootstrapConnection attempts to establish NATS connection in bootstrap mode
+func (p *Manager) initializeBootstrapConnection() error {
+	// Get system user for connection
+	sysUser, err := p.getSystemUser()
+	if err != nil {
+		return utils.WrapError(err, "failed to get system user for NATS connection")
+	}
+
+	// Start in bootstrap mode - won't fail if NATS is unavailable
+	p.connManager.StartBootstrap(sysUser.JWT, sysUser.Seed)
+
+	// Try immediate connection - if it fails, bootstrap mode handles it gracefully
+	err = p.connManager.Connect(sysUser.JWT, sysUser.Seed)
+	if err != nil {
+		// This is expected during bootstrap - connection manager will keep retrying
+		return fmt.Errorf("NATS server not available yet (this is normal during bootstrap)")
+	}
+
+	p.logger.Success("NATS connection established immediately")
 	return nil
 }
 
@@ -250,7 +309,7 @@ func (p *Manager) processQueuePeriodically() {
 	}
 }
 
-// processQueueRecord processes a single queue record with retry logic
+// processQueueRecord processes a single queue record with retry logic and bootstrap awareness
 func (p *Manager) processQueueRecord(record *core.Record) error {
 	accountID := record.GetString("account_id")
 	action := record.GetString("action")
@@ -294,6 +353,16 @@ func (p *Manager) processQueueRecord(record *core.Record) error {
 	}
 
 	if processErr != nil {
+		// Check if this is a bootstrap-related error
+		if utils.Contains(processErr.Error(), "bootstrap mode") {
+			// Don't increment attempts for bootstrap mode - just wait
+			record.Set("message", "Waiting for NATS connection (bootstrap mode)")
+			if err := p.app.Save(record); err != nil {
+				return utils.WrapError(err, "failed to update queue record with bootstrap message")
+			}
+			return nil // Don't count as failure during bootstrap
+		}
+
 		// Update record with error and increment attempts
 		record.Set("attempts", attempts+1)
 		record.Set("message", utils.TruncateString(processErr.Error(), 500))
@@ -311,7 +380,7 @@ func (p *Manager) processQueueRecord(record *core.Record) error {
 	return p.app.Delete(record)
 }
 
-// publishAccountJWT publishes an account JWT to NATS
+// publishAccountJWT publishes an account JWT to NATS using persistent connection
 func (p *Manager) publishAccountJWT(accountJWT, accountName string) error {
 	if err := utils.ValidateRequired(accountJWT, "account JWT"); err != nil {
 		return utils.WrapError(err, "publish account JWT validation failed")
@@ -321,24 +390,13 @@ func (p *Manager) publishAccountJWT(accountJWT, accountName string) error {
 		return utils.WrapError(err, "publish account JWT validation failed")
 	}
 
-	// Get system user for connection
-	sysUser, err := p.getSystemUser()
+	// Use connection manager for publishing with automatic failover and bootstrap handling
+	resp, err := p.connManager.Request("$SYS.REQ.CLAIMS.UPDATE", []byte(accountJWT), p.options.ConnectionTimeouts.RequestTimeout)
 	if err != nil {
-		return utils.WrapError(err, "failed to get system user for NATS connection")
-	}
-
-	// Connect to NATS using system user JWT and seed with proper timeouts
-	nc, err := nats.Connect(p.options.NATSServerURL,
-		nats.UserJWTAndSeed(sysUser.JWT, sysUser.Seed),
-		nats.Timeout(pbtypes.DefaultNATSConnectTimeout))
-	if err != nil {
-		return utils.WrapErrorf(err, "failed to connect to NATS server %s", p.options.NATSServerURL)
-	}
-	defer nc.Close()
-
-	// Publish account JWT using NATS system request with proper timeout
-	resp, err := nc.Request("$SYS.REQ.CLAIMS.UPDATE", []byte(accountJWT), pbtypes.DefaultNATSTimeout)
-	if err != nil {
+		// Enhanced error message for bootstrap mode
+		if utils.Contains(err.Error(), "bootstrap mode") {
+			return fmt.Errorf("NATS connection not available (bootstrap mode) - account %s will be published when connection is established", accountName)
+		}
 		return utils.WrapErrorf(err, "failed to publish account JWT for %s", accountName)
 	}
 
@@ -347,7 +405,7 @@ func (p *Manager) publishAccountJWT(accountJWT, accountName string) error {
 	return nil
 }
 
-// removeAccountJWT removes an account JWT from NATS
+// removeAccountJWT removes an account JWT from NATS using persistent connection
 func (p *Manager) removeAccountJWT(accountPublicKey, accountName string) error {
 	if err := utils.ValidateRequired(accountPublicKey, "account public key"); err != nil {
 		return utils.WrapError(err, "remove account JWT validation failed")
@@ -362,21 +420,6 @@ func (p *Manager) removeAccountJWT(accountPublicKey, accountName string) error {
 	if err != nil {
 		return utils.WrapError(err, "failed to get system operator for account deletion")
 	}
-
-	// Get system user for connection
-	sysUser, err := p.getSystemUser()
-	if err != nil {
-		return utils.WrapError(err, "failed to get system user for NATS connection")
-	}
-
-	// Connect to NATS using system user JWT and seed with proper timeouts
-	nc, err := nats.Connect(p.options.NATSServerURL,
-		nats.UserJWTAndSeed(sysUser.JWT, sysUser.Seed),
-		nats.Timeout(pbtypes.DefaultNATSConnectTimeout))
-	if err != nil {
-		return utils.WrapErrorf(err, "failed to connect to NATS server %s", p.options.NATSServerURL)
-	}
-	defer nc.Close()
 
 	// Create deletion claim
 	claim := jwt.NewGenericClaims(operator.PublicKey)
@@ -393,15 +436,29 @@ func (p *Manager) removeAccountJWT(accountPublicKey, accountName string) error {
 		return utils.WrapError(err, "failed to encode deletion JWT")
 	}
 
-	// Send deletion request with proper timeout
-	resp, err := nc.Request("$SYS.REQ.CLAIMS.DELETE", []byte(deleteJWT), pbtypes.DefaultNATSTimeout)
+	// Send deletion request using connection manager with automatic failover and bootstrap handling
+	resp, err := p.connManager.Request("$SYS.REQ.CLAIMS.DELETE", []byte(deleteJWT), p.options.ConnectionTimeouts.RequestTimeout)
 	if err != nil {
+		// Enhanced error message for bootstrap mode
+		if utils.Contains(err.Error(), "bootstrap mode") {
+			return fmt.Errorf("NATS connection not available (bootstrap mode) - account %s deletion will be processed when connection is established", accountName)
+		}
 		return utils.WrapErrorf(err, "failed to delete account JWT for %s", accountName)
 	}
 
 	p.logger.Delete("Removed account %s from NATS: %s", accountName, utils.TruncateString(string(resp.Data), 100))
 
 	return nil
+}
+
+// updateConnectionCredentials updates the connection manager with new system user credentials
+func (p *Manager) updateConnectionCredentials() error {
+	sysUser, err := p.getSystemUser()
+	if err != nil {
+		return utils.WrapError(err, "failed to get updated system user credentials")
+	}
+
+	return p.connManager.UpdateCredentials(sysUser.JWT, sysUser.Seed)
 }
 
 // Helper methods

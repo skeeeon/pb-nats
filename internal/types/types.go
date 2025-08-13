@@ -88,6 +88,42 @@ type PublishQueueRecord struct {
 	Updated   time.Time  `json:"updated"`
 }
 
+// RetryConfig defines the retry and failover behavior for NATS connections
+type RetryConfig struct {
+	MaxPrimaryRetries int           `json:"max_primary_retries"` // Number of retries on primary before failover
+	InitialBackoff    time.Duration `json:"initial_backoff"`     // Initial backoff duration
+	MaxBackoff        time.Duration `json:"max_backoff"`         // Maximum backoff duration
+	BackoffMultiplier float64       `json:"backoff_multiplier"`  // Backoff multiplier for exponential backoff
+	FailbackInterval  time.Duration `json:"failback_interval"`   // How often to check primary health for failback
+}
+
+// DefaultRetryConfig returns sensible defaults for retry configuration
+func DefaultRetryConfig() *RetryConfig {
+	return &RetryConfig{
+		MaxPrimaryRetries: 4,
+		InitialBackoff:    1 * time.Second,
+		MaxBackoff:        8 * time.Second,
+		BackoffMultiplier: 2.0,
+		FailbackInterval:  30 * time.Second,
+	}
+}
+
+// TimeoutConfig defines timeout settings for NATS connections
+type TimeoutConfig struct {
+	ConnectTimeout time.Duration `json:"connect_timeout"` // Connection establishment timeout
+	PublishTimeout time.Duration `json:"publish_timeout"` // Publish operation timeout
+	RequestTimeout time.Duration `json:"request_timeout"` // Request operation timeout
+}
+
+// DefaultTimeoutConfig returns sensible defaults for timeout configuration
+func DefaultTimeoutConfig() *TimeoutConfig {
+	return &TimeoutConfig{
+		ConnectTimeout: 5 * time.Second,
+		PublishTimeout: 10 * time.Second,
+		RequestTimeout: 10 * time.Second,
+	}
+}
+
 // Options allows customizing the behavior of the NATS JWT synchronization
 type Options struct {
 	// Collection names
@@ -99,6 +135,10 @@ type Options struct {
 	OperatorName              string
 	NATSServerURL             string
 	BackupNATSServerURLs      []string
+	
+	// Connection management
+	ConnectionRetryConfig     *RetryConfig  // Retry and failover configuration
+	ConnectionTimeouts        *TimeoutConfig // Connection timeout configuration
 	
 	// JWT settings
 	DefaultJWTExpiry          time.Duration // Default: 0 (never expires)

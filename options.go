@@ -16,6 +16,10 @@ func DefaultOptions() Options {
 		NATSServerURL:             "nats://localhost:4222",
 		BackupNATSServerURLs:      []string{},
 		
+		// Connection management with sensible defaults
+		ConnectionRetryConfig:     pbtypes.DefaultRetryConfig(),
+		ConnectionTimeouts:        pbtypes.DefaultTimeoutConfig(),
+		
 		DefaultJWTExpiry:          0, // Never expires
 		PublishQueueInterval:      30 * time.Second,
 		DebounceInterval:          3 * time.Second,
@@ -54,6 +58,14 @@ func applyDefaultOptions(options Options) Options {
 	}
 	if options.NATSServerURL == "" {
 		options.NATSServerURL = defaults.NATSServerURL
+	}
+
+	// Apply connection management defaults
+	if options.ConnectionRetryConfig == nil {
+		options.ConnectionRetryConfig = defaults.ConnectionRetryConfig
+	}
+	if options.ConnectionTimeouts == nil {
+		options.ConnectionTimeouts = defaults.ConnectionTimeouts
 	}
 
 	// Apply timing intervals

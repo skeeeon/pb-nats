@@ -25,6 +25,8 @@ type NatsUserRecord = pbtypes.NatsUserRecord
 type RoleRecord = pbtypes.RoleRecord
 type SystemOperatorRecord = pbtypes.SystemOperatorRecord
 type PublishQueueRecord = pbtypes.PublishQueueRecord
+type RetryConfig = pbtypes.RetryConfig
+type TimeoutConfig = pbtypes.TimeoutConfig
 
 // Re-export constants for external use  
 const (
@@ -103,7 +105,10 @@ func Setup(app *pocketbase.PocketBase, options Options) error {
 	logger.Info("   User collection: %s", options.UserCollectionName)
 	logger.Info("   Role collection: %s", options.RoleCollectionName)
 	logger.Info("   Account collection: %s", options.AccountCollectionName)
-	logger.Info("   NATS server: %s", options.NATSServerURL)
+	logger.Info("   Primary NATS server: %s", options.NATSServerURL)
+	if len(options.BackupNATSServerURLs) > 0 {
+		logger.Info("   Backup NATS servers: %v", options.BackupNATSServerURLs)
+	}
 	logger.Info("   Operator: %s", options.OperatorName)
 
 	return nil
@@ -138,13 +143,13 @@ func initializeComponents(app *pocketbase.PocketBase, options Options, logger *u
 	}
 	logger.Success("   System components initialized")
 
-	// Step 5: Initialize publisher - depends on system components being ready
-	logger.Info("   Starting account publisher...")
+	// Step 5: Initialize publisher with connection manager - depends on system components being ready
+	logger.Info("   Starting account publisher with connection manager...")
 	accountPublisher := publisher.NewManager(app, options)
 	if err := accountPublisher.Start(); err != nil {
 		return utils.WrapError(err, "failed to start account publisher")
 	}
-	logger.Success("   Account publisher started")
+	logger.Success("   Account publisher started with persistent connections")
 
 	// Step 6: Initialize sync manager - sets up hooks, depends on all other components
 	logger.Info("   Setting up sync hooks...")
@@ -160,7 +165,8 @@ func initializeComponents(app *pocketbase.PocketBase, options Options, logger *u
 	logger.Info("   Debounce delay: %v", options.DebounceInterval)
 	logger.Info("   Failed record cleanup: %v intervals", options.FailedRecordCleanupInterval)
 	logger.Info("   Failed record retention: %v", options.FailedRecordRetentionTime)
-	logger.Info("   Resource cleanup: automatic via context cancellation")
+	logger.Info("   Connection management: persistent with automatic failover")
+	logger.Info("   Resource cleanup: automatic via context cancellation with race-condition protection")
 
 	return nil
 }
@@ -652,6 +658,43 @@ func validateOptions(options Options) error {
 	
 	if err := utils.ValidatePositiveDuration(options.FailedRecordRetentionTime, "failed record retention time"); err != nil {
 		return err
+	}
+
+	// Validate connection management options
+	if options.ConnectionRetryConfig != nil {
+		if options.ConnectionRetryConfig.MaxPrimaryRetries < 0 {
+			return fmt.Errorf("max primary retries must be non-negative, got: %d", options.ConnectionRetryConfig.MaxPrimaryRetries)
+		}
+		
+		if err := utils.ValidatePositiveDuration(options.ConnectionRetryConfig.InitialBackoff, "initial backoff"); err != nil {
+			return err
+		}
+		
+		if err := utils.ValidatePositiveDuration(options.ConnectionRetryConfig.MaxBackoff, "max backoff"); err != nil {
+			return err
+		}
+		
+		if options.ConnectionRetryConfig.BackoffMultiplier <= 0 {
+			return fmt.Errorf("backoff multiplier must be positive, got: %f", options.ConnectionRetryConfig.BackoffMultiplier)
+		}
+		
+		if err := utils.ValidatePositiveDuration(options.ConnectionRetryConfig.FailbackInterval, "failback interval"); err != nil {
+			return err
+		}
+	}
+	
+	if options.ConnectionTimeouts != nil {
+		if err := utils.ValidatePositiveDuration(options.ConnectionTimeouts.ConnectTimeout, "connect timeout"); err != nil {
+			return err
+		}
+		
+		if err := utils.ValidatePositiveDuration(options.ConnectionTimeouts.PublishTimeout, "publish timeout"); err != nil {
+			return err
+		}
+		
+		if err := utils.ValidatePositiveDuration(options.ConnectionTimeouts.RequestTimeout, "request timeout"); err != nil {
+			return err
+		}
 	}
 
 	return nil

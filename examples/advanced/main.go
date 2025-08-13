@@ -7,6 +7,7 @@ import (
 	"github.com/pocketbase/pocketbase"
 	"github.com/skeeeon/pb-audit"
 	"github.com/skeeeon/pb-nats"
+	pbtypes "github.com/skeeeon/pb-nats/internal/types"
 )
 
 func main() {
@@ -24,7 +25,7 @@ func main() {
 	}
 	
 	// =========================================================
-	// Configure pb-nats with custom options for production
+	// Configure pb-nats with advanced connection management
 	// =========================================================
 	natsOptions := pbnats.DefaultOptions()
 	
@@ -33,17 +34,38 @@ func main() {
 	natsOptions.RoleCollectionName = "nats_permission_roles"
 	natsOptions.AccountCollectionName = "business_accounts"
 	
-	// Production NATS configuration
+	// Production NATS configuration with failover
 	natsOptions.NATSServerURL = "nats://nats-cluster.company.com:4222"
 	natsOptions.BackupNATSServerURLs = []string{
 		"nats://nats-backup1.company.com:4222",
 		"nats://nats-backup2.company.com:4222",
+		"nats://nats-dr.company.com:4222", // Disaster recovery server
 	}
 	natsOptions.OperatorName = "company-production"
+	
+	// Advanced connection retry configuration
+	natsOptions.ConnectionRetryConfig = &pbtypes.RetryConfig{
+		MaxPrimaryRetries: 6,                   // More retries for production
+		InitialBackoff:    500 * time.Millisecond, // Faster initial retry
+		MaxBackoff:        10 * time.Second,    // Longer max backoff
+		BackoffMultiplier: 1.5,                 // Gentler backoff progression
+		FailbackInterval:  15 * time.Second,    // Check primary more frequently
+	}
+	
+	// Production timeout configuration
+	natsOptions.ConnectionTimeouts = &pbtypes.TimeoutConfig{
+		ConnectTimeout: 10 * time.Second, // Longer connect timeout for production
+		PublishTimeout: 30 * time.Second, // Longer publish timeout for large JWTs
+		RequestTimeout: 30 * time.Second, // Longer request timeout for reliability
+	}
 	
 	// Performance tuning for production
 	natsOptions.PublishQueueInterval = 15 * time.Second // More frequent processing
 	natsOptions.DebounceInterval = 5 * time.Second      // Longer debounce for stability
+	
+	// Production failed record cleanup
+	natsOptions.FailedRecordCleanupInterval = 2 * time.Hour  // More frequent cleanup
+	natsOptions.FailedRecordRetentionTime = 7 * 24 * time.Hour // Keep for 7 days
 	
 	// Custom default permissions for production security
 	// Note: No scoping needed - accounts provide isolation
@@ -72,20 +94,19 @@ func main() {
 		log.Fatalf("Failed to setup NATS JWT sync: %v", err)
 	}
 	
-	log.Println("✅ pb-audit and pb-nats initialized successfully")
 	log.Println("🏢 Custom collections:", natsOptions.AccountCollectionName, 
 		natsOptions.UserCollectionName, natsOptions.RoleCollectionName)
-	log.Println("🔗 NATS server:", natsOptions.NATSServerURL)
+	log.Println("🔗 Primary NATS server:", natsOptions.NATSServerURL)
+	log.Printf("🔄 Backup servers: %v", natsOptions.BackupNATSServerURLs)
 	log.Println("👤 Operator:", natsOptions.OperatorName)
 	log.Println("⚡ Queue interval:", natsOptions.PublishQueueInterval)
-	log.Println("📝 Comprehensive audit logging enabled")
-	log.Println("")
-	log.Println("🔒 Production Security Features:")
-	log.Println("   - Account-based isolation (no subject scoping needed)")
-	log.Println("   - Restricted default permissions")
-	log.Println("   - Custom event filtering")
-	log.Println("   - Multiple NATS server fallbacks")
-	log.Println("   - JWT regeneration via 'regenerate' field")
+	log.Println("🔧 Debounce interval:", natsOptions.DebounceInterval)
+	log.Printf("   - Max primary retries: %d", natsOptions.ConnectionRetryConfig.MaxPrimaryRetries)
+	log.Printf("   - Initial backoff: %v", natsOptions.ConnectionRetryConfig.InitialBackoff)
+	log.Printf("   - Max backoff: %v", natsOptions.ConnectionRetryConfig.MaxBackoff)
+	log.Printf("   - Failback interval: %v", natsOptions.ConnectionRetryConfig.FailbackInterval)
+	log.Printf("   - Connect timeout: %v", natsOptions.ConnectionTimeouts.ConnectTimeout)
+	log.Printf("   - Request timeout: %v", natsOptions.ConnectionTimeouts.RequestTimeout)
 	
 	// Start the PocketBase app as usual
 	if err := app.Start(); err != nil {
