@@ -87,7 +87,34 @@ func (sm *Manager) setupAccountHooks() {
 		return e.Next()
 	})
 
-	// Account updates
+	// Account updates - handle rotate_keys field and normal updates
+	sm.app.OnRecordUpdateRequest().BindFunc(func(e *core.RecordRequestEvent) error {
+		if e.Collection.Name != sm.options.AccountCollectionName {
+			return e.Next()
+		}
+
+		// Check if rotate_keys field was set to true
+		if e.Record.GetBool("rotate_keys") {
+			// Clear the rotate_keys flag immediately to prevent loops
+			e.Record.Set("rotate_keys", false)
+			
+			// Perform signing key rotation
+			if err := sm.rotateAccountSigningKeys(e.Record); err != nil {
+				return utils.WrapError(err, "failed to rotate account signing keys")
+			}
+			
+			sm.logger.Info("Signing keys rotated for account %s - all user JWTs in this account are now invalid", 
+				e.Record.GetString("name"))
+		} else {
+			// Regular update - regenerate JWT to ensure consistency
+			if err := sm.generateAccountJWT(e.Record); err != nil {
+				return utils.WrapError(err, "failed to regenerate account JWT")
+			}
+		}
+		
+		return e.Next()
+	})
+
 	sm.app.OnRecordAfterUpdateSuccess().BindFunc(func(e *core.RecordEvent) error {
 		if e.Record.Collection().Name != sm.options.AccountCollectionName {
 			return e.Next()
@@ -228,6 +255,44 @@ func (sm *Manager) setupRoleHooks() {
 		}
 		return e.Next()
 	})
+}
+
+// rotateAccountSigningKeys rotates the signing keys for an account and regenerates the account JWT
+// This will immediately invalidate all user JWTs signed with the old account signing key
+func (sm *Manager) rotateAccountSigningKeys(record *core.Record) error {
+	sm.logger.Info("Rotating signing keys for account %s...", record.GetString("name"))
+
+	// Generate new signing key pair only (ignore main account keys to preserve account identity)
+	_, _, signingKey, signingPublic, err := sm.nkeyManager.GenerateAccountKeyPair()
+	if err != nil {
+		return utils.WrapError(err, "failed to generate new account signing key pair")
+	}
+
+	// Get signing private key
+	signingPrivateKey, err := sm.nkeyManager.GetPrivateKeyFromSeed(signingKey)
+	if err != nil {
+		return utils.WrapError(err, "failed to get signing private key from seed")
+	}
+
+	// Store old keys for logging purposes
+	oldSigningPublicKey := record.GetString("signing_public_key")
+
+	// Update record with new signing keys (keep main account keys unchanged)
+	record.Set("signing_public_key", signingPublic)
+	record.Set("signing_private_key", signingPrivateKey)
+	record.Set("signing_seed", signingKey)
+
+	// Regenerate account JWT with new signing keys
+	if err := sm.generateAccountJWT(record); err != nil {
+		return utils.WrapError(err, "failed to regenerate account JWT with new signing keys")
+	}
+
+	sm.logger.Success("Account signing keys rotated successfully for %s", record.GetString("name"))
+	sm.logger.Info("   Old signing key: %s", utils.TruncateString(oldSigningPublicKey, 20))
+	sm.logger.Info("   New signing key: %s", utils.TruncateString(signingPublic, 20))
+	sm.logger.Warning("   All user JWTs in this account are now invalid and must be regenerated")
+
+	return nil
 }
 
 // shouldHandleEvent determines if an event should be handled based on the event filter

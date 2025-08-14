@@ -20,6 +20,7 @@ type AccountRecord struct {
 	SigningSeed       string    `json:"signing_seed"`        // Account signing seed (plaintext)
 	JWT               string    `json:"jwt"`                 // Generated account JWT
 	Active            bool      `json:"active"`
+	RotateKeys        bool      `json:"rotate_keys"`         // Triggers signing key rotation when set to true
 	Created           time.Time `json:"created"`
 	Updated           time.Time `json:"updated"`
 }

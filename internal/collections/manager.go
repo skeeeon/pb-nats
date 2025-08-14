@@ -184,6 +184,11 @@ func (cm *Manager) createAccountsCollection() error {
 		Name: "active",
 	})
 	
+	// Add rotate_keys field for signing key rotation
+	collection.Fields.Add(&core.BoolField{
+		Name: "rotate_keys",
+	})
+	
 	// Add timestamps
 	collection.Fields.Add(&core.AutodateField{
 		Name:     "created",
