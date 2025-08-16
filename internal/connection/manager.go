@@ -12,17 +12,18 @@ import (
 	pbtypes "github.com/skeeeon/pb-nats/internal/types"
 )
 
-// FailoverState represents the current state of the connection manager
+// FailoverState represents the current operational state of the connection manager.
+// These states track the lifecycle and health of NATS connectivity.
 type FailoverState int
 
 const (
-	StateHealthy FailoverState = iota
-	StateRetrying
-	StateFailedOver
-	StateBootstrapping // New state for initial bootstrap
+	StateHealthy FailoverState = iota // Connected to primary server, all systems normal
+	StateRetrying                     // Primary failed, retrying with backoff
+	StateFailedOver                   // Operating on backup server
+	StateBootstrapping                // Initial state, NATS not yet available
 )
 
-// String returns the string representation of the failover state
+// String returns human-readable representation of failover state for logging.
 func (s FailoverState) String() string {
 	switch s {
 	case StateHealthy:
@@ -38,52 +39,83 @@ func (s FailoverState) String() string {
 	}
 }
 
-// ConnectionCredentials holds the JWT and seed for NATS authentication
+// ConnectionCredentials holds authentication data for NATS connections.
+// These are typically the system user's JWT and private key seed.
 type ConnectionCredentials struct {
-	JWT  string
-	Seed string
+	JWT  string // System user JWT for authentication
+	Seed string // System user private key seed for signing
 }
 
-// ConnectionStatus provides information about the current connection state
+// ConnectionStatus provides current connection state for monitoring and debugging.
 type ConnectionStatus struct {
-	Connected     bool
-	CurrentURL    string
-	FailoverState FailoverState
-	LastFailover  *time.Time
+	Connected     bool       // True if actively connected to NATS
+	CurrentURL    string     // URL of currently connected server
+	FailoverState FailoverState // Current operational state
+	LastFailover  *time.Time // Time of last failover event (nil if never)
 }
 
-// Manager handles persistent NATS connections with failover and graceful bootstrap
+// Manager handles persistent NATS connections with intelligent failover and graceful bootstrap.
+// This solves the chicken-and-egg problem where pb-nats needs NATS running, but NATS needs
+// the operator JWT from pb-nats.
+//
+// BOOTSTRAP PROBLEM SOLUTION:
+// 1. Manager starts in bootstrap mode (NATS not required)
+// 2. PocketBase generates operator JWT
+// 3. Admin extracts JWT and configures NATS
+// 4. Admin starts NATS server
+// 5. Manager automatically detects NATS and exits bootstrap mode
+//
+// FAILOVER BEHAVIOR:
+// Primary → Retry with backoff → Failover to backup → Background primary health checks
 type Manager struct {
 	// Configuration
-	primaryURL   string
-	backupURLs   []string
-	credentials  *ConnectionCredentials
-	retryConfig  *pbtypes.RetryConfig
-	timeouts     *pbtypes.TimeoutConfig
+	primaryURL   string                 // Primary NATS server URL
+	backupURLs   []string               // Backup server URLs for failover
+	credentials  *ConnectionCredentials // Authentication credentials
+	retryConfig  *pbtypes.RetryConfig   // Retry and backoff configuration
+	timeouts     *pbtypes.TimeoutConfig // Connection timeout settings
 
 	// Connection state
-	conn       *nats.Conn
-	currentURL string
-	mu         sync.RWMutex
+	conn       *nats.Conn // Current NATS connection (nil if disconnected)
+	currentURL string     // URL of currently connected server
+	mu         sync.RWMutex // Protects connection state
 
 	// Failover state
-	failoverState  FailoverState
-	lastFailover   time.Time
-	failbackTicker *time.Ticker
+	failoverState  FailoverState // Current operational state
+	lastFailover   time.Time     // Timestamp of last failover event
+	failbackTicker *time.Ticker  // Timer for primary health checks
 
 	// Bootstrap state
-	isBootstrapping    bool
-	bootstrapRetryTicker *time.Ticker
+	isBootstrapping      bool         // True when in bootstrap mode
+	bootstrapRetryTicker *time.Ticker // Timer for bootstrap connection attempts
 	
 	// Context and cleanup
-	ctx       context.Context
-	cancelCtx context.CancelFunc
+	ctx       context.Context    // Context for graceful shutdown
+	cancelCtx context.CancelFunc // Cancels all background operations
 
 	// Utilities
-	logger *utils.Logger
+	logger *utils.Logger // Logger for consistent output
 }
 
-// NewManager creates a new connection manager with the specified configuration
+// NewManager creates a new connection manager with failover and bootstrap capabilities.
+//
+// PARAMETERS:
+//   - primaryURL: Primary NATS server URL
+//   - backupURLs: List of backup server URLs for failover
+//   - retryConfig: Retry behavior configuration (nil uses defaults)
+//   - timeouts: Connection timeout configuration (nil uses defaults)
+//   - logger: Logger instance for consistent output
+//
+// BEHAVIOR:
+// - Initializes in bootstrap mode (isBootstrapping = true)
+// - Applies default configurations if nil provided
+// - Creates cancellable context for graceful shutdown
+//
+// RETURNS:
+// - Manager instance ready for bootstrap or immediate connection
+//
+// SIDE EFFECTS:
+// - Creates context and cancellation function
 func NewManager(primaryURL string, backupURLs []string, retryConfig *pbtypes.RetryConfig, 
 	timeouts *pbtypes.TimeoutConfig, logger *utils.Logger) *Manager {
 	
@@ -110,7 +142,29 @@ func NewManager(primaryURL string, backupURLs []string, retryConfig *pbtypes.Ret
 	}
 }
 
-// StartBootstrap begins the bootstrap process - tries to connect but doesn't fail if unsuccessful
+// StartBootstrap begins the bootstrap process with background connection attempts.
+// This allows pb-nats to start without NATS running, solving the bootstrap problem.
+//
+// BOOTSTRAP FLOW:
+// 1. Store credentials for later use
+// 2. Start background ticker for connection attempts
+// 3. Log bootstrap mode activation
+// 4. Return immediately (non-blocking)
+//
+// PARAMETERS:
+//   - jwt: System user JWT for authentication
+//   - seed: System user private key seed
+//
+// BEHAVIOR:
+// - Updates stored credentials
+// - Starts background connection attempts on timer
+// - Does not block or fail if NATS unavailable
+//
+// RETURNS: None (always succeeds)
+//
+// SIDE EFFECTS:
+// - Starts background goroutine for connection attempts
+// - Sets isBootstrapping = true
 func (cm *Manager) StartBootstrap(jwt, seed string) {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
@@ -127,7 +181,27 @@ func (cm *Manager) StartBootstrap(jwt, seed string) {
 	cm.logger.Info("Bootstrap mode: NATS connection will be established when server becomes available")
 }
 
-// Connect establishes connection immediately (for when NATS is known to be available)
+// Connect attempts to establish NATS connection immediately (for known-available NATS).
+// If connection fails, falls back to bootstrap mode gracefully.
+//
+// PARAMETERS:
+//   - jwt: System user JWT for authentication
+//   - seed: System user private key seed
+//
+// BEHAVIOR:
+// - Updates stored credentials
+// - Exits bootstrap mode if currently bootstrapping
+// - Attempts immediate connection to NATS
+// - Falls back to bootstrap mode on failure (graceful degradation)
+//
+// RETURNS:
+// - nil on successful connection or graceful bootstrap fallback
+// - Never returns error (uses bootstrap mode for fault tolerance)
+//
+// SIDE EFFECTS:
+// - May establish NATS connection
+// - May start failback monitoring if connected to backup server
+// - May enter bootstrap mode on failure
 func (cm *Manager) Connect(jwt, seed string) error {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
@@ -167,7 +241,29 @@ func (cm *Manager) Connect(jwt, seed string) error {
 	return nil
 }
 
-// Close closes the connection and stops background monitoring
+// Close terminates the connection and stops all background operations.
+// Implements graceful shutdown with proper resource cleanup.
+//
+// SHUTDOWN SEQUENCE:
+// 1. Cancel context (signals all goroutines to exit)
+// 2. Give goroutines time to clean up
+// 3. Stop tickers safely
+// 4. Close NATS connection
+//
+// BEHAVIOR:
+// - Cancels context to signal shutdown
+// - Waits briefly for goroutines to exit
+// - Stops all background tickers safely
+// - Closes NATS connection if established
+//
+// RETURNS:
+// - nil on successful cleanup
+// - error if NATS connection close fails
+//
+// SIDE EFFECTS:
+// - Stops all background goroutines
+// - Closes NATS connection
+// - Cleans up all resources
 func (cm *Manager) Close() error {
 	// Cancel context first to signal all goroutines to exit
 	cm.cancelCtx()
@@ -202,17 +298,75 @@ func (cm *Manager) Close() error {
 	return nil
 }
 
-// Publish publishes data to the specified subject with failover support
+// Publish sends data to a NATS subject with automatic failover and bootstrap handling.
+//
+// PARAMETERS:
+//   - subject: NATS subject to publish to
+//   - data: Message payload as byte slice
+//
+// BEHAVIOR:
+// - Returns specific error if in bootstrap mode (for queue handling)
+// - Attempts publish on current connection
+// - Triggers failover on connection errors
+// - Retries publish after successful failover
+//
+// RETURNS:
+// - nil on successful publish
+// - specific "bootstrap mode" error if NATS not available (for queue handling)
+// - error if publish fails even after failover attempts
+//
+// SIDE EFFECTS:
+// - May trigger connection failover
+// - May reconnect to different NATS server
 func (cm *Manager) Publish(subject string, data []byte) error {
 	return cm.publishWithFailover(subject, data)
 }
 
-// Request sends a request and waits for a response with failover support
+// Request sends a request and waits for response with automatic failover and bootstrap handling.
+//
+// PARAMETERS:
+//   - subject: NATS subject to send request to
+//   - data: Request payload as byte slice
+//   - timeout: Maximum time to wait for response
+//
+// BEHAVIOR:
+// - Returns specific error if in bootstrap mode (for queue handling)
+// - Attempts request on current connection
+// - Triggers failover on connection errors
+// - Retries request after successful failover
+//
+// RETURNS:
+// - Response message and nil on success
+// - nil message and specific "bootstrap mode" error if NATS not available
+// - nil message and error if request fails even after failover attempts
+//
+// SIDE EFFECTS:
+// - May trigger connection failover
+// - May reconnect to different NATS server
 func (cm *Manager) Request(subject string, data []byte, timeout time.Duration) (*nats.Msg, error) {
 	return cm.requestWithFailover(subject, data, timeout)
 }
 
-// UpdateCredentials updates the authentication credentials and reconnects if needed
+// UpdateCredentials updates authentication credentials and reconnects if needed.
+// This is called when system user JWT is regenerated.
+//
+// PARAMETERS:
+//   - jwt: New system user JWT
+//   - seed: New system user private key seed
+//
+// BEHAVIOR:
+// - Updates stored credentials
+// - If bootstrapping: attempts to exit bootstrap mode
+// - If connected: reconnects with new credentials
+// - Falls back to bootstrap mode on reconnection failure
+//
+// RETURNS:
+// - nil on successful credential update (never fails due to graceful degradation)
+//
+// SIDE EFFECTS:
+// - May establish new NATS connection
+// - May close existing connection
+// - May change connection state
 func (cm *Manager) UpdateCredentials(jwt, seed string) error {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
@@ -261,7 +415,12 @@ func (cm *Manager) UpdateCredentials(jwt, seed string) error {
 	return nil
 }
 
-// GetConnectionStatus returns the current connection status
+// GetConnectionStatus returns current connection state for monitoring and debugging.
+//
+// RETURNS:
+// - ConnectionStatus struct with current state information
+//
+// THREAD SAFETY: Safe for concurrent access
 func (cm *Manager) GetConnectionStatus() ConnectionStatus {
 	cm.mu.RLock()
 	defer cm.mu.RUnlock()
@@ -280,14 +439,42 @@ func (cm *Manager) GetConnectionStatus() ConnectionStatus {
 	}
 }
 
-// IsBootstrapping returns whether the connection manager is in bootstrap mode
+// IsBootstrapping returns whether the manager is currently in bootstrap mode.
+//
+// RETURNS:
+// - true if waiting for NATS to become available
+// - false if connected or attempting normal operations
+//
+// THREAD SAFETY: Safe for concurrent access
 func (cm *Manager) IsBootstrapping() bool {
 	cm.mu.RLock()
 	defer cm.mu.RUnlock()
 	return cm.isBootstrapping
 }
 
-// publishWithFailover attempts to publish with automatic failover or bootstrap handling
+// publishWithFailover handles publish operations with failover and bootstrap awareness.
+//
+// BOOTSTRAP HANDLING:
+// Returns specific error message for bootstrap mode so queue processor
+// can distinguish between temporary unavailability and real errors.
+//
+// FAILOVER LOGIC:
+// 1. Check if in bootstrap mode → return bootstrap error
+// 2. Attempt publish on current connection
+// 3. On retryable error → trigger failover
+// 4. Retry publish on new connection
+//
+// PARAMETERS:
+//   - subject: NATS subject for publish
+//   - data: Message payload
+//
+// RETURNS:
+// - nil on success
+// - specific bootstrap error for queue handling
+// - other errors for genuine failures
+//
+// SIDE EFFECTS:
+// - May trigger connection failover
 func (cm *Manager) publishWithFailover(subject string, data []byte) error {
 	cm.mu.RLock()
 	conn := cm.conn
@@ -335,7 +522,21 @@ func (cm *Manager) publishWithFailover(subject string, data []byte) error {
 	return fmt.Errorf("publish failed: %v", err)
 }
 
-// requestWithFailover attempts to send a request with automatic failover or bootstrap handling
+// requestWithFailover handles request operations with failover and bootstrap awareness.
+// Similar to publishWithFailover but for request-response patterns.
+//
+// PARAMETERS:
+//   - subject: NATS subject for request
+//   - data: Request payload
+//   - timeout: Response timeout
+//
+// RETURNS:
+// - Response message and nil on success
+// - nil and specific bootstrap error for queue handling
+// - nil and other errors for genuine failures
+//
+// SIDE EFFECTS:
+// - May trigger connection failover
 func (cm *Manager) requestWithFailover(subject string, data []byte, timeout time.Duration) (*nats.Msg, error) {
 	cm.mu.RLock()
 	conn := cm.conn
@@ -385,7 +586,19 @@ func (cm *Manager) requestWithFailover(subject string, data []byte, timeout time
 
 // Bootstrap mode management
 
-// enterBootstrapMode puts the connection manager into bootstrap mode
+// enterBootstrapMode transitions to bootstrap mode for graceful degradation.
+// This is called when all NATS servers become unavailable.
+//
+// BOOTSTRAP MODE BEHAVIOR:
+// - All publish/request operations return specific bootstrap errors
+// - Background process attempts reconnection periodically  
+// - Queue processor understands bootstrap errors and waits
+//
+// SIDE EFFECTS:
+// - Changes state to StateBootstrapping
+// - Closes existing connection
+// - Stops failback monitoring
+// - Starts bootstrap retry process
 func (cm *Manager) enterBootstrapMode() {
 	cm.isBootstrapping = true
 	cm.failoverState = StateBootstrapping
@@ -413,7 +626,13 @@ func (cm *Manager) enterBootstrapMode() {
 	cm.logger.Info("Entered bootstrap mode - will retry connection when NATS becomes available")
 }
 
-// exitBootstrapMode exits bootstrap mode and enters normal operation
+// exitBootstrapMode transitions from bootstrap mode to normal operation.
+// Called when NATS connection is successfully established.
+//
+// SIDE EFFECTS:
+// - Changes state to StateHealthy
+// - Stops bootstrap retry process
+// - Enables normal publish/request operations
 func (cm *Manager) exitBootstrapMode() {
 	cm.isBootstrapping = false
 	cm.failoverState = StateHealthy
@@ -431,7 +650,15 @@ func (cm *Manager) exitBootstrapMode() {
 	cm.logger.Success("Exited bootstrap mode - entering normal operation")
 }
 
-// startBootstrapRetry starts background connection attempts during bootstrap
+// startBootstrapRetry begins background connection attempts during bootstrap mode.
+// Uses longer intervals than normal failover to be less aggressive during startup.
+//
+// RETRY INTERVAL:
+// Uses FailbackInterval from config, minimum 10 seconds to avoid spam.
+//
+// SIDE EFFECTS:
+// - Starts background goroutine
+// - Creates ticker for periodic attempts
 func (cm *Manager) startBootstrapRetry() {
 	// Stop existing ticker if running
 	if cm.bootstrapRetryTicker != nil {
@@ -468,7 +695,19 @@ func (cm *Manager) startBootstrapRetry() {
 	cm.logger.Info("Started bootstrap connection attempts (interval: %v)", bootstrapInterval)
 }
 
-// tryBootstrapConnection attempts to establish connection during bootstrap
+// tryBootstrapConnection attempts single connection during bootstrap mode.
+// Exits bootstrap mode on successful connection.
+//
+// BEHAVIOR:
+// - Only operates if still in bootstrap mode
+// - Attempts connection to any available server
+// - Exits bootstrap mode on success
+// - Logs at info level to avoid spam
+//
+// SIDE EFFECTS:
+// - May establish NATS connection
+// - May exit bootstrap mode
+// - May start failback monitoring
 func (cm *Manager) tryBootstrapConnection() {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
@@ -501,7 +740,25 @@ func (cm *Manager) tryBootstrapConnection() {
 	cm.logger.Success("Bootstrap successful! Connected to NATS server: %s", url)
 }
 
-// handleConnectionFailure handles connection failures and attempts failover
+// handleConnectionFailure manages connection failures and attempts recovery.
+// Implements exponential backoff for primary server, then failover to backups.
+//
+// FAILURE RECOVERY STRATEGY:
+// 1. If on primary: retry with exponential backoff
+// 2. If retries exhausted: attempt failover to backups
+// 3. If all servers fail: enter bootstrap mode (graceful degradation)
+//
+// PARAMETERS:
+//   - err: The connection error that triggered this recovery
+//
+// RETURNS:
+// - nil on successful recovery
+// - Never returns error (uses bootstrap mode for fault tolerance)
+//
+// SIDE EFFECTS:
+// - May change connection state
+// - May reconnect to different server
+// - May enter bootstrap mode
 func (cm *Manager) handleConnectionFailure(err error) error {
 	cm.mu.Lock()
 	defer cm.mu.Unlock()
@@ -547,7 +804,20 @@ func (cm *Manager) handleConnectionFailure(err error) error {
 	return cm.attemptFailover()
 }
 
-// attemptFailover attempts to failover to backup servers or enter bootstrap mode
+// attemptFailover tries to connect to backup servers or enters bootstrap mode.
+//
+// FAILOVER STRATEGY:
+// 1. Try all backup servers
+// 2. Try primary server as last resort
+// 3. If all fail: enter bootstrap mode (never return error)
+//
+// RETURNS:
+// - nil (always succeeds via graceful degradation)
+//
+// SIDE EFFECTS:
+// - May establish new connection
+// - May start failback monitoring
+// - May enter bootstrap mode
 func (cm *Manager) attemptFailover() error {
 	cm.logger.Warning("Attempting failover to backup servers...")
 
@@ -582,7 +852,20 @@ func (cm *Manager) attemptFailover() error {
 	return nil
 }
 
-// tryAllServers tries to connect to servers in priority order: backups first, then primary
+// tryAllServers attempts connection to all configured servers in priority order.
+// Priority: backup servers first, then primary (to prefer working servers).
+//
+// CONNECTION PRIORITY:
+// Backup servers are tried first because if we're calling this function,
+// the primary likely failed, so backups are more likely to succeed.
+//
+// PARAMETERS: None (uses stored configuration)
+//
+// RETURNS:
+// - Connection, URL, nil on success
+// - nil, "", error if all servers fail
+//
+// SIDE EFFECTS: None (pure connection attempt)
 func (cm *Manager) tryAllServers() (*nats.Conn, string, error) {
 	if cm.credentials == nil {
 		return nil, "", fmt.Errorf("no credentials available")
@@ -607,7 +890,22 @@ func (cm *Manager) tryAllServers() (*nats.Conn, string, error) {
 	return nil, "", fmt.Errorf("failed to connect to any NATS server")
 }
 
-// connectToURL attempts to connect to a specific NATS URL
+// connectToURL attempts connection to a specific NATS server URL.
+//
+// CONNECTION CONFIGURATION:
+// - JWT authentication using stored credentials
+// - Configure timeouts from manager settings
+// - Enable unlimited reconnection attempts (let manager handle failover)
+// - Set up event handlers for connection lifecycle
+//
+// PARAMETERS:
+//   - url: NATS server URL to connect to
+//
+// RETURNS:
+// - NATS connection on success
+// - error if connection fails
+//
+// SIDE EFFECTS: None (pure connection attempt)
 func (cm *Manager) connectToURL(url string) (*nats.Conn, error) {
 	options := []nats.Option{
 		nats.UserJWTAndSeed(cm.credentials.JWT, cm.credentials.Seed),
@@ -622,7 +920,17 @@ func (cm *Manager) connectToURL(url string) (*nats.Conn, error) {
 	return nats.Connect(url, options...)
 }
 
-// startFailbackMonitoring starts background monitoring to fail back to primary
+// startFailbackMonitoring begins background monitoring to return to primary server.
+// This runs when connected to backup server and periodically checks primary health.
+//
+// FAILBACK STRATEGY:
+// - Periodically test primary server connectivity
+// - Switch back to primary when it becomes healthy
+// - Stop monitoring when back on primary
+//
+// SIDE EFFECTS:
+// - Starts background goroutine
+// - Creates ticker for periodic health checks
 func (cm *Manager) startFailbackMonitoring() {
 	// Stop existing ticker if running
 	if cm.failbackTicker != nil {
@@ -653,7 +961,23 @@ func (cm *Manager) startFailbackMonitoring() {
 	cm.logger.Info("Started failback monitoring (interval: %v)", cm.retryConfig.FailbackInterval)
 }
 
-// checkPrimaryHealth checks if the primary server is healthy and fails back if possible
+// checkPrimaryHealth tests primary server and fails back if healthy.
+// Called periodically by failback monitoring when on backup server.
+//
+// FAILBACK CONDITIONS:
+// - Currently connected to backup server
+// - Primary server responds to connection test
+// - Test connection can be established successfully
+//
+// BEHAVIOR:
+// - Only operates when failed over to backup
+// - Tests primary server connectivity
+// - Switches to primary on successful test
+// - Stops failback monitoring when back on primary
+//
+// SIDE EFFECTS:
+// - May switch to primary server
+// - May stop failback monitoring
 func (cm *Manager) checkPrimaryHealth() {
 	cm.mu.RLock()
 	currentURL := cm.currentURL
@@ -706,7 +1030,17 @@ func (cm *Manager) checkPrimaryHealth() {
 	cm.logger.Success("Failed back to primary server: %s", cm.primaryURL)
 }
 
-// calculateBackoff calculates exponential backoff delay
+// calculateBackoff computes exponential backoff delay for connection retries.
+//
+// BACKOFF FORMULA:
+// delay = InitialBackoff * (BackoffMultiplier ^ (attempt - 1))
+// capped at MaxBackoff
+//
+// PARAMETERS:
+//   - attempt: Retry attempt number (1-based)
+//
+// RETURNS:
+// - Backoff duration for this attempt
 func (cm *Manager) calculateBackoff(attempt int) time.Duration {
 	backoff := cm.retryConfig.InitialBackoff
 	for i := 1; i < attempt; i++ {
@@ -719,7 +1053,20 @@ func (cm *Manager) calculateBackoff(attempt int) time.Duration {
 	return backoff
 }
 
-// isRetryableError determines if an error should trigger retry/failover logic
+// isRetryableError determines if a connection error justifies failover attempts.
+//
+// RETRYABLE ERROR PATTERNS:
+// - Connection refused (server down)
+// - Network unreachable (network issue)
+// - Connection timeouts (temporary network issue)
+// - NATS-specific connection errors
+//
+// PARAMETERS:
+//   - err: Error to classify
+//
+// RETURNS:
+// - true if error indicates temporary network/connection issue
+// - false if error indicates permanent failure (authentication, etc.)
 func (cm *Manager) isRetryableError(err error) bool {
 	if err == nil {
 		return false
@@ -750,9 +1097,10 @@ func (cm *Manager) isRetryableError(err error) bool {
 	return false
 }
 
-// NATS event handlers
+// NATS event handlers for connection lifecycle monitoring
 
-// handleDisconnect is called when the connection is disconnected
+// handleDisconnect is called when NATS connection is lost.
+// Logs disconnection event for monitoring and debugging.
 func (cm *Manager) handleDisconnect(conn *nats.Conn, err error) {
 	if err != nil {
 		cm.logger.Warning("NATS connection disconnected: %v", err)
@@ -761,12 +1109,14 @@ func (cm *Manager) handleDisconnect(conn *nats.Conn, err error) {
 	}
 }
 
-// handleReconnect is called when the connection is reconnected
+// handleReconnect is called when NATS connection is automatically restored.
+// This is NATS client library's internal reconnection, separate from our failover logic.
 func (cm *Manager) handleReconnect(conn *nats.Conn) {
 	cm.logger.Success("NATS connection reconnected to: %s", conn.ConnectedUrl())
 }
 
-// handleClosed is called when the connection is closed
+// handleClosed is called when NATS connection is permanently closed.
+// Logs connection closure for monitoring and debugging.
 func (cm *Manager) handleClosed(conn *nats.Conn) {
 	cm.logger.Info("NATS connection closed")
 }

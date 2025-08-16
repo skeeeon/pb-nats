@@ -60,16 +60,39 @@ var (
 	DefaultSubscribePermissions = pbtypes.DefaultSubscribePermissions
 )
 
-// Setup initializes the NATS JWT synchronization for a PocketBase instance.
-// This is the main entry point for the library.
+// Setup initializes NATS JWT synchronization for a PocketBase instance.
+// This is the main entry point that solves the bootstrap problem by allowing
+// PocketBase to start without NATS running, then connecting when available.
 //
-// Example usage:
+// BOOTSTRAP PROBLEM SOLVED:
+// 1. PocketBase starts and generates system operator JWT
+// 2. Admin extracts operator JWT from PocketBase admin interface  
+// 3. Admin configures NATS server with operator JWT
+// 4. Admin starts NATS - pb-nats automatically connects and syncs
 //
-//	app := pocketbase.New()
-//	if err := pbnats.Setup(app, pbnats.DefaultOptions()); err != nil {
-//	    log.Fatalf("Failed to setup NATS sync: %v", err)
-//	}
-//	app.Start()
+// INITIALIZATION ORDER:
+// Collections → System Components → Publisher → Sync Hooks
+//
+// PARAMETERS:
+//   - app: PocketBase application instance
+//   - options: Configuration including NATS URLs, collection names, timeouts
+//
+// BEHAVIOR:
+// - Validates options and applies defaults
+// - Schedules initialization after PocketBase bootstrap
+// - Creates all required collections if they don't exist
+// - Generates system operator, account, role, and user
+// - Starts persistent NATS connection manager with failover
+// - Sets up real-time sync hooks for record changes
+//
+// RETURNS:
+// - nil on success
+// - error if validation fails or bootstrap binding fails
+//
+// SIDE EFFECTS:
+// - Creates database collections: nats_accounts, nats_users, nats_roles, etc.
+// - Starts background goroutines for queue processing and connection management
+// - Registers PocketBase event hooks for real-time synchronization
 func Setup(app *pocketbase.PocketBase, options Options) error {
 	// Apply default options for any missing values
 	options = applyDefaultOptions(options)
@@ -114,8 +137,34 @@ func Setup(app *pocketbase.PocketBase, options Options) error {
 	return nil
 }
 
-// initializeComponents initializes all NATS sync components in the correct order
-// to prevent race conditions and ensure proper dependency resolution
+// initializeComponents initializes all NATS sync components in dependency order
+// to prevent race conditions and ensure proper system state.
+//
+// INITIALIZATION SEQUENCE:
+// 1. Collections - Required before any data operations
+// 2. System Components - Operator, account, role, user creation
+// 3. Publisher - NATS connection and queue processing  
+// 4. Sync Manager - PocketBase event hooks
+//
+// PARAMETERS:
+//   - app: PocketBase application instance
+//   - options: Configuration options
+//   - logger: Logger instance for consistent logging
+//
+// BEHAVIOR:
+// - Creates collections if they don't exist
+// - Ensures system operator, account, role, and user exist
+// - Starts publisher with persistent NATS connection
+// - Sets up real-time sync hooks for record changes
+//
+// RETURNS:
+// - nil on success
+// - error if any component initialization fails
+//
+// SIDE EFFECTS:
+// - Creates database records for system components
+// - Starts background goroutines
+// - Establishes NATS connection (or enters bootstrap mode)
 func initializeComponents(app *pocketbase.PocketBase, options Options, logger *utils.Logger) error {
 	logger.Process("Initializing NATS sync components...")
 
@@ -171,8 +220,35 @@ func initializeComponents(app *pocketbase.PocketBase, options Options, logger *u
 	return nil
 }
 
-// initializeSystemComponents creates system operator, account, role, and user
-// This is the proven working implementation adapted from the original sync/manager.go
+// initializeSystemComponents creates system operator, account, role, and user if they don't exist.
+// This implements the proven bootstrap sequence that handles the chicken-and-egg problem.
+//
+// BOOTSTRAP SEQUENCE:
+// 1. Create operator (without system account reference)
+// 2. Create system account 
+// 3. Update operator JWT with system account reference
+// 4. Create system role and user
+//
+// PARAMETERS:
+//   - app: PocketBase application instance
+//   - jwtGen: JWT generator for creating JWTs
+//   - nkeyManager: NKey manager for generating key pairs
+//   - options: Configuration options
+//   - logger: Logger instance
+//
+// BEHAVIOR:
+// - Checks if system operator exists, creates if missing
+// - Ensures system account (SYS) exists
+// - Updates operator JWT to reference system account
+// - Creates system role and user for NATS operations
+//
+// RETURNS:
+// - nil on success
+// - error if any system component creation fails
+//
+// SIDE EFFECTS:
+// - Creates system operator, account, role, and user records
+// - Generates and stores JWTs for each component
 func initializeSystemComponents(app *pocketbase.PocketBase, jwtGen *jwt.Generator, nkeyManager *nkey.Manager, options Options, logger *utils.Logger) error {
 	// Check if system operator exists
 	operatorRecords, err := app.FindAllRecords(pbtypes.SystemOperatorCollectionName)
@@ -283,8 +359,26 @@ func initializeSystemComponents(app *pocketbase.PocketBase, jwtGen *jwt.Generato
 	return nil
 }
 
-// createSystemOperatorWithoutJWT creates the system operator without generating JWT initially
-// This is the proven working implementation from the original code
+// createSystemOperatorWithoutJWT creates the system operator record with keys but no JWT.
+// The JWT is generated later once the system account exists to reference.
+//
+// PARAMETERS:
+//   - app: PocketBase application instance
+//   - nkeyManager: NKey manager for generating operator keys
+//   - options: Configuration options containing operator name
+//   - logger: Logger instance
+//
+// BEHAVIOR:
+// - Generates operator key pair and signing key pair
+// - Creates operator record in database without JWT
+// - Stores all keys as plaintext (by design)
+//
+// RETURNS:
+// - SystemOperatorRecord with generated ID and keys
+// - error if key generation or database save fails
+//
+// SIDE EFFECTS:
+// - Creates record in nats_system_operator collection
 func createSystemOperatorWithoutJWT(app *pocketbase.PocketBase, nkeyManager *nkey.Manager, options Options, logger *utils.Logger) (*pbtypes.SystemOperatorRecord, error) {
 	// Generate operator keys
 	seed, public, signingKey, signingPublic, err := nkeyManager.GenerateOperatorKeyPair()
@@ -343,8 +437,27 @@ func createSystemOperatorWithoutJWT(app *pocketbase.PocketBase, nkeyManager *nke
 	return operator, nil
 }
 
-// updateOperatorJWT updates the operator JWT with system account reference
-// This is the proven working implementation from the original code
+// updateOperatorJWT generates and saves the final operator JWT with system account reference.
+// This completes the operator initialization by adding the system account designation.
+//
+// PARAMETERS:
+//   - app: PocketBase application instance
+//   - jwtGen: JWT generator
+//   - operatorID: ID of operator record to update
+//   - systemAccountPubKey: Public key of system account to reference
+//   - logger: Logger instance
+//
+// BEHAVIOR:
+// - Retrieves operator record from database
+// - Generates operator JWT with system account reference
+// - Updates operator record with final JWT
+//
+// RETURNS:
+// - nil on success
+// - error if record retrieval, JWT generation, or save fails
+//
+// SIDE EFFECTS:
+// - Updates operator record with final JWT
 func updateOperatorJWT(app *pocketbase.PocketBase, jwtGen *jwt.Generator, operatorID, systemAccountPubKey string, logger *utils.Logger) error {
 	// Get the operator record
 	operatorRecord, err := app.FindRecordById(pbtypes.SystemOperatorCollectionName, operatorID)
@@ -379,8 +492,29 @@ func updateOperatorJWT(app *pocketbase.PocketBase, jwtGen *jwt.Generator, operat
 	return nil
 }
 
-// createSystemAccount creates the system account (SYS)
-// This is the proven working implementation adapted from the original code
+// createSystemAccount creates the system account (SYS) for NATS management operations.
+// The system account handles monitoring, account management, and administrative functions.
+//
+// PARAMETERS:
+//   - app: PocketBase application instance
+//   - jwtGen: JWT generator for creating system account JWT
+//   - nkeyManager: NKey manager for generating account keys
+//   - operator: System operator record for signing account JWT
+//   - options: Configuration options
+//   - logger: Logger instance
+//
+// BEHAVIOR:
+// - Generates system account key pairs
+// - Creates system account JWT with special system permissions
+// - Saves system account record to database
+//
+// RETURNS:
+// - accountID: Database ID of created system account
+// - publicKey: Public key of system account (for operator JWT reference)
+// - error if any operation fails
+//
+// SIDE EFFECTS:
+// - Creates record in nats_accounts collection
 func createSystemAccount(app *pocketbase.PocketBase, jwtGen *jwt.Generator, nkeyManager *nkey.Manager, operator *pbtypes.SystemOperatorRecord, options Options, logger *utils.Logger) (string, string, error) {
 	// Generate account keys
 	seed, public, signingKey, signingPublic, err := nkeyManager.GenerateAccountKeyPair()
@@ -446,7 +580,24 @@ func createSystemAccount(app *pocketbase.PocketBase, jwtGen *jwt.Generator, nkey
 	return record.Id, sysAccount.PublicKey, nil
 }
 
-// createSystemRole creates the system role for system users
+// createSystemRole creates the system administrator role with full NATS access.
+// System roles have unrestricted permissions for administrative operations.
+//
+// PARAMETERS:
+//   - app: PocketBase application instance
+//   - options: Configuration options
+//   - logger: Logger instance
+//
+// BEHAVIOR:
+// - Creates system admin role with full $SYS.> and > permissions
+// - Sets unlimited connection, data, and payload limits
+//
+// RETURNS:
+// - roleID: Database ID of created role
+// - error if creation fails
+//
+// SIDE EFFECTS:
+// - Creates record in nats_roles collection
 func createSystemRole(app *pocketbase.PocketBase, options Options, logger *utils.Logger) (string, error) {
 	collection, err := app.FindCollectionByNameOrId(options.RoleCollectionName)
 	if err != nil {
@@ -472,7 +623,29 @@ func createSystemRole(app *pocketbase.PocketBase, options Options, logger *utils
 	return record.Id, nil
 }
 
-// createSystemUser creates the system user for NATS connections
+// createSystemUser creates the system user for internal NATS operations.
+// This user is used by pb-nats itself for connecting to NATS and publishing account updates.
+//
+// PARAMETERS:
+//   - app: PocketBase application instance
+//   - jwtGen: JWT generator for creating user JWT
+//   - nkeyManager: NKey manager for generating user keys
+//   - sysAccountID: Database ID of system account
+//   - sysRoleID: Database ID of system role
+//   - options: Configuration options
+//   - logger: Logger instance
+//
+// BEHAVIOR:
+// - Creates system user record with auto-generated credentials
+// - Generates user keys, JWT, and .creds file
+// - Associates with system account and role
+//
+// RETURNS:
+// - nil on success
+// - error if user creation fails
+//
+// SIDE EFFECTS:
+// - Creates record in nats_users collection
 func createSystemUser(app *pocketbase.PocketBase, jwtGen *jwt.Generator, nkeyManager *nkey.Manager, sysAccountID, sysRoleID string, options Options, logger *utils.Logger) error {
 	collection, err := app.FindCollectionByNameOrId(options.UserCollectionName)
 	if err != nil {
@@ -509,8 +682,28 @@ func createSystemUser(app *pocketbase.PocketBase, jwtGen *jwt.Generator, nkeyMan
 	return nil
 }
 
-// generateUserKeys generates keys and JWT for a user
-// This is adapted from the working implementation in sync/manager.go
+// generateUserKeys generates NATS keys, JWT, and .creds file for a user record.
+// This function is used during user creation and JWT regeneration.
+//
+// PARAMETERS:
+//   - app: PocketBase application instance
+//   - jwtGen: JWT generator
+//   - nkeyManager: NKey manager for generating keys
+//   - record: User record to populate with keys and JWT
+//   - options: Configuration options
+//
+// BEHAVIOR:
+// - Skips if keys already exist (idempotent)
+// - Generates user key pair
+// - Creates user JWT based on account and role
+// - Generates complete .creds file
+//
+// RETURNS:
+// - nil on success
+// - error if key generation or JWT creation fails
+//
+// SIDE EFFECTS:
+// - Modifies user record with generated keys, JWT, and .creds file
 func generateUserKeys(app *pocketbase.PocketBase, jwtGen *jwt.Generator, nkeyManager *nkey.Manager, record *core.Record, options Options) error {
 	// Skip if keys already exist
 	if record.GetString("public_key") != "" {
@@ -538,8 +731,26 @@ func generateUserKeys(app *pocketbase.PocketBase, jwtGen *jwt.Generator, nkeyMan
 	return generateUserJWT(app, jwtGen, record, options)
 }
 
-// generateUserJWT generates JWT and creds file for a user
-// This is adapted from the working implementation in sync/manager.go
+// generateUserJWT generates JWT and .creds file for a user based on their account and role.
+// This function handles the complex logic of combining user, account, and role data.
+//
+// PARAMETERS:
+//   - app: PocketBase application instance
+//   - jwtGen: JWT generator
+//   - record: User record to generate JWT for
+//   - options: Configuration options
+//
+// BEHAVIOR:
+// - Retrieves related account and role records
+// - Generates user JWT with role-based permissions
+// - Creates complete .creds file for NATS connection
+//
+// RETURNS:
+// - nil on success
+// - error if account/role lookup or JWT generation fails
+//
+// SIDE EFFECTS:
+// - Updates user record with JWT and .creds file
 func generateUserJWT(app *pocketbase.PocketBase, jwtGen *jwt.Generator, record *core.Record, options Options) error {
 	// Get account and role
 	account, err := app.FindRecordById(options.AccountCollectionName, record.GetString("account_id"))

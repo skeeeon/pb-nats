@@ -11,14 +11,27 @@ import (
 	pbtypes "github.com/skeeeon/pb-nats/internal/types"
 )
 
-// Generator handles generating NATS JWTs
+// Generator handles generating NATS JWTs for operators, accounts, and users.
+// This is the core component responsible for creating the JWT hierarchy that
+// establishes trust relationships in NATS.
+//
+// JWT HIERARCHY:
+// Operator JWT (root of trust) → Account JWT (signed by operator) → User JWT (signed by account)
 type Generator struct {
 	app         *pocketbase.PocketBase
 	nkeyManager *nkey.Manager
 	options     pbtypes.Options
 }
 
-// NewGenerator creates a new JWT generator
+// NewGenerator creates a new JWT generator with PocketBase integration.
+//
+// PARAMETERS:
+//   - app: PocketBase application instance for database access
+//   - nkeyManager: NKey manager for key operations
+//   - options: Configuration options including default permissions
+//
+// RETURNS:
+// - Generator instance ready for JWT creation
 func NewGenerator(app *pocketbase.PocketBase, nkeyManager *nkey.Manager, options pbtypes.Options) *Generator {
 	return &Generator{
 		app:         app,
@@ -27,8 +40,32 @@ func NewGenerator(app *pocketbase.PocketBase, nkeyManager *nkey.Manager, options
 	}
 }
 
-// GenerateOperatorJWT generates a JWT for the operator
-// systemAccountPubKey should be provided to properly designate the system account
+// GenerateOperatorJWT generates a NATS operator JWT that serves as the root of trust.
+// The operator JWT is used in nats.conf and validates all account JWTs in the system.
+//
+// OPERATOR JWT CONTENTS:
+// - Operator identity (public key)
+// - Authorized signing keys for creating account JWTs  
+// - System account designation (for monitoring and management)
+//
+// PARAMETERS:
+//   - operator: System operator record containing keys and identity
+//   - systemAccountPubKey: Public key of system account. If empty, operator JWT
+//     is created without system account designation (bootstrap mode only)
+//
+// BEHAVIOR:
+// - Creates operator claims with identity and signing keys
+// - Designates system account if public key provided
+// - Signs JWT with operator's main key pair
+//
+// RETURNS:
+// - Encoded JWT string for nats.conf configuration
+// - error if key operations or JWT encoding fails
+//
+// USAGE IN NATS CONFIG:
+//   operator: /path/to/operator.jwt
+//
+// SIDE EFFECTS: None (pure JWT generation)
 func (g *Generator) GenerateOperatorJWT(operator *pbtypes.SystemOperatorRecord, systemAccountPubKey string) (string, error) {
 	// Create operator key pair from seed
 	operatorKP, err := g.nkeyManager.KeyPairFromSeed(operator.Seed)
@@ -40,7 +77,7 @@ func (g *Generator) GenerateOperatorJWT(operator *pbtypes.SystemOperatorRecord, 
 	operatorClaims := jwt.NewOperatorClaims(operator.PublicKey)
 	operatorClaims.Name = operator.Name
 	
-	// **CRITICAL FIX**: Specify which account is the system account
+	// **CRITICAL**: Specify which account is the system account
 	// This is required for NATS to properly recognize the system account
 	if systemAccountPubKey != "" {
 		operatorClaims.SystemAccount = systemAccountPubKey
@@ -58,13 +95,51 @@ func (g *Generator) GenerateOperatorJWT(operator *pbtypes.SystemOperatorRecord, 
 	return jwtValue, nil
 }
 
-// GenerateOperatorJWTWithoutSystemAccount generates operator JWT without system account reference
-// Used for initial operator creation before system account exists
+// GenerateOperatorJWTWithoutSystemAccount generates operator JWT for bootstrap mode.
+// Used during initial setup before system account exists.
+//
+// BOOTSTRAP USAGE:
+// This is called during system initialization when no system account exists yet.
+// The operator JWT is later updated to include the system account reference.
+//
+// PARAMETERS:
+//   - operator: System operator record
+//
+// RETURNS:
+// - Operator JWT without system account designation
+// - error if JWT generation fails
 func (g *Generator) GenerateOperatorJWTWithoutSystemAccount(operator *pbtypes.SystemOperatorRecord) (string, error) {
 	return g.GenerateOperatorJWT(operator, "")
 }
 
-// GenerateAccountJWT generates a JWT for an account
+// GenerateAccountJWT generates a NATS account JWT for tenant isolation.
+// Account JWTs define boundaries and permissions for groups of users.
+//
+// ACCOUNT JWT CONTENTS:
+// - Account identity (public key)
+// - Signing keys authorized to create user JWTs
+// - Account-level limits and permissions
+// - Export/import declarations (for cross-account communication)
+//
+// PARAMETERS:
+//   - account: Account record containing keys and metadata
+//   - operatorSigningSeed: Operator signing key for JWT signature
+//
+// BEHAVIOR:
+// - Creates account claims with identity and signing keys
+// - Sets account name (normalized for NATS compatibility)
+// - Applies unlimited limits by default
+// - Signs JWT with operator signing key
+//
+// RETURNS:
+// - Encoded account JWT for publishing to NATS via $SYS.REQ.CLAIMS.UPDATE
+// - error if key operations or JWT encoding fails
+//
+// NATS PUBLISHING:
+// The returned JWT is published to NATS server via:
+//   $SYS.REQ.CLAIMS.UPDATE with account JWT as payload
+//
+// SIDE EFFECTS: None (pure JWT generation)
 func (g *Generator) GenerateAccountJWT(account *pbtypes.AccountRecord, operatorSigningSeed string) (string, error) {
 	// Create operator signing key pair
 	operatorKP, err := g.nkeyManager.KeyPairFromSeed(operatorSigningSeed)
@@ -96,7 +171,38 @@ func (g *Generator) GenerateAccountJWT(account *pbtypes.AccountRecord, operatorS
 	return jwtValue, nil
 }
 
-// GenerateUserJWT generates a JWT for a user within an account
+// GenerateUserJWT generates a NATS user JWT with role-based permissions.
+// User JWTs are signed by account signing keys and contain specific permissions.
+//
+// USER JWT CONTENTS:
+// - User identity (public key)
+// - Account association (issuer account)
+// - Role-based permissions (publish/subscribe subjects)
+// - Connection limits and constraints
+// - Optional expiration time
+//
+// PARAMETERS:
+//   - user: User record containing identity and settings
+//   - account: Account record for JWT signing and association
+//   - role: Role record containing permissions and limits
+//
+// BEHAVIOR:
+// - Creates user claims with identity and account association
+// - Applies role-based permissions (no subject scoping needed - accounts provide isolation)
+// - Sets connection and data limits from role
+// - Applies JWT expiration if configured
+// - Signs JWT with account signing key
+//
+// RETURNS:
+// - Encoded user JWT for inclusion in .creds file
+// - error if permission processing or JWT encoding fails
+//
+// PERMISSION STRATEGY:
+// Accounts provide isolation boundaries, so permissions are applied directly:
+// - "sensors.temperature" within account A ≠ "sensors.temperature" within account B
+// - No complex scoping like "account_a.sensors.temperature" needed
+//
+// SIDE EFFECTS: None (pure JWT generation)
 func (g *Generator) GenerateUserJWT(user *pbtypes.NatsUserRecord, account *pbtypes.AccountRecord, role *pbtypes.RoleRecord) (string, error) {
 	// Create account signing key pair
 	accountKP, err := g.nkeyManager.KeyPairFromSeed(account.SigningSeed)
@@ -134,7 +240,39 @@ func (g *Generator) GenerateUserJWT(user *pbtypes.NatsUserRecord, account *pbtyp
 	return jwtValue, nil
 }
 
-// GenerateCredsFile generates a complete .creds file for a user
+// GenerateCredsFile generates a complete .creds file for NATS client connection.
+// The .creds file contains both the user JWT and the user's private key.
+//
+// CREDS FILE FORMAT:
+// -----BEGIN NATS USER JWT-----
+// <user JWT>
+// ------END NATS USER JWT------
+// 
+// ************************* IMPORTANT *************************
+// NKEY Seed printed below can be used to sign and prove identity.
+// NKEYs are sensitive and should be treated as secrets.
+// 
+// -----BEGIN USER NKEY SEED-----
+// <user seed>
+// ------END USER NKEY SEED------
+//
+// PARAMETERS:
+//   - user: User record containing JWT and seed
+//
+// BEHAVIOR:
+// - Validates user JWT and seed are present
+// - Formats credentials using NATS standard format
+// - Returns complete .creds file ready for client use
+//
+// RETURNS:
+// - Formatted .creds file as string
+// - error if JWT or seed missing, or formatting fails
+//
+// CLIENT USAGE:
+//   nc, err := nats.Connect("nats://server:4222", 
+//     nats.UserCredentials("path/to/user.creds"))
+//
+// SIDE EFFECTS: None (pure formatting)
 func (g *Generator) GenerateCredsFile(user *pbtypes.NatsUserRecord) (string, error) {
 	if user.JWT == "" {
 		return "", fmt.Errorf("user JWT is empty, cannot generate creds file")
@@ -153,13 +291,51 @@ func (g *Generator) GenerateCredsFile(user *pbtypes.NatsUserRecord) (string, err
 	return string(creds), nil
 }
 
-// isSystemUser checks if a user is a system user that needs unscoped permissions
+// isSystemUser checks if a user belongs to the system account and requires special permissions.
+// System users need unrestricted access for NATS management operations.
+//
+// PARAMETERS:
+//   - user: User record to check
+//   - account: Account record to check
+//
+// BEHAVIOR:
+// - Checks if account is system account ("SYS")
+// - Checks if user is system user ("sys")
+//
+// RETURNS:
+// - true if user is system user requiring special permissions
+// - false for regular users
 func (g *Generator) isSystemUser(user *pbtypes.NatsUserRecord, account *pbtypes.AccountRecord) bool {
 	return account.NormalizeName() == "SYS" && user.NatsUsername == "sys"
 }
 
-// applyRolePermissions applies role-based permissions to user claims
-// No scoping applied - accounts provide isolation boundary
+// applyRolePermissions applies role-based permissions to user JWT claims.
+// Permissions are applied directly without scoping since accounts provide isolation.
+//
+// PERMISSION PHILOSOPHY:
+// - Account boundaries provide isolation (no subject scoping needed)
+// - Role permissions applied directly within account context
+// - System users get special unrestricted permissions
+// - Default permissions applied when role permissions empty
+//
+// PARAMETERS:
+//   - userClaims: JWT user claims to modify
+//   - user: User record for context
+//   - account: Account record for context
+//   - role: Role record containing permissions
+//
+// BEHAVIOR:
+// - Extracts publish/subscribe permissions from role
+// - Applies system permissions for system users
+// - Applies default permissions for empty role permissions
+// - Sets permissions directly in JWT claims (no scoping)
+//
+// RETURNS:
+// - nil on success
+// - error if permission parsing fails
+//
+// SIDE EFFECTS:
+// - Modifies userClaims.Permissions.Pub.Allow and Sub.Allow
 func (g *Generator) applyRolePermissions(userClaims *jwt.UserClaims, user *pbtypes.NatsUserRecord, account *pbtypes.AccountRecord, role *pbtypes.RoleRecord) error {
 	// Get publish permissions from role
 	publishPerms, err := role.GetPublishPermissions()
@@ -215,8 +391,28 @@ func (g *Generator) applyRolePermissions(userClaims *jwt.UserClaims, user *pbtyp
 	return nil
 }
 
-// applyRoleLimits applies role-based limits to user claims
-// Note: Based on NATS JWT v2 library structure and nats-tower patterns
+// applyRoleLimits applies role-based connection and data limits to user JWT claims.
+// These limits are enforced by NATS server to prevent resource exhaustion.
+//
+// LIMIT TYPES:
+// - Data limits: Total bytes user can have in flight
+// - Connection limits: Maximum concurrent connections (mapped to subscriptions)
+// - Payload limits: Maximum size of individual messages
+//
+// PARAMETERS:
+//   - userClaims: JWT user claims to modify
+//   - role: Role record containing limit definitions
+//
+// BEHAVIOR:
+// - Applies data limits from role (0 = disabled, -1 = unlimited, >0 = limit in bytes)
+// - Applies subscription limits from role (mapped from max_connections field)
+// - Applies payload limits from role
+// - Uses jwt.NoLimit constant for unlimited values
+//
+// RETURNS: None (modifies userClaims directly)
+//
+// SIDE EFFECTS:
+// - Modifies userClaims.Limits fields
 func (g *Generator) applyRoleLimits(userClaims *jwt.UserClaims, role *pbtypes.RoleRecord) {
 	// Apply data limits (correct field name from NATS JWT library)
 	if role.MaxData > 0 {
@@ -240,7 +436,34 @@ func (g *Generator) applyRoleLimits(userClaims *jwt.UserClaims, role *pbtypes.Ro
 	}
 }
 
-// GenerateSystemAccountJWT generates a JWT for the system account
+// GenerateSystemAccountJWT generates a specialized JWT for the system account (SYS).
+// The system account has special exports for monitoring and management operations.
+//
+// SYSTEM ACCOUNT FEATURES:
+// - Exports monitoring services ($SYS.REQ.ACCOUNT.*.*)
+// - Exports account monitoring streams ($SYS.ACCOUNT.*.>)
+// - JetStream explicitly disabled for system account
+// - Unlimited NATS core limits for administrative operations
+//
+// PARAMETERS:
+//   - sysAccount: System account record
+//   - operatorSigningSeed: Operator signing key for JWT signature
+//
+// BEHAVIOR:
+// - Creates system account claims with special exports
+// - Disables JetStream for system account (required by NATS)
+// - Sets unlimited core NATS limits
+// - Signs with operator signing key
+//
+// RETURNS:
+// - System account JWT for NATS configuration
+// - error if JWT generation fails
+//
+// NATS SYSTEM INTEGRATION:
+// This JWT enables NATS server to expose monitoring APIs and handle
+// account management requests through the system account.
+//
+// SIDE EFFECTS: None (pure JWT generation)
 func (g *Generator) GenerateSystemAccountJWT(sysAccount *pbtypes.AccountRecord, operatorSigningSeed string) (string, error) {
 	// Create operator signing key pair
 	operatorKP, err := g.nkeyManager.KeyPairFromSeed(operatorSigningSeed)
@@ -280,7 +503,7 @@ func (g *Generator) GenerateSystemAccountJWT(sysAccount *pbtypes.AccountRecord, 
 		},
 	}
 
-	// **CRITICAL FIX**: Explicitly disable JetStream for system account
+	// **CRITICAL**: Explicitly disable JetStream for system account
 	// System accounts should never have JetStream enabled
 	accountClaims.Limits.JetStreamLimits.DiskStorage = 0  // Disabled
 	accountClaims.Limits.JetStreamLimits.MemoryStorage = 0  // Disabled

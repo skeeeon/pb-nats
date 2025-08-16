@@ -10,13 +10,31 @@ import (
 	pbtypes "github.com/skeeeon/pb-nats/internal/types"
 )
 
-// Manager handles collection initialization and management
+// Manager handles creation and management of PocketBase collections required for NATS JWT synchronization.
+// This component ensures all necessary database structures exist before other components attempt to use them.
+//
+// COLLECTION ARCHITECTURE:
+// - nats_system_operator: Single operator record (root of trust)
+// - nats_accounts: Multiple tenant accounts (isolation boundaries)  
+// - nats_roles: Permission templates (reusable across accounts)
+// - nats_users: NATS users with PocketBase authentication
+// - nats_publish_queue: Reliable operation queue
+//
+// INITIALIZATION ORDER:
+// Collections must be created in dependency order to support foreign key relationships.
 type Manager struct {
-	app     *pocketbase.PocketBase
-	options pbtypes.Options
+	app     *pocketbase.PocketBase // PocketBase instance for database operations
+	options pbtypes.Options        // Configuration options including collection names
 }
 
-// NewManager creates a new collection manager
+// NewManager creates a new collection manager with PocketBase integration.
+//
+// PARAMETERS:
+//   - app: PocketBase application instance
+//   - options: Configuration including custom collection names
+//
+// RETURNS:
+// - Manager instance ready for collection initialization
 func NewManager(app *pocketbase.PocketBase, options pbtypes.Options) *Manager {
 	return &Manager{
 		app:     app,
@@ -24,7 +42,28 @@ func NewManager(app *pocketbase.PocketBase, options pbtypes.Options) *Manager {
 	}
 }
 
-// InitializeCollections creates or updates all required collections
+// InitializeCollections creates or updates all required collections in dependency order.
+// This is idempotent - existing collections are left unchanged.
+//
+// DEPENDENCY ORDER:
+// 1. System operator (no dependencies)
+// 2. Accounts (no dependencies)  
+// 3. Roles (no dependencies)
+// 4. Users (depends on accounts and roles)
+// 5. Publish queue (depends on accounts)
+//
+// IDEMPOTENT BEHAVIOR:
+// - Checks if collection exists before creating
+// - Skips creation if collection already exists
+// - Does not modify existing collection schemas
+//
+// RETURNS:
+// - nil on successful initialization
+// - error if any collection creation fails
+//
+// SIDE EFFECTS:
+// - Creates database collections and indexes
+// - Sets up collection schemas and security rules
 func (cm *Manager) InitializeCollections() error {
 	// Initialize in dependency order
 	if err := cm.createSystemOperatorCollection(); err != nil {
@@ -50,7 +89,26 @@ func (cm *Manager) InitializeCollections() error {
 	return nil
 }
 
-// createSystemOperatorCollection creates the system operator collection (hidden)
+// createSystemOperatorCollection creates the system operator collection (hidden from normal users).
+// This collection stores the root NATS operator credentials and configuration.
+//
+// SECURITY MODEL:
+// - No public access rules (only system can access)
+// - Contains root cryptographic keys
+// - Single record per deployment
+//
+// SCHEMA:
+// - Identity fields: name, public_key, private_key, seed
+// - Signing fields: signing_public_key, signing_private_key, signing_seed  
+// - Generated: jwt (operator JWT for NATS server configuration)
+// - Metadata: created, updated timestamps
+//
+// RETURNS:
+// - nil if collection created successfully or already exists
+// - error if collection creation fails
+//
+// SIDE EFFECTS:
+// - Creates nats_system_operator collection with no access rules
 func (cm *Manager) createSystemOperatorCollection() error {
 	// Check if collection already exists
 	_, err := cm.app.FindCollectionByNameOrId(pbtypes.SystemOperatorCollectionName)
@@ -123,7 +181,31 @@ func (cm *Manager) createSystemOperatorCollection() error {
 	return cm.app.Save(collection)
 }
 
-// createAccountsCollection creates the NATS accounts collection
+// createAccountsCollection creates the NATS accounts collection for tenant isolation.
+// Accounts provide natural boundaries for users and permissions without complex subject scoping.
+//
+// SECURITY MODEL:
+// - Authenticated users can list and view active accounts
+// - Only authenticated users can create/update/delete accounts
+// - Account isolation handled by NATS, not PocketBase rules
+//
+// SCHEMA:
+// - Identity: name, description, public_key, private_key, seed
+// - Signing: signing_public_key, signing_private_key, signing_seed
+// - Generated: jwt (account JWT for NATS publishing)
+// - Management: active (enable/disable), rotate_keys (trigger rotation)
+// - Metadata: created, updated timestamps
+//
+// SPECIAL FIELDS:
+// - rotate_keys: Boolean trigger for emergency signing key rotation
+// - active: Account enable/disable flag
+//
+// RETURNS:
+// - nil if collection created successfully or already exists
+// - error if collection creation fails
+//
+// SIDE EFFECTS:
+// - Creates accounts collection with authenticated user access
 func (cm *Manager) createAccountsCollection() error {
 	// Check if collection already exists
 	_, err := cm.app.FindCollectionByNameOrId(cm.options.AccountCollectionName)
@@ -203,7 +285,35 @@ func (cm *Manager) createAccountsCollection() error {
 	return cm.app.Save(collection)
 }
 
-// createRolesCollection creates the roles collection
+// createRolesCollection creates the roles collection for permission templates.
+// Roles define reusable permission sets that can be applied to users across accounts.
+//
+// SECURITY MODEL:
+// - Authenticated users can list and view all roles
+// - Only authenticated users can create/update/delete roles
+// - Role permissions stored as JSON arrays for flexibility
+//
+// PERMISSION STORAGE:
+// - publish_permissions: JSON array of NATS subjects for publishing
+// - subscribe_permissions: JSON array of NATS subjects for subscribing
+// - No subject scoping applied - accounts provide isolation
+//
+// LIMIT FIELDS:
+// - max_connections: Maximum concurrent NATS connections (-1 = unlimited)
+// - max_data: Maximum bytes in flight (-1 = unlimited)
+// - max_payload: Maximum message size (-1 = unlimited)
+//
+// SCHEMA:
+// - Identity: name, description, is_default
+// - Permissions: publish_permissions, subscribe_permissions (JSON arrays)
+// - Limits: max_connections, max_data, max_payload
+//
+// RETURNS:
+// - nil if collection created successfully or already exists
+// - error if collection creation fails
+//
+// SIDE EFFECTS:
+// - Creates roles collection with authenticated user access
 func (cm *Manager) createRolesCollection() error {
 	// Check if collection already exists
 	_, err := cm.app.FindCollectionByNameOrId(cm.options.RoleCollectionName)
@@ -263,7 +373,42 @@ func (cm *Manager) createRolesCollection() error {
 	return cm.app.Save(collection)
 }
 
-// createUsersCollection creates the NATS users collection (auth collection)
+// createUsersCollection creates the NATS users collection with PocketBase authentication.
+// This is an auth collection that extends PocketBase users with NATS-specific fields.
+//
+// AUTH COLLECTION FEATURES:
+// - Built-in email/password authentication
+// - Email verification support
+// - Standard PocketBase user management
+// - Extended with NATS credentials
+//
+// SECURITY MODEL:
+// - Users can only access their own records (self-service)
+// - Authenticated users can create new users
+// - Admin users can manage all users
+//
+// NATS INTEGRATION:
+// - nats_username: NATS identity (separate from email)
+// - Generated keys: public_key, private_key, seed
+// - Relations: account_id, role_id (foreign keys)
+// - Generated: jwt, creds_file (for NATS connections)
+// - Management: regenerate (trigger JWT refresh), active (enable/disable)
+//
+// SPECIAL FIELDS:
+// - regenerate: Boolean trigger for JWT regeneration
+// - bearer_token: NATS bearer token authentication flag
+// - jwt_expires_at: Optional JWT expiration timestamp
+//
+// TWO-PHASE CREATION:
+// Collection must be saved before adding relation fields due to PocketBase requirements.
+//
+// RETURNS:
+// - nil if collection created successfully or already exists
+// - error if collection creation fails
+//
+// SIDE EFFECTS:
+// - Creates auth collection with user self-access
+// - Sets up foreign key relationships to accounts and roles
 func (cm *Manager) createUsersCollection() error {
 	// Check if collection already exists
 	_, err := cm.app.FindCollectionByNameOrId(cm.options.UserCollectionName)
@@ -361,7 +506,42 @@ func (cm *Manager) createUsersCollection() error {
 	return cm.app.Save(collection)
 }
 
-// createPublishQueueCollection creates the publish queue collection for reliable publishing
+// createPublishQueueCollection creates the publish queue collection for reliable NATS operations.
+// This collection provides operation persistence during NATS outages and retry logic.
+//
+// QUEUE RELIABILITY:
+// - Operations survive NATS server restarts
+// - Automatic retry with attempt counting
+// - Failed operation tracking and cleanup
+// - Bootstrap mode integration
+//
+// SECURITY MODEL:
+// - Hidden collection (only system access)
+// - No public API access
+// - Internal operations only
+//
+// QUEUE RECORD LIFECYCLE:
+// 1. Created: attempts=0, failed_at=null
+// 2. Processing: attempts incremented on failures
+// 3. Success: record deleted
+// 4. Max attempts: failed_at set (permanent failure)
+// 5. Cleanup: old failed records deleted
+//
+// SCHEMA:
+// - Operation: account_id (FK), action (upsert/delete)
+// - Status: attempts, message (error details), failed_at
+// - Metadata: created, updated timestamps
+//
+// TWO-PHASE CREATION:
+// Collection saved first, then relation added due to PocketBase requirements.
+//
+// RETURNS:
+// - nil if collection created successfully or already exists  
+// - error if collection creation fails
+//
+// SIDE EFFECTS:
+// - Creates hidden queue collection
+// - Sets up foreign key relationship to accounts
 func (cm *Manager) createPublishQueueCollection() error {
 	// Check if collection already exists
 	_, err := cm.app.FindCollectionByNameOrId(pbtypes.PublishQueueCollectionName)

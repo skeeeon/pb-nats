@@ -16,25 +16,51 @@ import (
 	pbtypes "github.com/skeeeon/pb-nats/internal/types"
 )
 
-// Manager manages the synchronization between PocketBase and NATS
+// Manager orchestrates real-time synchronization between PocketBase record changes and NATS.
+// This is the central component that responds to database events and triggers JWT regeneration
+// and NATS publishing operations.
+//
+// SYNCHRONIZATION STRATEGY:
+// - PocketBase Record Change → JWT Regeneration → Account Publishing → NATS Update
+// - Debouncing prevents excessive NATS traffic during rapid changes
+// - Queue-based publishing ensures reliability during NATS outages
+//
+// EVENT HANDLING:
+// - Account changes: Regenerate account JWT, publish to NATS
+// - User changes: Regenerate user JWT, publish account to NATS  
+// - Role changes: Regenerate all affected user JWTs, publish all affected accounts
 type Manager struct {
-	app         *pocketbase.PocketBase
-	jwtGen      *jwt.Generator
-	nkeyManager *nkey.Manager
-	publisher   *publisher.Manager
-	options     pbtypes.Options
-	logger      *utils.Logger
+	app         *pocketbase.PocketBase    // PocketBase application instance
+	jwtGen      *jwt.Generator            // JWT generation service
+	nkeyManager *nkey.Manager             // NKey management service
+	publisher   *publisher.Manager        // NATS publishing service
+	options     pbtypes.Options           // Configuration options
+	logger      *utils.Logger             // Logger for consistent output
 	
-	// Debouncing
-	timer       *time.Timer
-	timerMutex  sync.Mutex
+	// Debouncing state
+	timer       *time.Timer  // Timer for debounced operations
+	timerMutex  sync.Mutex   // Protects timer access
 	
-	// Processing state
-	isProcessing     bool
-	processingMutex  sync.Mutex
+	// Processing state  
+	isProcessing     bool        // Flag to prevent concurrent processing
+	processingMutex  sync.Mutex  // Protects processing flag
 }
 
-// NewManager creates a new sync manager
+// NewManager creates a new sync manager with all required dependencies.
+//
+// PARAMETERS:
+//   - app: PocketBase application instance for database access
+//   - jwtGen: JWT generator for creating NATS JWTs
+//   - nkeyManager: NKey manager for key generation
+//   - publisher: NATS publisher for account updates
+//   - options: Configuration options
+//
+// RETURNS:
+// - Manager instance ready for hook setup
+//
+// INITIALIZATION:
+// The manager is created but hooks are not yet registered. Call SetupHooks()
+// after all system components are initialized to avoid race conditions.
 func NewManager(app *pocketbase.PocketBase, jwtGen *jwt.Generator, nkeyManager *nkey.Manager, 
 	publisher *publisher.Manager, options pbtypes.Options) *Manager {
 	return &Manager{
@@ -47,8 +73,25 @@ func NewManager(app *pocketbase.PocketBase, jwtGen *jwt.Generator, nkeyManager *
 	}
 }
 
-// SetupHooks sets up all the PocketBase hooks for synchronization
-// This is separated from system component initialization to ensure proper order
+// SetupHooks registers PocketBase event hooks for real-time NATS synchronization.
+// This is called after all system components are initialized to avoid race conditions.
+//
+// HOOK CATEGORIES:
+// - Account hooks: Handle account lifecycle and key rotation
+// - User hooks: Handle user lifecycle and JWT regeneration
+// - Role hooks: Handle permission changes affecting multiple users
+//
+// TIMING:
+// Called after system initialization to ensure all components are ready
+// before processing database events.
+//
+// RETURNS:
+// - nil on successful hook registration
+// - error if hook setup fails
+//
+// SIDE EFFECTS:
+// - Registers multiple PocketBase event hooks
+// - Enables real-time synchronization
 func (sm *Manager) SetupHooks() error {
 	sm.logger.Info("Setting up PocketBase hooks for NATS sync...")
 
@@ -62,7 +105,24 @@ func (sm *Manager) SetupHooks() error {
 	return nil
 }
 
-// setupAccountHooks sets up hooks for account changes
+// setupAccountHooks registers hooks for account lifecycle and management operations.
+//
+// ACCOUNT EVENT HANDLING:
+// - Creation: Generate keys and JWT, schedule NATS publishing
+// - Updates: Regenerate JWT, handle signing key rotation, schedule publishing
+// - Deletion: Remove account from NATS (with system account protection)
+//
+// KEY ROTATION LOGIC:
+// The rotate_keys boolean field triggers emergency signing key rotation:
+// 1. Field set to true → generate new signing keys
+// 2. Regenerate account JWT with new keys
+// 3. All user JWTs become invalid immediately (signed with old key)
+// 4. Clear rotate_keys flag to prevent loops
+//
+// SIDE EFFECTS:
+// - Registers OnRecordCreateRequest, OnRecordAfterCreateSuccess
+// - Registers OnRecordUpdateRequest, OnRecordAfterUpdateSuccess  
+// - Registers OnRecordDeleteRequest
 func (sm *Manager) setupAccountHooks() {
 	// Account creation
 	sm.app.OnRecordCreateRequest().BindFunc(func(e *core.RecordRequestEvent) error {
@@ -149,7 +209,27 @@ func (sm *Manager) setupAccountHooks() {
 	})
 }
 
-// setupUserHooks sets up hooks for user changes
+// setupUserHooks registers hooks for user lifecycle and JWT management operations.
+//
+// USER EVENT HANDLING:
+// - Creation: Generate keys and JWT, schedule account publishing
+// - Updates: Regenerate JWT (normal or forced via regenerate flag), schedule account publishing
+// - Deletion: Schedule account publishing (user removed from account)
+//
+// REGENERATE FLAG LOGIC:
+// The regenerate boolean field forces JWT regeneration:
+// 1. Field set to true → regenerate user JWT and .creds file
+// 2. Clear regenerate flag to prevent loops
+// 3. Use case: credential rotation, permission updates, security incidents
+//
+// ACCOUNT PUBLISHING:
+// User changes trigger account publishing because the account JWT needs to be
+// republished to NATS to reflect the updated user roster.
+//
+// SIDE EFFECTS:
+// - Registers OnRecordCreateRequest, OnRecordAfterCreateSuccess
+// - Registers OnRecordUpdateRequest, OnRecordAfterUpdateSuccess
+// - Registers OnRecordAfterDeleteSuccess
 func (sm *Manager) setupUserHooks() {
 	// User creation
 	sm.app.OnRecordCreateRequest().BindFunc(func(e *core.RecordRequestEvent) error {
@@ -234,7 +314,26 @@ func (sm *Manager) setupUserHooks() {
 	})
 }
 
-// setupRoleHooks sets up hooks for role changes
+// setupRoleHooks registers hooks for role permission changes affecting multiple users.
+//
+// ROLE EVENT HANDLING:
+// Role changes have broad impact because multiple users across multiple accounts
+// may share the same role:
+//
+// ROLE UPDATE PROCESS:
+// 1. Role permissions change
+// 2. Find all users with this role (across all accounts)
+// 3. Regenerate JWT for each affected user
+// 4. Schedule publishing for all affected accounts
+//
+// PERFORMANCE CONSIDERATION:
+// Role changes can be expensive operations if many users share the role.
+// The system processes all affected users synchronously during the update.
+//
+// SIDE EFFECTS:
+// - Registers OnRecordAfterUpdateSuccess
+// - May regenerate many user JWTs
+// - May schedule many account publishing operations
 func (sm *Manager) setupRoleHooks() {
 	// Role updates affect all users with that role
 	sm.app.OnRecordAfterUpdateSuccess().BindFunc(func(e *core.RecordEvent) error {
@@ -257,8 +356,37 @@ func (sm *Manager) setupRoleHooks() {
 	})
 }
 
-// rotateAccountSigningKeys rotates the signing keys for an account and regenerates the account JWT
-// This will immediately invalidate all user JWTs signed with the old account signing key
+// rotateAccountSigningKeys performs emergency signing key rotation for an account.
+// This is a critical security operation that immediately invalidates all user JWTs.
+//
+// SECURITY IMPACT:
+// - Generates new account signing key pair
+// - Preserves account identity (main account key unchanged)
+// - All user JWTs become invalid immediately (signed with old key)
+// - Users must re-authenticate to get new JWTs
+//
+// WHEN TO USE:
+// - Account compromise detected
+// - Suspicious NATS activity
+// - Periodic security hardening
+// - Before sensitive operations
+//
+// ROTATION PROCESS:
+// 1. Generate new signing key pair (preserve account identity)
+// 2. Update account record with new signing keys
+// 3. Regenerate account JWT with new signing keys
+// 4. Users lose NATS access until they get fresh JWTs from PocketBase
+//
+// PARAMETERS:
+//   - record: Account record to rotate keys for
+//
+// RETURNS:
+// - nil on successful rotation
+// - error if key generation or JWT creation fails
+//
+// SIDE EFFECTS:
+// - Modifies account record with new signing keys
+// - Immediately invalidates all user JWTs for this account
 func (sm *Manager) rotateAccountSigningKeys(record *core.Record) error {
 	sm.logger.Info("Rotating signing keys for account %s...", record.GetString("name"))
 
@@ -295,7 +423,22 @@ func (sm *Manager) rotateAccountSigningKeys(record *core.Record) error {
 	return nil
 }
 
-// shouldHandleEvent determines if an event should be handled based on the event filter
+// shouldHandleEvent determines if an event should be processed based on configured filters.
+//
+// EVENT FILTERING:
+// Allows selective event processing based on collection and event type.
+// Useful for debugging, testing, or custom workflows.
+//
+// PARAMETERS:
+//   - collectionName: Name of collection where event occurred
+//   - eventType: Type of event (create, update, delete, etc.)
+//
+// RETURNS:
+// - true if event should be processed
+// - false if event should be ignored
+//
+// DEFAULT BEHAVIOR:
+// If no filter configured, all events are processed.
 func (sm *Manager) shouldHandleEvent(collectionName, eventType string) bool {
 	if sm.options.EventFilter != nil {
 		return sm.options.EventFilter(collectionName, eventType)
@@ -303,7 +446,25 @@ func (sm *Manager) shouldHandleEvent(collectionName, eventType string) bool {
 	return true
 }
 
-// scheduleSync schedules a sync operation with debouncing
+// scheduleSync schedules a NATS publishing operation with debouncing to prevent excessive traffic.
+//
+// DEBOUNCING STRATEGY:
+// - Multiple rapid changes → single delayed operation
+// - Timer reset on each new change
+// - Prevents NATS overload during bulk operations
+//
+// SCHEDULING PROCESS:
+// 1. Queue operation immediately
+// 2. Start/reset debounce timer
+// 3. Process queue when timer expires
+//
+// PARAMETERS:
+//   - accountID: Database ID of account to publish
+//   - action: Action type (upsert or delete)
+//
+// SIDE EFFECTS:
+// - Queues operation immediately
+// - Starts/resets debounce timer
 func (sm *Manager) scheduleSync(accountID, action string) {
 	sm.timerMutex.Lock()
 	defer sm.timerMutex.Unlock()
@@ -326,7 +487,28 @@ func (sm *Manager) scheduleSync(accountID, action string) {
 	})
 }
 
-// generateAccountKeys generates keys and JWT for an account
+// generateAccountKeys generates key pairs and JWT for a new account record.
+//
+// ACCOUNT KEY STRUCTURE:
+// - Main key pair: Account identity (public key is account ID)
+// - Signing key pair: Used to sign user JWTs
+// - JWT: Account definition for NATS server
+//
+// PARAMETERS:
+//   - record: Account record to populate with keys and JWT
+//
+// BEHAVIOR:
+// - Skips if keys already exist (idempotent)
+// - Generates main account key pair
+// - Generates signing key pair
+// - Creates account JWT
+//
+// RETURNS:
+// - nil on success
+// - error if key generation or JWT creation fails
+//
+// SIDE EFFECTS:
+// - Modifies account record with generated keys and JWT
 func (sm *Manager) generateAccountKeys(record *core.Record) error {
 	// Skip if keys already exist
 	if record.GetString("public_key") != "" {
@@ -362,7 +544,23 @@ func (sm *Manager) generateAccountKeys(record *core.Record) error {
 	return sm.generateAccountJWT(record)
 }
 
-// generateAccountJWT generates JWT for an account
+// generateAccountJWT creates an account JWT using the system operator's signing key.
+//
+// JWT GENERATION PROCESS:
+// 1. Retrieve system operator from database
+// 2. Create account model from record data
+// 3. Generate JWT using operator's signing key
+// 4. Store JWT in account record
+//
+// PARAMETERS:
+//   - record: Account record to generate JWT for
+//
+// RETURNS:
+// - nil on success
+// - error if operator lookup or JWT generation fails
+//
+// SIDE EFFECTS:
+// - Updates account record with generated JWT
 func (sm *Manager) generateAccountJWT(record *core.Record) error {
 	// Get system operator
 	operator, err := sm.getSystemOperator()
@@ -387,7 +585,28 @@ func (sm *Manager) generateAccountJWT(record *core.Record) error {
 	return nil
 }
 
-// generateUserKeys generates keys and JWT for a user
+// generateUserKeys generates key pairs and JWT for a new user record.
+//
+// USER KEY STRUCTURE:
+// - User key pair: User identity for NATS authentication
+// - JWT: User permissions and limits signed by account
+// - Creds file: Complete authentication file for NATS clients
+//
+// PARAMETERS:
+//   - record: User record to populate with keys and JWT
+//
+// BEHAVIOR:
+// - Skips if keys already exist (idempotent)
+// - Generates user key pair
+// - Creates user JWT based on account and role
+// - Generates .creds file for client use
+//
+// RETURNS:
+// - nil on success
+// - error if key generation or JWT creation fails
+//
+// SIDE EFFECTS:
+// - Modifies user record with generated keys, JWT, and .creds file
 func (sm *Manager) generateUserKeys(record *core.Record) error {
 	// Skip if keys already exist
 	if record.GetString("public_key") != "" {
@@ -415,7 +634,23 @@ func (sm *Manager) generateUserKeys(record *core.Record) error {
 	return sm.generateUserJWT(record)
 }
 
-// generateUserJWT generates JWT and creds file for a user
+// generateUserJWT creates a user JWT based on account context and role permissions.
+//
+// JWT GENERATION PROCESS:
+// 1. Retrieve account and role records from database
+// 2. Convert records to model types
+// 3. Generate user JWT with role-based permissions
+// 4. Generate .creds file containing JWT and user key
+//
+// PARAMETERS:
+//   - record: User record to generate JWT for
+//
+// RETURNS:
+// - nil on success
+// - error if account/role lookup or JWT generation fails
+//
+// SIDE EFFECTS:
+// - Updates user record with JWT and .creds file
 func (sm *Manager) generateUserJWT(record *core.Record) error {
 	// Get account and role
 	account, err := sm.app.FindRecordById(sm.options.AccountCollectionName, record.GetString("account_id"))
@@ -452,7 +687,28 @@ func (sm *Manager) generateUserJWT(record *core.Record) error {
 	return nil
 }
 
-// regenerateUserJWT regenerates JWT for a user (when role/account changes or regenerate flag is set)
+// regenerateUserJWT recreates user JWT when role or account changes or manual regeneration triggered.
+//
+// USE CASES:
+// - Role permissions changed
+// - Account signing key rotated
+// - Manual regeneration via regenerate flag
+// - User settings updated
+//
+// REGENERATION PROCESS:
+// 1. Clear existing JWT and .creds file
+// 2. Generate new JWT with current permissions
+// 3. Generate new .creds file
+//
+// PARAMETERS:
+//   - record: User record to regenerate JWT for
+//
+// RETURNS:
+// - nil on success
+// - error if JWT regeneration fails
+//
+// SIDE EFFECTS:
+// - Updates user record with new JWT and .creds file
 func (sm *Manager) regenerateUserJWT(record *core.Record) error {
 	// Clear existing JWT and creds
 	record.Set("jwt", "")
@@ -462,7 +718,9 @@ func (sm *Manager) regenerateUserJWT(record *core.Record) error {
 	return sm.generateUserJWT(record)
 }
 
-// Helper methods to convert records to models
+// Helper methods to convert PocketBase records to internal model types
+
+// recordToUserModel converts PocketBase user record to internal user model.
 func (sm *Manager) recordToUserModel(record *core.Record) *pbtypes.NatsUserRecord {
 	return &pbtypes.NatsUserRecord{
 		ID:           record.Id,
@@ -478,6 +736,7 @@ func (sm *Manager) recordToUserModel(record *core.Record) *pbtypes.NatsUserRecor
 	}
 }
 
+// recordToAccountModel converts PocketBase account record to internal account model.
 func (sm *Manager) recordToAccountModel(record *core.Record) *pbtypes.AccountRecord {
 	return &pbtypes.AccountRecord{
 		ID:               record.Id,
@@ -488,6 +747,7 @@ func (sm *Manager) recordToAccountModel(record *core.Record) *pbtypes.AccountRec
 	}
 }
 
+// recordToRoleModel converts PocketBase role record to internal role model.
 func (sm *Manager) recordToRoleModel(record *core.Record) *pbtypes.RoleRecord {
 	return &pbtypes.RoleRecord{
 		ID:                   record.Id,
@@ -500,7 +760,18 @@ func (sm *Manager) recordToRoleModel(record *core.Record) *pbtypes.RoleRecord {
 	}
 }
 
-// getSystemOperator gets the system operator with consistent error handling
+// getSystemOperator retrieves the system operator record for JWT signing operations.
+//
+// SYSTEM OPERATOR LOOKUP:
+// - Assumes single operator record exists
+// - Validates critical fields (public key, signing seed)
+// - Used for signing account JWTs
+//
+// RETURNS:
+// - SystemOperatorRecord with validated fields
+// - error if operator not found or invalid
+//
+// THREAD SAFETY: Safe for concurrent access (read-only operation)
 func (sm *Manager) getSystemOperator() (*pbtypes.SystemOperatorRecord, error) {
 	records, err := sm.app.FindAllRecords(pbtypes.SystemOperatorCollectionName)
 	if err != nil {
@@ -532,7 +803,25 @@ func (sm *Manager) getSystemOperator() (*pbtypes.SystemOperatorRecord, error) {
 	return operator, nil
 }
 
-// regenerateUsersWithRole regenerates JWTs for all users with a specific role
+// regenerateUsersWithRole updates JWTs for all users sharing a specific role.
+// This is called when role permissions change and affects users across multiple accounts.
+//
+// BULK REGENERATION PROCESS:
+// 1. Find all users with the specified role
+// 2. Regenerate JWT for each user
+// 3. Save updated user records
+// 4. Log warnings for any failures (continues processing)
+//
+// PARAMETERS:
+//   - roleID: Database ID of role that changed
+//
+// RETURNS:
+// - nil on successful processing (individual user failures logged as warnings)
+// - error if user lookup fails
+//
+// SIDE EFFECTS:
+// - Updates multiple user records with new JWTs
+// - May impact users across multiple accounts
 func (sm *Manager) regenerateUsersWithRole(roleID string) error {
 	users, err := sm.app.FindAllRecords(sm.options.UserCollectionName, dbx.HashExp{"role_id": roleID})
 	if err != nil {
@@ -553,7 +842,24 @@ func (sm *Manager) regenerateUsersWithRole(roleID string) error {
 	return nil
 }
 
-// scheduleAccountsWithRole schedules sync for all accounts that have users with a specific role
+// scheduleAccountsWithRole schedules NATS publishing for all accounts containing users with a specific role.
+// This ensures all affected accounts are updated in NATS after role changes.
+//
+// ACCOUNT SCHEDULING PROCESS:
+// 1. Find all users with the specified role
+// 2. Extract unique account IDs
+// 3. Schedule publishing for each affected account
+//
+// PARAMETERS:
+//   - roleID: Database ID of role that changed
+//
+// RETURNS:
+// - nil on successful scheduling
+// - error if user lookup fails
+//
+// SIDE EFFECTS:
+// - Schedules multiple account publishing operations
+// - May trigger NATS updates for multiple accounts
 func (sm *Manager) scheduleAccountsWithRole(roleID string) error {
 	users, err := sm.app.FindAllRecords(sm.options.UserCollectionName, dbx.HashExp{"role_id": roleID})
 	if err != nil {
