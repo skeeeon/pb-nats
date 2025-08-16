@@ -198,7 +198,7 @@ func createDemoAccount(app *pocketbase.PocketBase) (*core.Record, error) {
 }
 
 func createRole(app *pocketbase.PocketBase, name string, publishPerms, subscribePerms []string, 
-	maxConn, maxData, maxPayload int64) (*core.Record, error) {
+	maxSubscriptions, maxData, maxPayload int64) (*core.Record, error) {
 	collection, err := app.FindCollectionByNameOrId("nats_roles")
 	if err != nil {
 		return nil, err
@@ -220,7 +220,7 @@ func createRole(app *pocketbase.PocketBase, name string, publishPerms, subscribe
 	
 	record.Set("publish_permissions", string(publishJSON))
 	record.Set("subscribe_permissions", string(subscribeJSON))
-	record.Set("max_connections", maxConn)
+	record.Set("max_subscriptions", maxSubscriptions) // FIXED: Changed from max_connections
 	record.Set("max_data", maxData)
 	record.Set("max_payload", maxPayload)
 

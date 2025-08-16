@@ -12,6 +12,8 @@ A high-performance library for seamless integration between [PocketBase](https:/
 - **🔒 Security Features**: Account signing key rotation with immediate user JWT invalidation
 - **⚡ Queue-Based Publishing**: Reliable operations with retry logic and automatic cleanup
 - **🔑 Simple Regeneration**: JWT refresh via boolean field triggers
+- **📊 Account Limits**: Configurable resource limits at both account and user levels
+- **⚙️ Hierarchical Limits**: Account-level limits control overall resources, role-based limits control per-user resources
 
 ## 📦 Installation
 
@@ -74,7 +76,7 @@ func main() {
 | `updated` | DateTime | Update timestamp |
 
 ### Accounts (`nats_accounts`)
-*NATS accounts providing isolation boundaries*
+*NATS accounts providing isolation boundaries with configurable limits*
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -89,6 +91,12 @@ func main() {
 | `jwt` | Text | Account JWT |
 | `active` | Boolean | Account status |
 | `rotate_keys` | Boolean | **Triggers signing key rotation** |
+| `max_connections` | Number | **Max concurrent connections** (-1 = unlimited) |
+| `max_subscriptions` | Number | **Max subscriptions across account** (-1 = unlimited) |
+| `max_data` | Number | **Max bytes in-flight across account** (-1 = unlimited) |
+| `max_payload` | Number | **Max message size for account** (-1 = unlimited) |
+| `max_jetstream_disk_storage` | Number | **Max JetStream disk storage** (-1 = unlimited) |
+| `max_jetstream_memory_storage` | Number | **Max JetStream memory storage** (-1 = unlimited) |
 | `created` | DateTime | Creation timestamp |
 | `updated` | DateTime | Update timestamp |
 
@@ -113,7 +121,7 @@ func main() {
 | `active` | Boolean | User status |
 
 ### Roles (`nats_roles`)
-*Permission templates*
+*Permission templates with per-user limits*
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -121,9 +129,33 @@ func main() {
 | `description` | Text | Role description |
 | `publish_permissions` | Text | JSON array of publish subjects |
 | `subscribe_permissions` | Text | JSON array of subscribe subjects |
-| `max_connections` | Number | Connection limit (-1 = unlimited) |
-| `max_data` | Number | Data limit (-1 = unlimited) |
-| `max_payload` | Number | Payload limit (-1 = unlimited) |
+| `max_subscriptions` | Number | **Max subscriptions per user** (-1 = unlimited) |
+| `max_data` | Number | **Data limit per user** (-1 = unlimited) |
+| `max_payload` | Number | **Message size limit per user** (-1 = unlimited) |
+
+## 📊 Resource Limits Hierarchy
+
+pb-nats implements a two-tier resource limit system:
+
+### Account-Level Limits (Shared Resources)
+Set on the **account** record, these limits control total resources across the entire account:
+- `max_connections`: Total concurrent connections to the account
+- `max_subscriptions`: Total subscriptions across all users in account
+- `max_data`: Total bytes in-flight across all users in account
+- `max_payload`: Maximum message size for the account
+- `max_jetstream_disk_storage`: Total JetStream disk usage for account
+- `max_jetstream_memory_storage`: Total JetStream memory usage for account
+
+### User-Level Limits (Per-User Resources)
+Set on the **role** record, these limits control individual user resource usage:
+- `max_subscriptions`: Maximum concurrent subscriptions per user
+- `max_data`: Maximum bytes a single user can have in-flight
+- `max_payload`: Maximum message size a single user can send
+
+### Limit Values
+- **-1**: Unlimited (no restrictions)
+- **0**: Uses default unlimited behavior
+- **Positive numbers**: Specific limits in appropriate units (bytes, count, etc.)
 
 ## ⚙️ Configuration Options
 
@@ -232,6 +264,15 @@ Authorization: Bearer {admin_token}
 PATCH /api/collections/nats_accounts/records/{account_id}  
 {"rotate_keys": true}
 
+# Set account limits
+PATCH /api/collections/nats_accounts/records/{account_id}
+{
+    "max_connections": 100,
+    "max_subscriptions": 1000,
+    "max_data": 1048576,
+    "max_payload": 65536
+}
+
 # List users in account
 GET /api/collections/nats_users/records?filter=account_id="{account_id}"
 ```
@@ -311,23 +352,23 @@ if err := pbnats.Setup(app, options); err != nil {
 
 ## 🎯 Use Cases
 
-### IoT Platform
-- Account per customer/building
-- Device users with sensor permissions  
-- Real-time telemetry streaming
+### IoT Platform with Resource Management
+- Account per customer/building with connection limits
+- Device users with sensor permissions and data limits
+- Real-time telemetry streaming with payload size controls
 - Emergency account rotation for compromised customers
 
 ### Multi-Tenant SaaS
-- Account per tenant for data isolation
-- Role-based permissions within accounts
+- Account per tenant for data isolation with resource quotas
+- Role-based permissions within accounts with per-user limits
 - Cross-tenant communication via exports/imports
-- Account-level security operations
+- Account-level security and resource management operations
 
 ### Development Teams
-- Account per team (frontend, backend, devops)
+- Account per team (frontend, backend, devops) with development resource limits
 - Isolated team communication channels
-- CI/CD service accounts
-- Team-level incident response
+- CI/CD service accounts with restricted permissions
+- Team-level incident response and resource monitoring
 
 ## 🐛 Troubleshooting
 
@@ -350,6 +391,18 @@ if err := pbnats.Setup(app, options); err != nil {
 - Adjust `DebounceInterval` for change frequency
 - Tune `PublishQueueInterval` for processing speed
 - Monitor failed record cleanup logs
+
+**Resource Limits:**
+- Account limits: Check NATS server monitoring for account-level usage
+- User limits: Individual users hitting role-based limits will see connection errors
+- Unlimited values: Use -1 for unlimited, 0 defaults to unlimited behavior
+
+## 📚 Examples
+
+Check the `examples/` directory for:
+- `basic/` - Simple setup with default options and bootstrap process
+- `advanced/` - Custom configuration with connection management and resource limits
+- `integration/` - Complete workflow demonstration with JWT regeneration and account limits
 
 ## 📄 License
 

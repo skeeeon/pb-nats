@@ -843,7 +843,7 @@ func (p *Manager) validateAccount(account *pbtypes.AccountRecord) error {
 }
 
 // recordToAccountModel converts PocketBase record to internal account model.
-// Updated to include the new account limit fields.
+// Updated to include the new account limit fields with proper int64 conversion.
 //
 // FIELD MAPPING:
 // - Database fields → Internal model fields
@@ -869,13 +869,13 @@ func (p *Manager) recordToAccountModel(record *core.Record) *pbtypes.AccountReco
 		JWT:               record.GetString("jwt"),
 		Active:            record.GetBool("active"),
 		
-		// Account-level limits (newly added fields)
-		MaxConnections:                record.GetInt64("max_connections"),
-		MaxSubscriptions:              record.GetInt64("max_subscriptions"),
-		MaxData:                       record.GetInt64("max_data"),
-		MaxPayload:                    record.GetInt64("max_payload"),
-		MaxJetStreamDiskStorage:       record.GetInt64("max_jetstream_disk_storage"),
-		MaxJetStreamMemoryStorage:     record.GetInt64("max_jetstream_memory_storage"),
+		// Account-level limits (FIXED: using int64(record.GetInt()) instead of record.GetInt64())
+		MaxConnections:                int64(record.GetInt("max_connections")),
+		MaxSubscriptions:              int64(record.GetInt("max_subscriptions")),
+		MaxData:                       int64(record.GetInt("max_data")),
+		MaxPayload:                    int64(record.GetInt("max_payload")),
+		MaxJetStreamDiskStorage:       int64(record.GetInt("max_jetstream_disk_storage")),
+		MaxJetStreamMemoryStorage:     int64(record.GetInt("max_jetstream_memory_storage")),
 	}
 }
 
