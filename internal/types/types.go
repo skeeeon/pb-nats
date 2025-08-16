@@ -25,12 +25,17 @@ import (
 // The rotate_keys field triggers emergency key rotation that immediately
 // invalidates all user JWTs in the account (they were signed with old key).
 //
-// ACCOUNT LIMITS:
+// ACCOUNT LIMITS (FIXED - CORRECT NATS SEMANTICS):
 // Account-level limits control resources across the entire account:
 // - Connection limits: Total concurrent connections to the account
 // - Data limits: Total bytes in-flight across all users in account
 // - Subscription limits: Total subscriptions across all users in account
 // - JetStream limits: Storage and stream limits for the account
+//
+// LIMIT VALUES (CRITICAL - CORRECT NATS SEMANTICS):
+// - (-1) = Unlimited (no restrictions) 
+// - (0) = Disabled/blocked (no access allowed)
+// - (positive) = Specific limit value
 type AccountRecord struct {
 	ID                string    `json:"id"`                  // Database primary key
 	Name              string    `json:"name"`                // Display name (normalized for NATS account name)
@@ -45,13 +50,14 @@ type AccountRecord struct {
 	Active            bool      `json:"active"`              // Account enable/disable flag
 	RotateKeys        bool      `json:"rotate_keys"`         // Trigger field for signing key rotation
 	
-	// Account-level limits (optional, default to -1 = unlimited)
-	MaxConnections                int64 `json:"max_connections"`                 // Max concurrent connections to account (-1 = unlimited)
-	MaxSubscriptions              int64 `json:"max_subscriptions"`               // Max subscriptions across account (-1 = unlimited)
-	MaxData                       int64 `json:"max_data"`                        // Max bytes in-flight across account (-1 = unlimited)
-	MaxPayload                    int64 `json:"max_payload"`                     // Max message size for account (-1 = unlimited)
-	MaxJetStreamDiskStorage       int64 `json:"max_jetstream_disk_storage"`      // Max JetStream disk storage (-1 = unlimited)
-	MaxJetStreamMemoryStorage     int64 `json:"max_jetstream_memory_storage"`    // Max JetStream memory storage (-1 = unlimited)
+	// Account-level limits (FIXED - CORRECT NATS SEMANTICS):
+	// -1 = unlimited, 0 = disabled/blocked, positive = specific limit
+	MaxConnections                int64 `json:"max_connections"`                 // Max concurrent connections to account (-1 = unlimited, 0 = disabled, positive = limit)
+	MaxSubscriptions              int64 `json:"max_subscriptions"`               // Max subscriptions across account (-1 = unlimited, 0 = disabled, positive = limit)
+	MaxData                       int64 `json:"max_data"`                        // Max bytes in-flight across account (-1 = unlimited, 0 = disabled, positive = limit)
+	MaxPayload                    int64 `json:"max_payload"`                     // Max message size for account (-1 = unlimited, 0 = disabled, positive = limit)
+	MaxJetStreamDiskStorage       int64 `json:"max_jetstream_disk_storage"`      // Max JetStream disk storage (-1 = unlimited, 0 = disabled, positive = limit)
+	MaxJetStreamMemoryStorage     int64 `json:"max_jetstream_memory_storage"`    // Max JetStream memory storage (-1 = unlimited, 0 = disabled, positive = limit)
 	
 	Created           time.Time `json:"created"`             // Creation timestamp
 	Updated           time.Time `json:"updated"`             // Last update timestamp
@@ -103,12 +109,16 @@ type NatsUserRecord struct {
 // Permissions are stored as JSON arrays of NATS subjects. No scoping is applied
 // at the role level because accounts provide natural isolation boundaries.
 //
-// USER LIMIT ENFORCEMENT:
+// USER LIMIT ENFORCEMENT (FIXED - CORRECT NATS SEMANTICS):
 // Role limits are applied per-user and control individual user resource usage:
 // - max_subscriptions: Concurrent subscriptions per user
 // - max_data: Total bytes user can have in-flight
 // - max_payload: Maximum size of individual messages
-// - -1 values indicate unlimited (maps to jwt.NoLimit)
+//
+// LIMIT VALUES (CRITICAL - CORRECT NATS SEMANTICS):
+// - (-1) = Unlimited (no restrictions)
+// - (0) = Disabled/blocked (no access allowed) 
+// - (positive) = Specific limit value
 //
 // CROSS-ACCOUNT USAGE:
 // The same role can be used by users in different accounts. The permissions
@@ -120,9 +130,12 @@ type RoleRecord struct {
 	SubscribePermissions json.RawMessage `json:"subscribe_permissions"`  // JSON array of subscribe subjects
 	Description          string          `json:"description"`            // Human-readable description
 	IsDefault            bool            `json:"is_default"`             // Default role flag
-	MaxSubscriptions     int64           `json:"max_subscriptions"`      // Max subscriptions per user (-1 = unlimited)
-	MaxData              int64           `json:"max_data"`               // Data limit in bytes per user (-1 = unlimited)
-	MaxPayload           int64           `json:"max_payload"`            // Message size limit per user (-1 = unlimited)
+	
+	// Per-user limits (FIXED - CORRECT NATS SEMANTICS):
+	// -1 = unlimited, 0 = disabled/blocked, positive = specific limit
+	MaxSubscriptions     int64           `json:"max_subscriptions"`      // Max subscriptions per user (-1 = unlimited, 0 = disabled, positive = limit)
+	MaxData              int64           `json:"max_data"`               // Data limit in bytes per user (-1 = unlimited, 0 = disabled, positive = limit)
+	MaxPayload           int64           `json:"max_payload"`            // Message size limit per user (-1 = unlimited, 0 = disabled, positive = limit)
 }
 
 // SystemOperatorRecord represents the system operator (root of trust).

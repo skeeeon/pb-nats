@@ -545,13 +545,14 @@ func createSystemAccount(app *pocketbase.PocketBase, jwtGen *jwt.Generator, nkey
 		SigningSeed:       signingKey,
 		Active:            true,
 		
-		// System account gets unlimited limits by default
-		MaxConnections:                -1,
-		MaxSubscriptions:              -1,
-		MaxData:                       -1,
-		MaxPayload:                    -1,
-		MaxJetStreamDiskStorage:       -1,
-		MaxJetStreamMemoryStorage:     -1,
+		// FIXED: System account gets unlimited limits (-1) by default
+		// NATS semantics: -1 = unlimited, 0 = disabled, positive = specific limit
+		MaxConnections:                -1, // Unlimited connections for system operations
+		MaxSubscriptions:              -1, // Unlimited subscriptions for system monitoring
+		MaxData:                       -1, // Unlimited data for system messaging  
+		MaxPayload:                    -1, // Unlimited payload size for system messages
+		MaxJetStreamDiskStorage:       -1, // Unlimited disk storage (though system account disables JetStream)
+		MaxJetStreamMemoryStorage:     -1, // Unlimited memory storage (though system account disables JetStream)
 	}
 
 	// Generate system account JWT (special handling for SYS account)
@@ -579,7 +580,8 @@ func createSystemAccount(app *pocketbase.PocketBase, jwtGen *jwt.Generator, nkey
 	record.Set("jwt", sysAccount.JWT)
 	record.Set("active", sysAccount.Active)
 	
-	// Set system account limits (unlimited)
+	// FIXED: Set system account limits (unlimited = -1)
+	// NATS semantics: -1 = unlimited, 0 = disabled, positive = specific limit
 	record.Set("max_connections", sysAccount.MaxConnections)
 	record.Set("max_subscriptions", sysAccount.MaxSubscriptions)
 	record.Set("max_data", sysAccount.MaxData)
@@ -626,9 +628,12 @@ func createSystemRole(app *pocketbase.PocketBase, options Options, logger *utils
 	record.Set("publish_permissions", `["$SYS.>", ">"]`)  // Full system and global access
 	record.Set("subscribe_permissions", `["$SYS.>", ">"]`) // Full system and global access
 	record.Set("is_default", false)
-	record.Set("max_subscriptions", -1) // Unlimited (FIXED: renamed from max_connections)
-	record.Set("max_data", -1)        // Unlimited
-	record.Set("max_payload", -1)     // Unlimited
+	
+	// FIXED: System role gets unlimited limits (-1) by default
+	// NATS semantics: -1 = unlimited, 0 = disabled, positive = specific limit
+	record.Set("max_subscriptions", -1) // Unlimited subscriptions for system operations
+	record.Set("max_data", -1)        // Unlimited data in-flight for system messaging
+	record.Set("max_payload", -1)     // Unlimited payload size for system messages
 
 	if err := app.Save(record); err != nil {
 		return "", utils.WrapError(err, "failed to save system role")

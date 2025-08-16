@@ -194,13 +194,18 @@ func (cm *Manager) createSystemOperatorCollection() error {
 // - Signing: signing_public_key, signing_private_key, signing_seed
 // - Generated: jwt (account JWT for NATS publishing)
 // - Management: active (enable/disable), rotate_keys (trigger rotation)
-// - Limits: Account-level resource limits (optional, default -1 = unlimited)
+// - Limits: Account-level resource limits (optional, default -1 = unlimited, 0 = disabled)
 // - Metadata: created, updated timestamps
 //
 // SPECIAL FIELDS:
 // - rotate_keys: Boolean trigger for emergency signing key rotation
 // - active: Account enable/disable flag
 // - Account limits: Control resources across the entire account
+//
+// LIMIT SEMANTICS (FIXED):
+// - -1 = unlimited (default)
+// - 0 = disabled/blocked access
+// - positive = specific limit value
 //
 // RETURNS:
 // - nil if collection created successfully or already exists
@@ -275,36 +280,37 @@ func (cm *Manager) createAccountsCollection() error {
 		Name: "rotate_keys",
 	})
 	
-	// Add account-level limit fields (optional, default -1 = unlimited)
+	// Add account-level limit fields with CORRECT NATS semantics:
+	// -1 = unlimited (default), 0 = disabled/blocked, positive = specific limit
 	collection.Fields.Add(&core.NumberField{
 		Name:    "max_connections",
 		OnlyInt: true,
-		Min:     types.Pointer(-1.0), // -1 means unlimited
+		Min:     types.Pointer(-1.0), // -1 = unlimited, 0 = disabled, positive = limit
 	})
 	collection.Fields.Add(&core.NumberField{
 		Name:    "max_subscriptions",
 		OnlyInt: true,
-		Min:     types.Pointer(-1.0), // -1 means unlimited
+		Min:     types.Pointer(-1.0), // -1 = unlimited, 0 = disabled, positive = limit
 	})
 	collection.Fields.Add(&core.NumberField{
 		Name:    "max_data",
 		OnlyInt: true,
-		Min:     types.Pointer(-1.0), // -1 means unlimited
+		Min:     types.Pointer(-1.0), // -1 = unlimited, 0 = disabled, positive = limit
 	})
 	collection.Fields.Add(&core.NumberField{
 		Name:    "max_payload",
 		OnlyInt: true,
-		Min:     types.Pointer(-1.0), // -1 means unlimited
+		Min:     types.Pointer(-1.0), // -1 = unlimited, 0 = disabled, positive = limit
 	})
 	collection.Fields.Add(&core.NumberField{
 		Name:    "max_jetstream_disk_storage",
 		OnlyInt: true,
-		Min:     types.Pointer(-1.0), // -1 means unlimited
+		Min:     types.Pointer(-1.0), // -1 = unlimited, 0 = disabled, positive = limit
 	})
 	collection.Fields.Add(&core.NumberField{
 		Name:    "max_jetstream_memory_storage",
 		OnlyInt: true,
-		Min:     types.Pointer(-1.0), // -1 means unlimited
+		Min:     types.Pointer(-1.0), // -1 = unlimited, 0 = disabled, positive = limit
 	})
 	
 	// Add timestamps
@@ -334,10 +340,15 @@ func (cm *Manager) createAccountsCollection() error {
 // - subscribe_permissions: JSON array of NATS subjects for subscribing
 // - No subject scoping applied - accounts provide isolation
 //
-// USER LIMIT FIELDS:
-// - max_subscriptions: Maximum concurrent subscriptions per user (-1 = unlimited)
-// - max_data: Maximum bytes in flight per user (-1 = unlimited)
-// - max_payload: Maximum message size per user (-1 = unlimited)
+// USER LIMIT FIELDS (FIXED):
+// - max_subscriptions: Maximum concurrent subscriptions per user (-1 = unlimited, 0 = disabled)
+// - max_data: Maximum bytes in flight per user (-1 = unlimited, 0 = disabled)
+// - max_payload: Maximum message size per user (-1 = unlimited, 0 = disabled)
+//
+// LIMIT SEMANTICS (FIXED):
+// - -1 = unlimited (default)
+// - 0 = disabled/blocked access
+// - positive = specific limit value
 //
 // SCHEMA:
 // - Identity: name, description, is_default
@@ -393,21 +404,22 @@ func (cm *Manager) createRolesCollection() error {
 		Max:      5000, // JSON array as text
 	})
 	
-	// Add per-user limit fields
+	// Add per-user limit fields with CORRECT NATS semantics:
+	// -1 = unlimited (default), 0 = disabled/blocked, positive = specific limit
 	collection.Fields.Add(&core.NumberField{
 		Name:    "max_subscriptions",
 		OnlyInt: true,
-		Min:     types.Pointer(-1.0), // -1 means unlimited
+		Min:     types.Pointer(-1.0), // -1 = unlimited, 0 = disabled, positive = limit
 	})
 	collection.Fields.Add(&core.NumberField{
 		Name:    "max_data",
 		OnlyInt: true,
-		Min:     types.Pointer(-1.0), // -1 means unlimited
+		Min:     types.Pointer(-1.0), // -1 = unlimited, 0 = disabled, positive = limit
 	})
 	collection.Fields.Add(&core.NumberField{
 		Name:    "max_payload",
 		OnlyInt: true,
-		Min:     types.Pointer(-1.0), // -1 means unlimited
+		Min:     types.Pointer(-1.0), // -1 = unlimited, 0 = disabled, positive = limit
 	})
 
 	return cm.app.Save(collection)

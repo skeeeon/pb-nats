@@ -91,12 +91,12 @@ func main() {
 | `jwt` | Text | Account JWT |
 | `active` | Boolean | Account status |
 | `rotate_keys` | Boolean | **Triggers signing key rotation** |
-| `max_connections` | Number | **Max concurrent connections** (-1 = unlimited) |
-| `max_subscriptions` | Number | **Max subscriptions across account** (-1 = unlimited) |
-| `max_data` | Number | **Max bytes in-flight across account** (-1 = unlimited) |
-| `max_payload` | Number | **Max message size for account** (-1 = unlimited) |
-| `max_jetstream_disk_storage` | Number | **Max JetStream disk storage** (-1 = unlimited) |
-| `max_jetstream_memory_storage` | Number | **Max JetStream memory storage** (-1 = unlimited) |
+| `max_connections` | Number | **Max concurrent connections** (-1 = unlimited, 0 = disabled) |
+| `max_subscriptions` | Number | **Max subscriptions across account** (-1 = unlimited, 0 = disabled) |
+| `max_data` | Number | **Max bytes in-flight across account** (-1 = unlimited, 0 = disabled) |
+| `max_payload` | Number | **Max message size for account** (-1 = unlimited, 0 = disabled) |
+| `max_jetstream_disk_storage` | Number | **Max JetStream disk storage** (-1 = unlimited, 0 = disabled) |
+| `max_jetstream_memory_storage` | Number | **Max JetStream memory storage** (-1 = unlimited, 0 = disabled) |
 | `created` | DateTime | Creation timestamp |
 | `updated` | DateTime | Update timestamp |
 
@@ -129,9 +129,9 @@ func main() {
 | `description` | Text | Role description |
 | `publish_permissions` | Text | JSON array of publish subjects |
 | `subscribe_permissions` | Text | JSON array of subscribe subjects |
-| `max_subscriptions` | Number | **Max subscriptions per user** (-1 = unlimited) |
-| `max_data` | Number | **Data limit per user** (-1 = unlimited) |
-| `max_payload` | Number | **Message size limit per user** (-1 = unlimited) |
+| `max_subscriptions` | Number | **Max subscriptions per user** (-1 = unlimited, 0 = disabled) |
+| `max_data` | Number | **Data limit per user** (-1 = unlimited, 0 = disabled) |
+| `max_payload` | Number | **Message size limit per user** (-1 = unlimited, 0 = disabled) |
 
 ## 📊 Resource Limits Hierarchy
 
@@ -152,10 +152,19 @@ Set on the **role** record, these limits control individual user resource usage:
 - `max_data`: Maximum bytes a single user can have in-flight
 - `max_payload`: Maximum message size a single user can send
 
-### Limit Values
-- **-1**: Unlimited (no restrictions)
-- **0**: Uses default unlimited behavior
-- **Positive numbers**: Specific limits in appropriate units (bytes, count, etc.)
+### Limit Values ⚠️ IMPORTANT
+**FIXED**: Corrected NATS semantics for limit values:
+
+- **`-1`**: **Unlimited** (no restrictions)
+- **`0`**: **Disabled** (no access allowed - **use with caution**)
+- **`positive`**: **Specific limits** in appropriate units (bytes, count, etc.)
+
+⚠️ **Critical Warning**: Setting limits to `0` **completely disables** access for that resource. This blocks users from connecting, subscribing, or sending data entirely. Most production systems should use either `-1` (unlimited) or positive values for specific limits.
+
+**Examples:**
+- `max_connections: -1` → Unlimited connections ✅
+- `max_connections: 100` → Maximum 100 connections ✅  
+- `max_connections: 0` → **No connections allowed (blocked)** ⚠️
 
 ## ⚙️ Configuration Options
 
@@ -264,13 +273,31 @@ Authorization: Bearer {admin_token}
 PATCH /api/collections/nats_accounts/records/{account_id}  
 {"rotate_keys": true}
 
-# Set account limits
+# Set account limits (IMPORTANT: Use correct values)
 PATCH /api/collections/nats_accounts/records/{account_id}
 {
-    "max_connections": 100,
-    "max_subscriptions": 1000,
-    "max_data": 1048576,
-    "max_payload": 65536
+    "max_connections": 100,        // 100 connections max
+    "max_subscriptions": 1000,     // 1000 subscriptions max
+    "max_data": 1048576,           // 1MB data max
+    "max_payload": 65536           // 64KB message max
+}
+
+# DANGEROUS: Disable account completely
+PATCH /api/collections/nats_accounts/records/{account_id}
+{
+    "max_connections": 0,          // ⚠️ BLOCKS all connections!
+    "max_subscriptions": 0,        // ⚠️ BLOCKS all subscriptions!
+    "max_data": 0,                 // ⚠️ BLOCKS all data!
+    "max_payload": 0               // ⚠️ BLOCKS all messages!
+}
+
+# Safe unlimited settings
+PATCH /api/collections/nats_accounts/records/{account_id}
+{
+    "max_connections": -1,         // ✅ Unlimited connections
+    "max_subscriptions": -1,       // ✅ Unlimited subscriptions  
+    "max_data": -1,                // ✅ Unlimited data
+    "max_payload": -1              // ✅ Unlimited message size
 }
 
 # List users in account
@@ -393,9 +420,17 @@ if err := pbnats.Setup(app, options); err != nil {
 - Monitor failed record cleanup logs
 
 **Resource Limits:**
-- Account limits: Check NATS server monitoring for account-level usage
-- User limits: Individual users hitting role-based limits will see connection errors
-- Unlimited values: Use -1 for unlimited, 0 defaults to unlimited behavior
+- **Account limits**: Check NATS server monitoring for account-level usage
+- **User limits**: Individual users hitting role-based limits will see connection errors
+- **Unlimited values**: Use `-1` for unlimited resources
+- **Disabled values**: Use `0` to completely block access (use with caution!)
+- **Specific limits**: Use positive values for exact resource limits
+
+**Limit Troubleshooting:**
+- **User can't connect**: Check if `max_connections` is set to `0` (blocked)
+- **User can't subscribe**: Check if `max_subscriptions` is set to `0` (blocked)  
+- **User can't send data**: Check if `max_data` or `max_payload` is set to `0` (blocked)
+- **Restore access**: Change `0` values to `-1` (unlimited) or positive limits
 
 ## 📚 Examples
 

@@ -128,7 +128,7 @@ func (g *Generator) GenerateOperatorJWTWithoutSystemAccount(operator *pbtypes.Sy
 // BEHAVIOR:
 // - Creates account claims with identity and signing keys
 // - Sets account name (normalized for NATS compatibility)
-// - Applies configurable limits from account record (or unlimited if not set)
+// - Applies configurable limits from account record (respects NATS semantics)
 // - Signs JWT with operator signing key
 //
 // RETURNS:
@@ -154,7 +154,7 @@ func (g *Generator) GenerateAccountJWT(account *pbtypes.AccountRecord, operatorS
 	// Add signing key
 	accountClaims.SigningKeys.Add(account.SigningPublicKey)
 
-	// Apply configurable limits from account record (default to unlimited if not set)
+	// Apply configurable limits from account record with correct NATS semantics
 	g.applyAccountLimits(accountClaims, account)
 
 	// Encode the JWT
@@ -184,7 +184,7 @@ func (g *Generator) GenerateAccountJWT(account *pbtypes.AccountRecord, operatorS
 // BEHAVIOR:
 // - Creates user claims with identity and account association
 // - Applies role-based permissions (no subject scoping needed - accounts provide isolation)
-// - Sets connection and data limits from role
+// - Sets connection and data limits from role (respects NATS semantics)
 // - Applies JWT expiration if configured
 // - Signs JWT with account signing key
 //
@@ -223,7 +223,7 @@ func (g *Generator) GenerateUserJWT(user *pbtypes.NatsUserRecord, account *pbtyp
 		return "", fmt.Errorf("failed to apply role permissions: %w", err)
 	}
 
-	// Apply limits from role
+	// Apply limits from role with correct NATS semantics
 	g.applyRoleLimits(userClaims, role)
 
 	// Encode the JWT
@@ -289,6 +289,11 @@ func (g *Generator) GenerateCredsFile(user *pbtypes.NatsUserRecord) (string, err
 // applyAccountLimits applies configurable account-level limits to account JWT claims.
 // Account limits control resources across the entire account.
 //
+// FIXED: Now correctly respects NATS semantics where:
+// - -1 = unlimited (jwt.NoLimit)
+// - 0 = disabled/no access allowed
+// - positive = specific limit
+//
 // LIMIT TYPES:
 // - Connection limits: Total concurrent connections to the account
 // - Data limits: Total bytes in-flight across all users in account
@@ -300,70 +305,102 @@ func (g *Generator) GenerateCredsFile(user *pbtypes.NatsUserRecord) (string, err
 //   - account: Account record containing limit configuration
 //
 // BEHAVIOR:
-// - Uses configured limits from account record if set (> 0)
-// - Uses unlimited (-1) if account limits are 0 or not set
-// - Applies jwt.NoLimit constant for unlimited values
+// - Uses configured limits from account record respecting NATS semantics
+// - -1 values use jwt.NoLimit for unlimited
+// - 0 values use 0 for disabled/blocked access
+// - Positive values use exact limits
+// - Missing/negative values default to unlimited
 //
 // RETURNS: None (modifies accountClaims directly)
 //
 // SIDE EFFECTS:
 // - Modifies accountClaims.Limits fields
 func (g *Generator) applyAccountLimits(accountClaims *jwt.AccountClaims, account *pbtypes.AccountRecord) {
-	// Apply JetStream limits
-	if account.MaxJetStreamDiskStorage > 0 {
-		accountClaims.Limits.JetStreamLimits.DiskStorage = account.MaxJetStreamDiskStorage
-	} else if account.MaxJetStreamDiskStorage == -1 {
+	// Apply JetStream limits with correct NATS semantics
+	switch account.MaxJetStreamDiskStorage {
+	case -1:
 		accountClaims.Limits.JetStreamLimits.DiskStorage = jwt.NoLimit
-	} else {
-		// Default to unlimited if not set (0 or missing)
-		accountClaims.Limits.JetStreamLimits.DiskStorage = jwt.NoLimit
+	case 0:
+		accountClaims.Limits.JetStreamLimits.DiskStorage = 0 // Disabled
+	default:
+		if account.MaxJetStreamDiskStorage > 0 {
+			accountClaims.Limits.JetStreamLimits.DiskStorage = account.MaxJetStreamDiskStorage
+		} else {
+			// For missing/negative values, default to unlimited
+			accountClaims.Limits.JetStreamLimits.DiskStorage = jwt.NoLimit
+		}
 	}
 	
-	if account.MaxJetStreamMemoryStorage > 0 {
-		accountClaims.Limits.JetStreamLimits.MemoryStorage = account.MaxJetStreamMemoryStorage
-	} else if account.MaxJetStreamMemoryStorage == -1 {
+	switch account.MaxJetStreamMemoryStorage {
+	case -1:
 		accountClaims.Limits.JetStreamLimits.MemoryStorage = jwt.NoLimit
-	} else {
-		// Default to unlimited if not set (0 or missing)
-		accountClaims.Limits.JetStreamLimits.MemoryStorage = jwt.NoLimit
+	case 0:
+		accountClaims.Limits.JetStreamLimits.MemoryStorage = 0 // Disabled
+	default:
+		if account.MaxJetStreamMemoryStorage > 0 {
+			accountClaims.Limits.JetStreamLimits.MemoryStorage = account.MaxJetStreamMemoryStorage
+		} else {
+			// For missing/negative values, default to unlimited
+			accountClaims.Limits.JetStreamLimits.MemoryStorage = jwt.NoLimit
+		}
 	}
 
-	// Apply account-level connection limits
-	if account.MaxConnections > 0 {
-		accountClaims.Limits.AccountLimits.Conn = account.MaxConnections
-	} else if account.MaxConnections == -1 {
+	// Apply account-level connection limits with correct NATS semantics
+	switch account.MaxConnections {
+	case -1:
 		accountClaims.Limits.AccountLimits.Conn = jwt.NoLimit
-	} else {
-		// Default to unlimited if not set (0 or missing)
-		accountClaims.Limits.AccountLimits.Conn = jwt.NoLimit
+	case 0:
+		accountClaims.Limits.AccountLimits.Conn = 0 // Disabled
+	default:
+		if account.MaxConnections > 0 {
+			accountClaims.Limits.AccountLimits.Conn = account.MaxConnections
+		} else {
+			// For missing/negative values, default to unlimited
+			accountClaims.Limits.AccountLimits.Conn = jwt.NoLimit
+		}
 	}
 
-	// Apply NATS limits
-	if account.MaxSubscriptions > 0 {
-		accountClaims.Limits.NatsLimits.Subs = account.MaxSubscriptions
-	} else if account.MaxSubscriptions == -1 {
+	// Apply NATS limits with correct NATS semantics
+	switch account.MaxSubscriptions {
+	case -1:
 		accountClaims.Limits.NatsLimits.Subs = jwt.NoLimit
-	} else {
-		// Default to unlimited if not set (0 or missing)
-		accountClaims.Limits.NatsLimits.Subs = jwt.NoLimit
+	case 0:
+		accountClaims.Limits.NatsLimits.Subs = 0 // Disabled
+	default:
+		if account.MaxSubscriptions > 0 {
+			accountClaims.Limits.NatsLimits.Subs = account.MaxSubscriptions
+		} else {
+			// For missing/negative values, default to unlimited
+			accountClaims.Limits.NatsLimits.Subs = jwt.NoLimit
+		}
 	}
 	
-	if account.MaxData > 0 {
-		accountClaims.Limits.NatsLimits.Data = account.MaxData
-	} else if account.MaxData == -1 {
+	switch account.MaxData {
+	case -1:
 		accountClaims.Limits.NatsLimits.Data = jwt.NoLimit
-	} else {
-		// Default to unlimited if not set (0 or missing)
-		accountClaims.Limits.NatsLimits.Data = jwt.NoLimit
+	case 0:
+		accountClaims.Limits.NatsLimits.Data = 0 // Disabled
+	default:
+		if account.MaxData > 0 {
+			accountClaims.Limits.NatsLimits.Data = account.MaxData
+		} else {
+			// For missing/negative values, default to unlimited
+			accountClaims.Limits.NatsLimits.Data = jwt.NoLimit
+		}
 	}
 	
-	if account.MaxPayload > 0 {
-		accountClaims.Limits.NatsLimits.Payload = account.MaxPayload
-	} else if account.MaxPayload == -1 {
+	switch account.MaxPayload {
+	case -1:
 		accountClaims.Limits.NatsLimits.Payload = jwt.NoLimit
-	} else {
-		// Default to unlimited if not set (0 or missing)
-		accountClaims.Limits.NatsLimits.Payload = jwt.NoLimit
+	case 0:
+		accountClaims.Limits.NatsLimits.Payload = 0 // Disabled
+	default:
+		if account.MaxPayload > 0 {
+			accountClaims.Limits.NatsLimits.Payload = account.MaxPayload
+		} else {
+			// For missing/negative values, default to unlimited
+			accountClaims.Limits.NatsLimits.Payload = jwt.NoLimit
+		}
 	}
 }
 
@@ -470,6 +507,11 @@ func (g *Generator) applyRolePermissions(userClaims *jwt.UserClaims, user *pbtyp
 // applyRoleLimits applies role-based per-user limits to user JWT claims.
 // These limits are enforced by NATS server to prevent resource exhaustion per user.
 //
+// FIXED: Now correctly respects NATS semantics where:
+// - -1 = unlimited (jwt.NoLimit)
+// - 0 = disabled/no access allowed
+// - positive = specific limit
+//
 // LIMIT TYPES:
 // - Data limits: Total bytes user can have in flight
 // - Subscription limits: Maximum concurrent subscriptions per user
@@ -480,35 +522,55 @@ func (g *Generator) applyRolePermissions(userClaims *jwt.UserClaims, user *pbtyp
 //   - role: Role record containing limit definitions
 //
 // BEHAVIOR:
-// - Applies data limits from role (0 = disabled, -1 = unlimited, >0 = limit in bytes)
+// - Applies data limits from role respecting NATS semantics
 // - Applies subscription limits from role (correctly mapped from max_subscriptions field)
 // - Applies payload limits from role
-// - Uses jwt.NoLimit constant for unlimited values
+// - Uses jwt.NoLimit constant for unlimited values (-1)
+// - Uses 0 for disabled access
+// - Uses positive values as exact limits
 //
 // RETURNS: None (modifies userClaims directly)
 //
 // SIDE EFFECTS:
 // - Modifies userClaims.Limits fields
 func (g *Generator) applyRoleLimits(userClaims *jwt.UserClaims, role *pbtypes.RoleRecord) {
-	// Apply data limits (correct field name from NATS JWT library)
-	if role.MaxData > 0 {
-		userClaims.Limits.Data = role.MaxData
-	} else if role.MaxData == -1 {
+	// Apply data limits with correct NATS semantics
+	switch role.MaxData {
+	case -1:
 		userClaims.Limits.Data = jwt.NoLimit // Unlimited
+	case 0:
+		userClaims.Limits.Data = 0 // Disabled
+	default:
+		if role.MaxData > 0 {
+			userClaims.Limits.Data = role.MaxData
+		}
+		// Don't set anything for missing/invalid values - use NATS defaults
 	}
 
-	// Apply subscription limits (FIXED: correctly mapped from MaxSubscriptions)
-	if role.MaxSubscriptions > 0 {
-		userClaims.Limits.Subs = role.MaxSubscriptions
-	} else if role.MaxSubscriptions == -1 {
+	// Apply subscription limits with correct NATS semantics
+	switch role.MaxSubscriptions {
+	case -1:
 		userClaims.Limits.Subs = jwt.NoLimit // Unlimited
+	case 0:
+		userClaims.Limits.Subs = 0 // Disabled
+	default:
+		if role.MaxSubscriptions > 0 {
+			userClaims.Limits.Subs = role.MaxSubscriptions
+		}
+		// Don't set anything for missing/invalid values - use NATS defaults
 	}
 
-	// Apply payload limits
-	if role.MaxPayload > 0 {
-		userClaims.Limits.Payload = role.MaxPayload
-	} else if role.MaxPayload == -1 {
+	// Apply payload limits with correct NATS semantics
+	switch role.MaxPayload {
+	case -1:
 		userClaims.Limits.Payload = jwt.NoLimit // Unlimited
+	case 0:
+		userClaims.Limits.Payload = 0 // Disabled
+	default:
+		if role.MaxPayload > 0 {
+			userClaims.Limits.Payload = role.MaxPayload
+		}
+		// Don't set anything for missing/invalid values - use NATS defaults
 	}
 }
 

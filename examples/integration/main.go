@@ -84,10 +84,11 @@ func createDemoData(app *pocketbase.PocketBase) {
 	log.Printf("✅ Created account: %s (Normalized: %s)", account.GetString("name"), account.GetString("name"))
 
 	// Create demo roles with simple permissions (no scoping needed)
+	// FIXED: Using correct NATS semantics for limits (-1 = unlimited, 0 = disabled, positive = specific limit)
 	adminRole, err := createRole(app, "Administrator", 
 		[]string{">"},                    // Can publish anywhere in account
 		[]string{">", "global.>"},        // Can subscribe to account and global
-		-1, -1, -1) // Unlimited limits
+		-1, -1, -1) // ✅ Unlimited limits (-1 = unlimited)
 	if err != nil {
 		log.Printf("❌ Failed to create admin role: %v", err)
 		return
@@ -97,7 +98,7 @@ func createDemoData(app *pocketbase.PocketBase) {
 	sensorRole, err := createRole(app, "Sensor Manager",
 		[]string{"sensors.*.telemetry", "sensors.*.status"}, // Can publish sensor data within account
 		[]string{"sensors.>", "alerts.>"},                   // Can subscribe to sensors and alerts within account
-		10, 1024*1024, 1024) // Limited connections and data
+		10, 1024*1024, 1024) // ✅ Limited resources (positive values = specific limits)
 	if err != nil {
 		log.Printf("❌ Failed to create sensor role: %v", err)
 		return
@@ -107,7 +108,7 @@ func createDemoData(app *pocketbase.PocketBase) {
 	analystRole, err := createRole(app, "Data Analyst",
 		[]string{"reports.>"},                     // Can publish reports within account
 		[]string{"sensors.>", "reports.>"},       // Can subscribe to sensors and reports within account
-		5, 512*1024, 512) // Moderate limits
+		5, 512*1024, 512) // ✅ Moderate limits (positive values = specific limits)
 	if err != nil {
 		log.Printf("❌ Failed to create analyst role: %v", err)
 		return
@@ -171,6 +172,14 @@ func createDemoData(app *pocketbase.PocketBase) {
 	log.Println("   - alerts.high_temp")
 	log.Println("   - reports.daily_summary")
 	log.Println("   - user.admin_user.notifications")
+	log.Println("")
+	log.Println("⚠️  NATS Limit Values (IMPORTANT):")
+	log.Println("   - (-1) = Unlimited resources")
+	log.Println("   - (0) = DISABLED/BLOCKED (no access allowed)")
+	log.Println("   - (positive) = Specific resource limits")
+	log.Println("   - Admin role: unlimited (-1) for all resources")
+	log.Println("   - Sensor role: 10 subscriptions, 1MB data, 1KB messages")
+	log.Println("   - Analyst role: 5 subscriptions, 512KB data, 512B messages")
 }
 
 func createDemoAccount(app *pocketbase.PocketBase) (*core.Record, error) {
@@ -189,6 +198,15 @@ func createDemoAccount(app *pocketbase.PocketBase) (*core.Record, error) {
 	record.Set("name", "Demo Company")
 	record.Set("description", "Demonstration account for NATS JWT integration")
 	record.Set("active", true)
+
+	// FIXED: Set account limits using correct NATS semantics
+	// -1 = unlimited, 0 = disabled/blocked, positive = specific limit
+	record.Set("max_connections", -1)        // ✅ Unlimited connections for demo
+	record.Set("max_subscriptions", -1)      // ✅ Unlimited subscriptions for demo
+	record.Set("max_data", -1)               // ✅ Unlimited data for demo
+	record.Set("max_payload", -1)            // ✅ Unlimited message size for demo
+	record.Set("max_jetstream_disk_storage", -1)    // ✅ Unlimited JetStream disk
+	record.Set("max_jetstream_memory_storage", -1)  // ✅ Unlimited JetStream memory
 
 	if err := app.Save(record); err != nil {
 		return nil, err
@@ -220,9 +238,12 @@ func createRole(app *pocketbase.PocketBase, name string, publishPerms, subscribe
 	
 	record.Set("publish_permissions", string(publishJSON))
 	record.Set("subscribe_permissions", string(subscribeJSON))
-	record.Set("max_subscriptions", maxSubscriptions) // FIXED: Changed from max_connections
-	record.Set("max_data", maxData)
-	record.Set("max_payload", maxPayload)
+	
+	// FIXED: Set per-user limits using correct NATS semantics
+	// -1 = unlimited, 0 = disabled/blocked, positive = specific limit
+	record.Set("max_subscriptions", maxSubscriptions) // ✅ Per-user subscription limits
+	record.Set("max_data", maxData)                   // ✅ Per-user data limits  
+	record.Set("max_payload", maxPayload)             // ✅ Per-user message size limits
 
 	if err := app.Save(record); err != nil {
 		return nil, err
