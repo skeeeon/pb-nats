@@ -544,6 +544,14 @@ func createSystemAccount(app *pocketbase.PocketBase, jwtGen *jwt.Generator, nkey
 		SigningPrivateKey: signingPrivateKey,
 		SigningSeed:       signingKey,
 		Active:            true,
+		
+		// System account gets unlimited limits by default
+		MaxConnections:                -1,
+		MaxSubscriptions:              -1,
+		MaxData:                       -1,
+		MaxPayload:                    -1,
+		MaxJetStreamDiskStorage:       -1,
+		MaxJetStreamMemoryStorage:     -1,
 	}
 
 	// Generate system account JWT (special handling for SYS account)
@@ -570,6 +578,14 @@ func createSystemAccount(app *pocketbase.PocketBase, jwtGen *jwt.Generator, nkey
 	record.Set("signing_seed", sysAccount.SigningSeed)
 	record.Set("jwt", sysAccount.JWT)
 	record.Set("active", sysAccount.Active)
+	
+	// Set system account limits (unlimited)
+	record.Set("max_connections", sysAccount.MaxConnections)
+	record.Set("max_subscriptions", sysAccount.MaxSubscriptions)
+	record.Set("max_data", sysAccount.MaxData)
+	record.Set("max_payload", sysAccount.MaxPayload)
+	record.Set("max_jetstream_disk_storage", sysAccount.MaxJetStreamDiskStorage)
+	record.Set("max_jetstream_memory_storage", sysAccount.MaxJetStreamMemoryStorage)
 
 	if err := app.Save(record); err != nil {
 		return "", "", utils.WrapError(err, "failed to save system account")
@@ -590,7 +606,7 @@ func createSystemAccount(app *pocketbase.PocketBase, jwtGen *jwt.Generator, nkey
 //
 // BEHAVIOR:
 // - Creates system admin role with full $SYS.> and > permissions
-// - Sets unlimited connection, data, and payload limits
+// - Sets unlimited subscription, data, and payload limits
 //
 // RETURNS:
 // - roleID: Database ID of created role
@@ -610,7 +626,7 @@ func createSystemRole(app *pocketbase.PocketBase, options Options, logger *utils
 	record.Set("publish_permissions", `["$SYS.>", ">"]`)  // Full system and global access
 	record.Set("subscribe_permissions", `["$SYS.>", ">"]`) // Full system and global access
 	record.Set("is_default", false)
-	record.Set("max_connections", -1) // Unlimited
+	record.Set("max_subscriptions", -1) // Unlimited (FIXED: renamed from max_connections)
 	record.Set("max_data", -1)        // Unlimited
 	record.Set("max_payload", -1)     // Unlimited
 
@@ -787,7 +803,9 @@ func generateUserJWT(app *pocketbase.PocketBase, jwtGen *jwt.Generator, record *
 	return nil
 }
 
-// Helper methods to convert records to models (from original sync/manager.go)
+// Helper methods to convert PocketBase records to internal model types (updated for new fields)
+
+// recordToUserModel converts PocketBase user record to internal user model.
 func recordToUserModel(record *core.Record) *pbtypes.NatsUserRecord {
 	return &pbtypes.NatsUserRecord{
 		ID:           record.Id,
@@ -803,23 +821,36 @@ func recordToUserModel(record *core.Record) *pbtypes.NatsUserRecord {
 	}
 }
 
+// recordToAccountModel converts PocketBase account record to internal account model.
+// Updated to include the new account limit fields.
 func recordToAccountModel(record *core.Record) *pbtypes.AccountRecord {
 	return &pbtypes.AccountRecord{
 		ID:               record.Id,
 		Name:             record.GetString("name"),
 		PublicKey:        record.GetString("public_key"),
+		SigningPublicKey: record.GetString("signing_public_key"),
 		SigningSeed:      record.GetString("signing_seed"),
 		JWT:              record.GetString("jwt"),
+		
+		// Account-level limits (newly added fields)
+		MaxConnections:                record.GetInt64("max_connections"),
+		MaxSubscriptions:              record.GetInt64("max_subscriptions"),
+		MaxData:                       record.GetInt64("max_data"),
+		MaxPayload:                    record.GetInt64("max_payload"),
+		MaxJetStreamDiskStorage:       record.GetInt64("max_jetstream_disk_storage"),
+		MaxJetStreamMemoryStorage:     record.GetInt64("max_jetstream_memory_storage"),
 	}
 }
 
+// recordToRoleModel converts PocketBase role record to internal role model.
+// Updated to use max_subscriptions instead of max_connections.
 func recordToRoleModel(record *core.Record) *pbtypes.RoleRecord {
 	return &pbtypes.RoleRecord{
 		ID:                   record.Id,
 		Name:                 record.GetString("name"),
 		PublishPermissions:   []byte(record.GetString("publish_permissions")),
 		SubscribePermissions: []byte(record.GetString("subscribe_permissions")),
-		MaxConnections:       int64(record.GetInt("max_connections")),
+		MaxSubscriptions:     int64(record.GetInt("max_subscriptions")), // FIXED: renamed from max_connections
 		MaxData:              int64(record.GetInt("max_data")),
 		MaxPayload:           int64(record.GetInt("max_payload")),
 	}

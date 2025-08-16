@@ -24,6 +24,13 @@ import (
 // SIGNING KEY ROTATION:
 // The rotate_keys field triggers emergency key rotation that immediately
 // invalidates all user JWTs in the account (they were signed with old key).
+//
+// ACCOUNT LIMITS:
+// Account-level limits control resources across the entire account:
+// - Connection limits: Total concurrent connections to the account
+// - Data limits: Total bytes in-flight across all users in account
+// - Subscription limits: Total subscriptions across all users in account
+// - JetStream limits: Storage and stream limits for the account
 type AccountRecord struct {
 	ID                string    `json:"id"`                  // Database primary key
 	Name              string    `json:"name"`                // Display name (normalized for NATS account name)
@@ -37,6 +44,15 @@ type AccountRecord struct {
 	JWT               string    `json:"jwt"`                 // Generated account JWT for NATS server
 	Active            bool      `json:"active"`              // Account enable/disable flag
 	RotateKeys        bool      `json:"rotate_keys"`         // Trigger field for signing key rotation
+	
+	// Account-level limits (optional, default to -1 = unlimited)
+	MaxConnections                int64 `json:"max_connections"`                 // Max concurrent connections to account (-1 = unlimited)
+	MaxSubscriptions              int64 `json:"max_subscriptions"`               // Max subscriptions across account (-1 = unlimited)
+	MaxData                       int64 `json:"max_data"`                        // Max bytes in-flight across account (-1 = unlimited)
+	MaxPayload                    int64 `json:"max_payload"`                     // Max message size for account (-1 = unlimited)
+	MaxJetStreamDiskStorage       int64 `json:"max_jetstream_disk_storage"`      // Max JetStream disk storage (-1 = unlimited)
+	MaxJetStreamMemoryStorage     int64 `json:"max_jetstream_memory_storage"`    // Max JetStream memory storage (-1 = unlimited)
+	
 	Created           time.Time `json:"created"`             // Creation timestamp
 	Updated           time.Time `json:"updated"`             // Last update timestamp
 }
@@ -80,15 +96,16 @@ type NatsUserRecord struct {
 	Active           bool       `json:"active"`             // User enable/disable flag
 }
 
-// RoleRecord represents a NATS role with permissions and connection limits.
+// RoleRecord represents a NATS role with permissions and per-user limits.
 // Roles are permission templates that can be applied to users across different accounts.
 //
 // PERMISSION PHILOSOPHY:
 // Permissions are stored as JSON arrays of NATS subjects. No scoping is applied
 // at the role level because accounts provide natural isolation boundaries.
 //
-// LIMIT ENFORCEMENT:
-// - max_connections: Concurrent NATS connections per user
+// USER LIMIT ENFORCEMENT:
+// Role limits are applied per-user and control individual user resource usage:
+// - max_subscriptions: Concurrent subscriptions per user
 // - max_data: Total bytes user can have in-flight
 // - max_payload: Maximum size of individual messages
 // - -1 values indicate unlimited (maps to jwt.NoLimit)
@@ -103,9 +120,9 @@ type RoleRecord struct {
 	SubscribePermissions json.RawMessage `json:"subscribe_permissions"`  // JSON array of subscribe subjects
 	Description          string          `json:"description"`            // Human-readable description
 	IsDefault            bool            `json:"is_default"`             // Default role flag
-	MaxConnections       int64           `json:"max_connections"`        // Connection limit (-1 = unlimited)
-	MaxData              int64           `json:"max_data"`               // Data limit in bytes (-1 = unlimited)
-	MaxPayload           int64           `json:"max_payload"`            // Message size limit (-1 = unlimited)
+	MaxSubscriptions     int64           `json:"max_subscriptions"`      // Max subscriptions per user (-1 = unlimited)
+	MaxData              int64           `json:"max_data"`               // Data limit in bytes per user (-1 = unlimited)
+	MaxPayload           int64           `json:"max_payload"`            // Message size limit per user (-1 = unlimited)
 }
 
 // SystemOperatorRecord represents the system operator (root of trust).

@@ -569,11 +569,7 @@ func (sm *Manager) generateAccountJWT(record *core.Record) error {
 	}
 
 	// Create account record
-	account := &pbtypes.AccountRecord{
-		PublicKey:        record.GetString("public_key"),
-		SigningPublicKey: record.GetString("signing_public_key"),
-		Name:             record.GetString("name"),
-	}
+	account := sm.recordToAccountModel(record)
 
 	// Generate JWT
 	jwtValue, err := sm.jwtGen.GenerateAccountJWT(account, operator.SigningSeed)
@@ -737,24 +733,35 @@ func (sm *Manager) recordToUserModel(record *core.Record) *pbtypes.NatsUserRecor
 }
 
 // recordToAccountModel converts PocketBase account record to internal account model.
+// Updated to include the new account limit fields.
 func (sm *Manager) recordToAccountModel(record *core.Record) *pbtypes.AccountRecord {
 	return &pbtypes.AccountRecord{
 		ID:               record.Id,
 		Name:             record.GetString("name"),
 		PublicKey:        record.GetString("public_key"),
+		SigningPublicKey: record.GetString("signing_public_key"),
 		SigningSeed:      record.GetString("signing_seed"),
 		JWT:              record.GetString("jwt"),
+		
+		// Account-level limits (newly added fields)
+		MaxConnections:                record.GetInt64("max_connections"),
+		MaxSubscriptions:              record.GetInt64("max_subscriptions"),
+		MaxData:                       record.GetInt64("max_data"),
+		MaxPayload:                    record.GetInt64("max_payload"),
+		MaxJetStreamDiskStorage:       record.GetInt64("max_jetstream_disk_storage"),
+		MaxJetStreamMemoryStorage:     record.GetInt64("max_jetstream_memory_storage"),
 	}
 }
 
 // recordToRoleModel converts PocketBase role record to internal role model.
+// Updated to use max_subscriptions instead of max_connections.
 func (sm *Manager) recordToRoleModel(record *core.Record) *pbtypes.RoleRecord {
 	return &pbtypes.RoleRecord{
 		ID:                   record.Id,
 		Name:                 record.GetString("name"),
 		PublishPermissions:   []byte(record.GetString("publish_permissions")),
 		SubscribePermissions: []byte(record.GetString("subscribe_permissions")),
-		MaxConnections:       int64(record.GetInt("max_connections")),
+		MaxSubscriptions:     int64(record.GetInt("max_subscriptions")), // FIXED: renamed from max_connections
 		MaxData:              int64(record.GetInt("max_data")),
 		MaxPayload:           int64(record.GetInt("max_payload")),
 	}

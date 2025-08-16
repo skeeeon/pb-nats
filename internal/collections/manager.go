@@ -194,11 +194,13 @@ func (cm *Manager) createSystemOperatorCollection() error {
 // - Signing: signing_public_key, signing_private_key, signing_seed
 // - Generated: jwt (account JWT for NATS publishing)
 // - Management: active (enable/disable), rotate_keys (trigger rotation)
+// - Limits: Account-level resource limits (optional, default -1 = unlimited)
 // - Metadata: created, updated timestamps
 //
 // SPECIAL FIELDS:
 // - rotate_keys: Boolean trigger for emergency signing key rotation
 // - active: Account enable/disable flag
+// - Account limits: Control resources across the entire account
 //
 // RETURNS:
 // - nil if collection created successfully or already exists
@@ -224,7 +226,7 @@ func (cm *Manager) createAccountsCollection() error {
 	collection.UpdateRule = types.Pointer("@request.auth.id != ''")
 	collection.DeleteRule = types.Pointer("@request.auth.id != ''")
 
-	// Add fields
+	// Add identity fields
 	collection.Fields.Add(&core.TextField{
 		Name:     "name",
 		Required: true,
@@ -234,6 +236,8 @@ func (cm *Manager) createAccountsCollection() error {
 		Name: "description",
 		Max:  500,
 	})
+	
+	// Add key fields
 	collection.Fields.Add(&core.TextField{
 		Name: "public_key",
 		Max:  200,
@@ -262,13 +266,45 @@ func (cm *Manager) createAccountsCollection() error {
 		Name: "jwt",
 		Max:  5000,
 	})
+	
+	// Add management fields
 	collection.Fields.Add(&core.BoolField{
 		Name: "active",
 	})
-	
-	// Add rotate_keys field for signing key rotation
 	collection.Fields.Add(&core.BoolField{
 		Name: "rotate_keys",
+	})
+	
+	// Add account-level limit fields (optional, default -1 = unlimited)
+	collection.Fields.Add(&core.NumberField{
+		Name:    "max_connections",
+		OnlyInt: true,
+		Min:     types.Pointer(-1.0), // -1 means unlimited
+	})
+	collection.Fields.Add(&core.NumberField{
+		Name:    "max_subscriptions",
+		OnlyInt: true,
+		Min:     types.Pointer(-1.0), // -1 means unlimited
+	})
+	collection.Fields.Add(&core.NumberField{
+		Name:    "max_data",
+		OnlyInt: true,
+		Min:     types.Pointer(-1.0), // -1 means unlimited
+	})
+	collection.Fields.Add(&core.NumberField{
+		Name:    "max_payload",
+		OnlyInt: true,
+		Min:     types.Pointer(-1.0), // -1 means unlimited
+	})
+	collection.Fields.Add(&core.NumberField{
+		Name:    "max_jetstream_disk_storage",
+		OnlyInt: true,
+		Min:     types.Pointer(-1.0), // -1 means unlimited
+	})
+	collection.Fields.Add(&core.NumberField{
+		Name:    "max_jetstream_memory_storage",
+		OnlyInt: true,
+		Min:     types.Pointer(-1.0), // -1 means unlimited
 	})
 	
 	// Add timestamps
@@ -298,15 +334,15 @@ func (cm *Manager) createAccountsCollection() error {
 // - subscribe_permissions: JSON array of NATS subjects for subscribing
 // - No subject scoping applied - accounts provide isolation
 //
-// LIMIT FIELDS:
-// - max_connections: Maximum concurrent NATS connections (-1 = unlimited)
-// - max_data: Maximum bytes in flight (-1 = unlimited)
-// - max_payload: Maximum message size (-1 = unlimited)
+// USER LIMIT FIELDS:
+// - max_subscriptions: Maximum concurrent subscriptions per user (-1 = unlimited)
+// - max_data: Maximum bytes in flight per user (-1 = unlimited)
+// - max_payload: Maximum message size per user (-1 = unlimited)
 //
 // SCHEMA:
 // - Identity: name, description, is_default
 // - Permissions: publish_permissions, subscribe_permissions (JSON arrays)
-// - Limits: max_connections, max_data, max_payload
+// - Limits: max_subscriptions, max_data, max_payload (per-user limits)
 //
 // RETURNS:
 // - nil if collection created successfully or already exists
@@ -331,12 +367,21 @@ func (cm *Manager) createRolesCollection() error {
 	collection.UpdateRule = types.Pointer("@request.auth.id != ''")
 	collection.DeleteRule = types.Pointer("@request.auth.id != ''")
 
-	// Add fields
+	// Add identity fields
 	collection.Fields.Add(&core.TextField{
 		Name:     "name",
 		Required: true,
 		Max:      100,
 	})
+	collection.Fields.Add(&core.TextField{
+		Name: "description",
+		Max:  500,
+	})
+	collection.Fields.Add(&core.BoolField{
+		Name: "is_default",
+	})
+	
+	// Add permission fields
 	collection.Fields.Add(&core.TextField{
 		Name:     "publish_permissions",
 		Required: false,
@@ -347,15 +392,10 @@ func (cm *Manager) createRolesCollection() error {
 		Required: false,
 		Max:      5000, // JSON array as text
 	})
-	collection.Fields.Add(&core.TextField{
-		Name: "description",
-		Max:  500,
-	})
-	collection.Fields.Add(&core.BoolField{
-		Name: "is_default",
-	})
+	
+	// Add per-user limit fields
 	collection.Fields.Add(&core.NumberField{
-		Name:    "max_connections",
+		Name:    "max_subscriptions",
 		OnlyInt: true,
 		Min:     types.Pointer(-1.0), // -1 means unlimited
 	})

@@ -843,6 +843,7 @@ func (p *Manager) validateAccount(account *pbtypes.AccountRecord) error {
 }
 
 // recordToAccountModel converts PocketBase record to internal account model.
+// Updated to include the new account limit fields.
 //
 // FIELD MAPPING:
 // - Database fields → Internal model fields
@@ -853,7 +854,7 @@ func (p *Manager) validateAccount(account *pbtypes.AccountRecord) error {
 //   - record: PocketBase account record
 //
 // RETURNS:
-// - AccountRecord model with mapped fields
+// - AccountRecord model with mapped fields including new account limits
 func (p *Manager) recordToAccountModel(record *core.Record) *pbtypes.AccountRecord {
 	return &pbtypes.AccountRecord{
 		ID:                record.Id,
@@ -867,6 +868,14 @@ func (p *Manager) recordToAccountModel(record *core.Record) *pbtypes.AccountReco
 		SigningSeed:       record.GetString("signing_seed"),
 		JWT:               record.GetString("jwt"),
 		Active:            record.GetBool("active"),
+		
+		// Account-level limits (newly added fields)
+		MaxConnections:                record.GetInt64("max_connections"),
+		MaxSubscriptions:              record.GetInt64("max_subscriptions"),
+		MaxData:                       record.GetInt64("max_data"),
+		MaxPayload:                    record.GetInt64("max_payload"),
+		MaxJetStreamDiskStorage:       record.GetInt64("max_jetstream_disk_storage"),
+		MaxJetStreamMemoryStorage:     record.GetInt64("max_jetstream_memory_storage"),
 	}
 }
 
