@@ -108,7 +108,7 @@ func (sm *Manager) SetupHooks() error {
 // setupAccountHooks registers hooks for account lifecycle and management operations.
 //
 // ACCOUNT EVENT HANDLING:
-// - Creation: Generate keys and JWT, schedule NATS publishing
+// - Creation: Generate keys and JWT after record is saved (works for API and programmatic creates)
 // - Updates: Regenerate JWT, handle signing key rotation, schedule publishing
 // - Deletion: Remove account from NATS (with system account protection)
 //
@@ -120,30 +120,41 @@ func (sm *Manager) SetupHooks() error {
 // 4. Clear rotate_keys flag to prevent loops
 //
 // SIDE EFFECTS:
-// - Registers OnRecordCreateRequest, OnRecordAfterCreateSuccess
+// - Registers OnRecordAfterCreateSuccess (FIXED: works for programmatic creates)
 // - Registers OnRecordUpdateRequest, OnRecordAfterUpdateSuccess  
 // - Registers OnRecordDeleteRequest
 func (sm *Manager) setupAccountHooks() {
-	// Account creation
-	sm.app.OnRecordCreateRequest().BindFunc(func(e *core.RecordRequestEvent) error {
-		if e.Collection.Name != sm.options.AccountCollectionName {
-			return e.Next()
-		}
-
-		if err := sm.generateAccountKeys(e.Record); err != nil {
-			return utils.WrapError(err, "failed to generate account keys")
-		}
-		return e.Next()
-	})
-
+	// FIXED: Account creation - fires for ALL creates (API and programmatic)
+	// Moved from OnRecordCreateRequest to OnRecordAfterCreateSuccess
 	sm.app.OnRecordAfterCreateSuccess().BindFunc(func(e *core.RecordEvent) error {
 		if e.Record.Collection().Name != sm.options.AccountCollectionName {
 			return e.Next()
 		}
 
+		// Skip system account to prevent infinite loops
+		if e.Record.GetString("name") == "System Account" {
+			return e.Next()
+		}
+
+		// Generate keys if they don't exist (idempotent check)
+		if err := sm.generateAccountKeys(e.Record); err != nil {
+			sm.logger.Warning("Failed to generate account keys for %s: %v", e.Record.Id, err)
+			return e.Next() // Don't block - let the record exist, keys can be regenerated later
+		}
+
+		// Save the record with generated keys if keys were added
+		if e.Record.GetString("public_key") != "" {
+			if err := sm.app.Save(e.Record); err != nil {
+				sm.logger.Warning("Failed to save account keys for %s: %v", e.Record.Id, err)
+				return e.Next() // Don't block
+			}
+		}
+
+		// Schedule NATS publishing
 		if sm.shouldHandleEvent(sm.options.AccountCollectionName, pbtypes.EventTypeAccountCreate) {
 			sm.scheduleSync(e.Record.Id, pbtypes.PublishActionUpsert)
 		}
+		
 		return e.Next()
 	})
 
@@ -212,7 +223,7 @@ func (sm *Manager) setupAccountHooks() {
 // setupUserHooks registers hooks for user lifecycle and JWT management operations.
 //
 // USER EVENT HANDLING:
-// - Creation: Generate keys and JWT, schedule account publishing
+// - Creation: Generate keys and JWT after record is saved (works for API and programmatic creates)
 // - Updates: Regenerate JWT (normal or forced via regenerate flag), schedule account publishing
 // - Deletion: Schedule account publishing (user removed from account)
 //
@@ -227,33 +238,39 @@ func (sm *Manager) setupAccountHooks() {
 // republished to NATS to reflect the updated user roster.
 //
 // SIDE EFFECTS:
-// - Registers OnRecordCreateRequest, OnRecordAfterCreateSuccess
+// - Registers OnRecordAfterCreateSuccess (FIXED: works for programmatic creates)
 // - Registers OnRecordUpdateRequest, OnRecordAfterUpdateSuccess
 // - Registers OnRecordAfterDeleteSuccess
 func (sm *Manager) setupUserHooks() {
-	// User creation
-	sm.app.OnRecordCreateRequest().BindFunc(func(e *core.RecordRequestEvent) error {
-		if e.Collection.Name != sm.options.UserCollectionName {
-			return e.Next()
-		}
-
-		if err := sm.generateUserKeys(e.Record); err != nil {
-			return utils.WrapError(err, "failed to generate user keys")
-		}
-		return e.Next()
-	})
-
+	// FIXED: User creation - fires for ALL creates (API and programmatic)
+	// Moved from OnRecordCreateRequest to OnRecordAfterCreateSuccess
 	sm.app.OnRecordAfterCreateSuccess().BindFunc(func(e *core.RecordEvent) error {
 		if e.Record.Collection().Name != sm.options.UserCollectionName {
 			return e.Next()
 		}
 
+		// Generate keys if they don't exist (idempotent check)
+		if err := sm.generateUserKeys(e.Record); err != nil {
+			sm.logger.Warning("Failed to generate user keys for %s: %v", e.Record.Id, err)
+			return e.Next() // Don't block - let the record exist, keys can be regenerated later
+		}
+
+		// Save the record with generated keys if keys were added
+		if e.Record.GetString("public_key") != "" {
+			if err := sm.app.Save(e.Record); err != nil {
+				sm.logger.Warning("Failed to save user keys for %s: %v", e.Record.Id, err)
+				return e.Next() // Don't block
+			}
+		}
+
+		// Schedule account publishing
 		if sm.shouldHandleEvent(sm.options.UserCollectionName, pbtypes.EventTypeUserCreate) {
 			accountID := e.Record.GetString("account_id")
 			if accountID != "" {
 				sm.scheduleSync(accountID, pbtypes.PublishActionUpsert)
 			}
 		}
+		
 		return e.Next()
 	})
 
@@ -510,7 +527,7 @@ func (sm *Manager) scheduleSync(accountID, action string) {
 // SIDE EFFECTS:
 // - Modifies account record with generated keys and JWT
 func (sm *Manager) generateAccountKeys(record *core.Record) error {
-	// Skip if keys already exist
+	// Skip if keys already exist (idempotent)
 	if record.GetString("public_key") != "" {
 		return nil
 	}
@@ -604,7 +621,7 @@ func (sm *Manager) generateAccountJWT(record *core.Record) error {
 // SIDE EFFECTS:
 // - Modifies user record with generated keys, JWT, and .creds file
 func (sm *Manager) generateUserKeys(record *core.Record) error {
-	// Skip if keys already exist
+	// Skip if keys already exist (idempotent)
 	if record.GetString("public_key") != "" {
 		return nil
 	}
