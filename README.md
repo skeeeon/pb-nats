@@ -14,6 +14,8 @@ A high-performance library for seamless integration between [PocketBase](https:/
 - **🔑 Simple Regeneration**: JWT refresh via boolean field triggers
 - **📊 Account Limits**: Configurable resource limits at both account and user levels
 - **⚙️ Hierarchical Limits**: Account-level limits control overall resources, role-based limits control per-user resources
+- **🚫 Deny Permissions**: Fine-grained access control with allow/deny subject patterns
+- **📨 Response Permissions**: Request-reply pattern support with configurable limits
 
 ## 📦 Installation
 
@@ -72,8 +74,6 @@ func main() {
 | `signing_private_key` | Text | Signing private key |
 | `signing_seed` | Text | Signing seed |
 | `jwt` | Text | **Operator JWT for NATS configuration** |
-| `created` | DateTime | Creation timestamp |
-| `updated` | DateTime | Update timestamp |
 
 ### Accounts (`nats_accounts`)
 *NATS accounts providing isolation boundaries with configurable limits*
@@ -91,14 +91,12 @@ func main() {
 | `jwt` | Text | Account JWT |
 | `active` | Boolean | Account status |
 | `rotate_keys` | Boolean | **Triggers signing key rotation** |
-| `max_connections` | Number | **Max concurrent connections** (-1 = unlimited, 0 = disabled) |
-| `max_subscriptions` | Number | **Max subscriptions across account** (-1 = unlimited, 0 = disabled) |
-| `max_data` | Number | **Max bytes in-flight across account** (-1 = unlimited, 0 = disabled) |
-| `max_payload` | Number | **Max message size for account** (-1 = unlimited, 0 = disabled) |
-| `max_jetstream_disk_storage` | Number | **Max JetStream disk storage** (-1 = unlimited, 0 = disabled) |
-| `max_jetstream_memory_storage` | Number | **Max JetStream memory storage** (-1 = unlimited, 0 = disabled) |
-| `created` | DateTime | Creation timestamp |
-| `updated` | DateTime | Update timestamp |
+| `max_connections` | Number | Max concurrent connections (-1 = unlimited, 0 = disabled) |
+| `max_subscriptions` | Number | Max subscriptions across account (-1 = unlimited, 0 = disabled) |
+| `max_data` | Number | Max bytes in-flight across account (-1 = unlimited, 0 = disabled) |
+| `max_payload` | Number | Max message size for account (-1 = unlimited, 0 = disabled) |
+| `max_jetstream_disk_storage` | Number | Max JetStream disk storage (-1 = unlimited, 0 = disabled) |
+| `max_jetstream_memory_storage` | Number | Max JetStream memory storage (-1 = unlimited, 0 = disabled) |
 
 ### Users (`nats_users`) 
 *PocketBase auth collection with NATS integration*
@@ -121,17 +119,78 @@ func main() {
 | `active` | Boolean | User status |
 
 ### Roles (`nats_roles`)
-*Permission templates with per-user limits*
+*Permission templates with per-user limits and deny permissions*
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `name` | Text | Role name |
 | `description` | Text | Role description |
-| `publish_permissions` | Text | JSON array of publish subjects |
-| `subscribe_permissions` | Text | JSON array of subscribe subjects |
-| `max_subscriptions` | Number | **Max subscriptions per user** (-1 = unlimited, 0 = disabled) |
-| `max_data` | Number | **Data limit per user** (-1 = unlimited, 0 = disabled) |
-| `max_payload` | Number | **Message size limit per user** (-1 = unlimited, 0 = disabled) |
+| `publish_permissions` | Text | JSON array of allowed publish subjects |
+| `subscribe_permissions` | Text | JSON array of allowed subscribe subjects |
+| `publish_deny_permissions` | Text | JSON array of denied publish subjects |
+| `subscribe_deny_permissions` | Text | JSON array of denied subscribe subjects |
+| `allow_response` | Boolean | **Enable response permissions for request-reply** |
+| `allow_response_max` | Number | Max responses per request (-1 = unlimited, 0 = default/1) |
+| `allow_response_ttl` | Number | Response TTL in seconds (0 = no limit) |
+| `max_subscriptions` | Number | Max subscriptions per user (-1 = unlimited, 0 = disabled) |
+| `max_data` | Number | Data limit per user (-1 = unlimited, 0 = disabled) |
+| `max_payload` | Number | Message size limit per user (-1 = unlimited, 0 = disabled) |
+
+## 🔐 Permission System
+
+### Allow/Deny Permissions
+
+pb-nats supports both allow and deny permission patterns. Deny permissions take precedence over allow permissions.
+
+**Permission Evaluation Order (NATS semantics):**
+1. Check if subject matches any Allow pattern
+2. If allowed, check if subject matches any Deny pattern
+3. Deny takes precedence over Allow for matching subjects
+
+**Example Role Configuration:**
+```json
+{
+  "name": "sensor_reader",
+  "publish_permissions": ["sensors.>"],
+  "subscribe_permissions": ["sensors.>", "alerts.>"],
+  "publish_deny_permissions": ["sensors.internal.>"],
+  "subscribe_deny_permissions": ["alerts.admin.>"]
+}
+```
+
+This role:
+- ✅ Can publish to `sensors.temperature`
+- ❌ Cannot publish to `sensors.internal.config` (denied)
+- ✅ Can subscribe to `alerts.critical`
+- ❌ Cannot subscribe to `alerts.admin.notifications` (denied)
+
+### Response Permissions (Request-Reply)
+
+Response permissions control the ability to reply to requests in request-reply patterns.
+
+**Fields:**
+- `allow_response`: Boolean to enable/disable response permissions
+- `allow_response_max`: Maximum number of responses per request
+  - `-1` = Unlimited responses
+  - `0` = Default (1 response)
+  - `positive` = Specific limit
+- `allow_response_ttl`: Time-to-live for responses in seconds
+  - `0` = No expiration
+  - `positive` = Expires after N seconds
+
+**Example: Service Role with Request-Reply**
+```json
+{
+  "name": "api_service",
+  "publish_permissions": ["api.>"],
+  "subscribe_permissions": ["api.requests.>"],
+  "allow_response": true,
+  "allow_response_max": 1,
+  "allow_response_ttl": 30
+}
+```
+
+**Note:** The system admin role has response permissions enabled by default with unlimited responses. For user-created roles, you must explicitly enable `allow_response`.
 
 ## 📊 Resource Limits Hierarchy
 
@@ -153,18 +212,12 @@ Set on the **role** record, these limits control individual user resource usage:
 - `max_payload`: Maximum message size a single user can send
 
 ### Limit Values ⚠️ IMPORTANT
-**FIXED**: Corrected NATS semantics for limit values:
 
 - **`-1`**: **Unlimited** (no restrictions)
 - **`0`**: **Disabled** (no access allowed - **use with caution**)
 - **`positive`**: **Specific limits** in appropriate units (bytes, count, etc.)
 
-⚠️ **Critical Warning**: Setting limits to `0` **completely disables** access for that resource. This blocks users from connecting, subscribing, or sending data entirely. Most production systems should use either `-1` (unlimited) or positive values for specific limits.
-
-**Examples:**
-- `max_connections: -1` → Unlimited connections ✅
-- `max_connections: 100` → Maximum 100 connections ✅  
-- `max_connections: 0` → **No connections allowed (blocked)** ⚠️
+⚠️ **Critical Warning**: Setting limits to `0` **completely disables** access for that resource.
 
 ## ⚙️ Configuration Options
 
@@ -172,51 +225,42 @@ Set on the **role** record, these limits control individual user resource usage:
 options := pbnats.DefaultOptions()
 
 // Collection Names
-options.UserCollectionName = "nats_users"              // Default
-options.RoleCollectionName = "nats_roles"              // Default  
-options.AccountCollectionName = "nats_accounts"        // Default
+options.UserCollectionName = "nats_users"
+options.RoleCollectionName = "nats_roles"  
+options.AccountCollectionName = "nats_accounts"
 
 // NATS Configuration
-options.NATSServerURL = "nats://localhost:4222"        // Primary server
-options.BackupNATSServerURLs = []string{               // Backup servers
+options.NATSServerURL = "nats://localhost:4222"
+options.BackupNATSServerURLs = []string{
     "nats://backup1:4222",
     "nats://backup2:4222", 
 }
-options.OperatorName = "stone-age.io"                  // Default
+options.OperatorName = "stone-age.io"
 
 // Connection Management
 options.ConnectionRetryConfig = &pbtypes.RetryConfig{
-    MaxPrimaryRetries: 4,                               // Retries before failover
-    InitialBackoff:    1 * time.Second,                 // Initial retry delay
-    MaxBackoff:        8 * time.Second,                 // Maximum retry delay  
-    BackoffMultiplier: 2.0,                             // Backoff progression
-    FailbackInterval:  30 * time.Second,                // Primary health checks
-}
-
-options.ConnectionTimeouts = &pbtypes.TimeoutConfig{
-    ConnectTimeout: 5 * time.Second,                    // Connection timeout
-    PublishTimeout: 10 * time.Second,                   // Publish timeout
-    RequestTimeout: 10 * time.Second,                   // Request timeout
+    MaxPrimaryRetries: 4,
+    InitialBackoff:    1 * time.Second,
+    MaxBackoff:        8 * time.Second,
+    BackoffMultiplier: 2.0,
+    FailbackInterval:  30 * time.Second,
 }
 
 // Performance & Cleanup
-options.PublishQueueInterval = 30 * time.Second        // Queue processing
-options.DebounceInterval = 3 * time.Second             // Change debouncing
-options.FailedRecordCleanupInterval = 6 * time.Hour    // Cleanup frequency
-options.FailedRecordRetentionTime = 24 * time.Hour     // Failed record retention
+options.PublishQueueInterval = 30 * time.Second
+options.DebounceInterval = 3 * time.Second
+options.FailedRecordCleanupInterval = 6 * time.Hour
+options.FailedRecordRetentionTime = 24 * time.Hour
 
 // Default Permissions (when role permissions are empty)
-options.DefaultPublishPermissions = []string{">"}      // Full account access
-options.DefaultSubscribePermissions = []string{">", "_INBOX.>"} // Full + inbox
+options.DefaultPublishPermissions = []string{">"}
+options.DefaultSubscribePermissions = []string{">", "_INBOX.>"}
 
 // JWT Settings
-options.DefaultJWTExpiry = 0                           // Never expires (default)
+options.DefaultJWTExpiry = 0 // Never expires (default)
 
-// Logging & Filtering
-options.LogToConsole = true                            // Enable logging
-options.EventFilter = func(collection, event string) bool { // Custom filtering
-    return true // Process all events
-}
+// Logging
+options.LogToConsole = true
 ```
 
 ## 🔒 Security Features
@@ -226,82 +270,41 @@ options.EventFilter = func(collection, event string) bool { // Custom filtering
 Immediate response for security incidents:
 
 ```http
-# Emergency rotation - invalidates ALL user JWTs in account immediately
 PATCH /api/collections/nats_accounts/records/{account_id}
 {"rotate_keys": true}
-
-# Users must re-authenticate to get fresh credentials  
-GET /api/collections/nats_users/records/{user_id}?fields=creds_file
-Authorization: Bearer {valid_pocketbase_token}
 ```
 
-**Security Model:**
-```
-Operator (root trust)
-├── System Account (NATS management) 
-│   └── System User (internal operations)
-└── Regular Accounts (tenant isolation)
-    └── Users (scoped permissions)
-```
-
-**When to Use Rotation:**
-- Account compromise incidents
-- Suspicious activity detection
-- Periodic security hardening
-- Before sensitive operations
+All user JWTs in the account are immediately invalidated.
 
 ## 🌐 API Usage
 
-### User Operations
+### Creating Roles with Deny Permissions
 ```bash
-# Get user credentials
-GET /api/collections/nats_users/records/{user_id}?fields=creds_file
-Authorization: Bearer {user_token}
-
-# Regenerate user JWT  
-PATCH /api/collections/nats_users/records/{user_id}
-{"regenerate": true}
+POST /api/collections/nats_roles/records
+{
+    "name": "restricted_publisher",
+    "publish_permissions": "[\"events.>\"]",
+    "subscribe_permissions": "[\"events.>\"]",
+    "publish_deny_permissions": "[\"events.admin.>\", \"events.internal.>\"]",
+    "subscribe_deny_permissions": "[\"events.private.>\"]",
+    "allow_response": false,
+    "max_subscriptions": 100,
+    "max_data": 1048576,
+    "max_payload": 65536
+}
 ```
 
-### Admin Operations
+### Creating Roles with Response Permissions
 ```bash
-# Get operator JWT for NATS configuration
-GET /api/collections/nats_system_operator/records
-Authorization: Bearer {admin_token}
-
-# Emergency account rotation
-PATCH /api/collections/nats_accounts/records/{account_id}  
-{"rotate_keys": true}
-
-# Set account limits (IMPORTANT: Use correct values)
-PATCH /api/collections/nats_accounts/records/{account_id}
+POST /api/collections/nats_roles/records
 {
-    "max_connections": 100,        // 100 connections max
-    "max_subscriptions": 1000,     // 1000 subscriptions max
-    "max_data": 1048576,           // 1MB data max
-    "max_payload": 65536           // 64KB message max
+    "name": "api_responder",
+    "publish_permissions": "[\"api.responses.>\"]",
+    "subscribe_permissions": "[\"api.requests.>\"]",
+    "allow_response": true,
+    "allow_response_max": 5,
+    "allow_response_ttl": 60
 }
-
-# DANGEROUS: Disable account completely
-PATCH /api/collections/nats_accounts/records/{account_id}
-{
-    "max_connections": 0,          // ⚠️ BLOCKS all connections!
-    "max_subscriptions": 0,        // ⚠️ BLOCKS all subscriptions!
-    "max_data": 0,                 // ⚠️ BLOCKS all data!
-    "max_payload": 0               // ⚠️ BLOCKS all messages!
-}
-
-# Safe unlimited settings
-PATCH /api/collections/nats_accounts/records/{account_id}
-{
-    "max_connections": -1,         // ✅ Unlimited connections
-    "max_subscriptions": -1,       // ✅ Unlimited subscriptions  
-    "max_data": -1,                // ✅ Unlimited data
-    "max_payload": -1              // ✅ Unlimited message size
-}
-
-# List users in account
-GET /api/collections/nats_users/records?filter=account_id="{account_id}"
 ```
 
 ### Client Connection
@@ -318,10 +321,6 @@ const nc = await connect({
     servers: ["nats://your-server:4222"],
     authenticator: credsAuthenticator(new TextEncoder().encode(user.creds_file))
 });
-
-// Simple permissions within account boundaries
-await nc.publish("sensors.temperature", JSON.stringify({temp: 23.5}));
-await nc.publish("alerts.high_temp", JSON.stringify({location: "server_room"}));
 ```
 
 ## 📊 Account Isolation
@@ -330,114 +329,29 @@ Accounts provide natural boundaries - no subject scoping needed:
 
 ```go
 // Account: "company-a" 
-// Users: "sensors.temperature", "alerts.critical"
+// Users can use: "sensors.temperature", "alerts.critical"
 
 // Account: "company-b"
-// Users: "sensors.temperature", "alerts.critical" 
+// Users can use: "sensors.temperature", "alerts.critical" 
 // Completely isolated from company-a
-
-// No complex scoping: "company_a.sensors.temperature"
 ```
-
-## 🏭 Production Setup
-
-### NATS Server Configuration
-```conf
-# /etc/nats/nats.conf
-operator: /etc/nats/operator.jwt  # From nats_system_operator collection
-
-resolver: {
-    type: full
-    dir: '/etc/nats/resolver'
-    allow_delete: false
-    interval: "2m"
-}
-
-system_account: <SYSTEM_ACCOUNT_PUBLIC_KEY>
-port: 4222
-http_port: 8222
-```
-
-### High Availability Example
-```go
-options := pbnats.DefaultOptions()
-options.NATSServerURL = "nats://nats1.company.com:4222"
-options.BackupNATSServerURLs = []string{
-    "nats://nats2.company.com:4222",
-    "nats://nats3.company.com:4222",
-}
-
-// Quick failover settings
-options.ConnectionRetryConfig.MaxPrimaryRetries = 3
-options.ConnectionRetryConfig.InitialBackoff = 100 * time.Millisecond
-options.ConnectionTimeouts.ConnectTimeout = 3 * time.Second
-
-if err := pbnats.Setup(app, options); err != nil {
-    log.Fatalf("Failed to setup NATS sync: %v", err)
-}
-```
-
-## 🎯 Use Cases
-
-### IoT Platform with Resource Management
-- Account per customer/building with connection limits
-- Device users with sensor permissions and data limits
-- Real-time telemetry streaming with payload size controls
-- Emergency account rotation for compromised customers
-
-### Multi-Tenant SaaS
-- Account per tenant for data isolation with resource quotas
-- Role-based permissions within accounts with per-user limits
-- Cross-tenant communication via exports/imports
-- Account-level security and resource management operations
-
-### Development Teams
-- Account per team (frontend, backend, devops) with development resource limits
-- Isolated team communication channels
-- CI/CD service accounts with restricted permissions
-- Team-level incident response and resource monitoring
 
 ## 🐛 Troubleshooting
 
-**Bootstrap Issues:**
-- Check system operator JWT in admin interface
-- Verify NATS server config matches operator JWT
-- Look for "Bootstrap successful!" in logs
+**Permission Issues:**
+- Check if deny permissions are blocking expected access
+- Verify allow permissions include required subjects
+- Check response permissions for request-reply patterns
 
-**Security Operations:**
-- Account rotation: Check "Signing keys rotated" logs
-- User invalidation: Rotation immediately invalidates JWTs via NATS
-- Recovery: Users need fresh PocketBase tokens for new credentials
-
-**Connection Issues:**
-- Enable `LogToConsole: true` for detailed debugging
-- Check failover logs for backup server usage
-- Verify network connectivity to NATS servers
-
-**Performance:**
-- Adjust `DebounceInterval` for change frequency
-- Tune `PublishQueueInterval` for processing speed
-- Monitor failed record cleanup logs
+**Response Permission Issues:**
+- Ensure `allow_response` is set to `true` on the role
+- Check `allow_response_max` isn't set to `0` (which uses default of 1)
+- Verify `allow_response_ttl` isn't expiring before response is sent
 
 **Resource Limits:**
-- **Account limits**: Check NATS server monitoring for account-level usage
-- **User limits**: Individual users hitting role-based limits will see connection errors
-- **Unlimited values**: Use `-1` for unlimited resources
-- **Disabled values**: Use `0` to completely block access (use with caution!)
-- **Specific limits**: Use positive values for exact resource limits
-
-**Limit Troubleshooting:**
-- **User can't connect**: Check if `max_connections` is set to `0` (blocked)
-- **User can't subscribe**: Check if `max_subscriptions` is set to `0` (blocked)  
-- **User can't send data**: Check if `max_data` or `max_payload` is set to `0` (blocked)
-- **Restore access**: Change `0` values to `-1` (unlimited) or positive limits
-
-## 📚 Examples
-
-Check the `examples/` directory for:
-- `basic/` - Simple setup with default options and bootstrap process
-- `advanced/` - Custom configuration with connection management and resource limits
-- `integration/` - Complete workflow demonstration with JWT regeneration and account limits
+- Use `-1` for unlimited resources
+- Use `0` with caution (completely blocks access)
+- Use positive values for specific limits
 
 ## 📄 License
 

@@ -37,30 +37,29 @@ import (
 // - (0) = Disabled/blocked (no access allowed)
 // - (positive) = Specific limit value
 type AccountRecord struct {
-	ID                string    `json:"id"`                  // Database primary key
-	Name              string    `json:"name"`                // Display name (normalized for NATS account name)
-	Description       string    `json:"description"`         // Human-readable description
-	PublicKey         string    `json:"public_key"`          // Account public key (NATS account identifier)
-	PrivateKey        string    `json:"private_key"`         // Account private key (plaintext storage)
-	Seed              string    `json:"seed"`                // Account seed (plaintext storage)
-	SigningPublicKey  string    `json:"signing_public_key"`  // Signing public key (for user JWT validation)
-	SigningPrivateKey string    `json:"signing_private_key"` // Signing private key (plaintext storage)
-	SigningSeed       string    `json:"signing_seed"`        // Signing seed (plaintext storage)
-	JWT               string    `json:"jwt"`                 // Generated account JWT for NATS server
-	Active            bool      `json:"active"`              // Account enable/disable flag
-	RotateKeys        bool      `json:"rotate_keys"`         // Trigger field for signing key rotation
+	ID                string    `json:"id"`
+	Name              string    `json:"name"`
+	Description       string    `json:"description"`
+	PublicKey         string    `json:"public_key"`
+	PrivateKey        string    `json:"private_key"`
+	Seed              string    `json:"seed"`
+	SigningPublicKey  string    `json:"signing_public_key"`
+	SigningPrivateKey string    `json:"signing_private_key"`
+	SigningSeed       string    `json:"signing_seed"`
+	JWT               string    `json:"jwt"`
+	Active            bool      `json:"active"`
+	RotateKeys        bool      `json:"rotate_keys"`
 	
-	// Account-level limits (FIXED - CORRECT NATS SEMANTICS):
-	// -1 = unlimited, 0 = disabled/blocked, positive = specific limit
-	MaxConnections                int64 `json:"max_connections"`                 // Max concurrent connections to account (-1 = unlimited, 0 = disabled, positive = limit)
-	MaxSubscriptions              int64 `json:"max_subscriptions"`               // Max subscriptions across account (-1 = unlimited, 0 = disabled, positive = limit)
-	MaxData                       int64 `json:"max_data"`                        // Max bytes in-flight across account (-1 = unlimited, 0 = disabled, positive = limit)
-	MaxPayload                    int64 `json:"max_payload"`                     // Max message size for account (-1 = unlimited, 0 = disabled, positive = limit)
-	MaxJetStreamDiskStorage       int64 `json:"max_jetstream_disk_storage"`      // Max JetStream disk storage (-1 = unlimited, 0 = disabled, positive = limit)
-	MaxJetStreamMemoryStorage     int64 `json:"max_jetstream_memory_storage"`    // Max JetStream memory storage (-1 = unlimited, 0 = disabled, positive = limit)
+	// Account-level limits (NATS semantics: -1 = unlimited, 0 = disabled, positive = limit)
+	MaxConnections            int64 `json:"max_connections"`
+	MaxSubscriptions          int64 `json:"max_subscriptions"`
+	MaxData                   int64 `json:"max_data"`
+	MaxPayload                int64 `json:"max_payload"`
+	MaxJetStreamDiskStorage   int64 `json:"max_jetstream_disk_storage"`
+	MaxJetStreamMemoryStorage int64 `json:"max_jetstream_memory_storage"`
 	
-	Created           time.Time `json:"created"`             // Creation timestamp
-	Updated           time.Time `json:"updated"`             // Last update timestamp
+	Created time.Time `json:"created"`
+	Updated time.Time `json:"updated"`
 }
 
 // NatsUserRecord represents a NATS user with PocketBase authentication integration.
@@ -81,25 +80,25 @@ type AccountRecord struct {
 // - Manual credential refresh
 type NatsUserRecord struct {
 	// Standard PocketBase auth fields
-	ID       string `json:"id"`                             // Database primary key
-	Email    string `json:"email"`                          // PocketBase authentication email
-	Password string `json:"password"`                       // PocketBase password (for API auth)
-	Verified bool   `json:"verified"`                       // Email verification status
+	ID       string `json:"id"`
+	Email    string `json:"email"`
+	Password string `json:"password"`
+	Verified bool   `json:"verified"`
 	
 	// NATS-specific fields (no encryption - plaintext storage by design)
-	NatsUsername     string     `json:"nats_username"`      // NATS username (separate from email)
-	Description      string     `json:"description"`        // Human-readable description
-	PublicKey        string     `json:"public_key"`         // User public key (NATS user identifier)
-	PrivateKey       string     `json:"private_key"`        // User private key (plaintext storage)
-	Seed             string     `json:"seed"`               // User seed (plaintext storage)
-	AccountID        string     `json:"account_id"`         // Foreign key to accounts table
-	RoleID           string     `json:"role_id"`            // Foreign key to roles table
-	JWT              string     `json:"jwt"`                // Generated user JWT for NATS connection
-	CredsFile        string     `json:"creds_file"`         // Complete .creds file for NATS clients
-	BearerToken      bool       `json:"bearer_token"`       // NATS bearer token authentication flag
-	JWTExpiresAt     *time.Time `json:"jwt_expires_at"`     // Optional JWT expiration (nil = never expires)
-	Regenerate       bool       `json:"regenerate"`         // Trigger field for JWT regeneration
-	Active           bool       `json:"active"`             // User enable/disable flag
+	NatsUsername string     `json:"nats_username"`
+	Description  string     `json:"description"`
+	PublicKey    string     `json:"public_key"`
+	PrivateKey   string     `json:"private_key"`
+	Seed         string     `json:"seed"`
+	AccountID    string     `json:"account_id"`
+	RoleID       string     `json:"role_id"`
+	JWT          string     `json:"jwt"`
+	CredsFile    string     `json:"creds_file"`
+	BearerToken  bool       `json:"bearer_token"`
+	JWTExpiresAt *time.Time `json:"jwt_expires_at"`
+	Regenerate   bool       `json:"regenerate"`
+	Active       bool       `json:"active"`
 }
 
 // RoleRecord represents a NATS role with permissions and per-user limits.
@@ -109,7 +108,17 @@ type NatsUserRecord struct {
 // Permissions are stored as JSON arrays of NATS subjects. No scoping is applied
 // at the role level because accounts provide natural isolation boundaries.
 //
-// USER LIMIT ENFORCEMENT (FIXED - CORRECT NATS SEMANTICS):
+// PERMISSION TYPES:
+// - Allow permissions: Subjects the user CAN access
+// - Deny permissions: Subjects the user CANNOT access (evaluated after allow)
+// - Response permission: Controls request-reply response behavior
+//
+// PERMISSION EVALUATION ORDER (NATS semantics):
+// 1. Check if subject matches any Allow pattern
+// 2. If allowed, check if subject matches any Deny pattern
+// 3. Deny takes precedence over Allow for matching subjects
+//
+// USER LIMIT ENFORCEMENT (CORRECT NATS SEMANTICS):
 // Role limits are applied per-user and control individual user resource usage:
 // - max_subscriptions: Concurrent subscriptions per user
 // - max_data: Total bytes user can have in-flight
@@ -124,18 +133,31 @@ type NatsUserRecord struct {
 // The same role can be used by users in different accounts. The permissions
 // are the same, but account isolation ensures no cross-tenant access.
 type RoleRecord struct {
-	ID                   string          `json:"id"`                     // Database primary key
-	Name                 string          `json:"name"`                   // Role name
-	PublishPermissions   json.RawMessage `json:"publish_permissions"`    // JSON array of publish subjects
-	SubscribePermissions json.RawMessage `json:"subscribe_permissions"`  // JSON array of subscribe subjects
-	Description          string          `json:"description"`            // Human-readable description
-	IsDefault            bool            `json:"is_default"`             // Default role flag
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	IsDefault   bool   `json:"is_default"`
 	
-	// Per-user limits (FIXED - CORRECT NATS SEMANTICS):
-	// -1 = unlimited, 0 = disabled/blocked, positive = specific limit
-	MaxSubscriptions     int64           `json:"max_subscriptions"`      // Max subscriptions per user (-1 = unlimited, 0 = disabled, positive = limit)
-	MaxData              int64           `json:"max_data"`               // Data limit in bytes per user (-1 = unlimited, 0 = disabled, positive = limit)
-	MaxPayload           int64           `json:"max_payload"`            // Message size limit per user (-1 = unlimited, 0 = disabled, positive = limit)
+	// Allow permissions (subjects user CAN access)
+	PublishPermissions   json.RawMessage `json:"publish_permissions"`
+	SubscribePermissions json.RawMessage `json:"subscribe_permissions"`
+	
+	// Deny permissions (subjects user CANNOT access - takes precedence over allow)
+	PublishDenyPermissions   json.RawMessage `json:"publish_deny_permissions"`
+	SubscribeDenyPermissions json.RawMessage `json:"subscribe_deny_permissions"`
+	
+	// Response permission for request-reply patterns
+	// When true, allows the user to send responses to requests
+	AllowResponse bool `json:"allow_response"`
+	// Maximum number of responses allowed per request (-1 = unlimited, 0 = default/1)
+	AllowResponseMax int `json:"allow_response_max"`
+	// Response TTL in seconds (0 = no limit/default)
+	AllowResponseTTL int `json:"allow_response_ttl"`
+	
+	// Per-user limits (NATS semantics: -1 = unlimited, 0 = disabled, positive = limit)
+	MaxSubscriptions int64 `json:"max_subscriptions"`
+	MaxData          int64 `json:"max_data"`
+	MaxPayload       int64 `json:"max_payload"`
 }
 
 // SystemOperatorRecord represents the system operator (root of trust).
@@ -153,17 +175,17 @@ type RoleRecord struct {
 // Each pb-nats deployment has exactly one operator. Multiple operators
 // would require more complex key management and are not currently supported.
 type SystemOperatorRecord struct {
-	ID                string    `json:"id"`                  // Database primary key
-	Name              string    `json:"name"`                // Operator name (from configuration)
-	PublicKey         string    `json:"public_key"`          // Operator public key
-	PrivateKey        string    `json:"private_key"`         // Operator private key (plaintext storage)
-	Seed              string    `json:"seed"`                // Operator seed (plaintext storage)
-	SigningPublicKey  string    `json:"signing_public_key"`  // Signing public key (for account JWT validation)
-	SigningPrivateKey string    `json:"signing_private_key"` // Signing private key (plaintext storage)
-	SigningSeed       string    `json:"signing_seed"`        // Signing seed (plaintext storage)
-	JWT               string    `json:"jwt"`                 // Generated operator JWT for NATS server config
-	Created           time.Time `json:"created"`             // Creation timestamp
-	Updated           time.Time `json:"updated"`             // Last update timestamp
+	ID                string    `json:"id"`
+	Name              string    `json:"name"`
+	PublicKey         string    `json:"public_key"`
+	PrivateKey        string    `json:"private_key"`
+	Seed              string    `json:"seed"`
+	SigningPublicKey  string    `json:"signing_public_key"`
+	SigningPrivateKey string    `json:"signing_private_key"`
+	SigningSeed       string    `json:"signing_seed"`
+	JWT               string    `json:"jwt"`
+	Created           time.Time `json:"created"`
+	Updated           time.Time `json:"updated"`
 }
 
 // PublishQueueRecord represents a queued account publish operation for reliability.
@@ -185,14 +207,14 @@ type SystemOperatorRecord struct {
 // Multiple operations for the same account are deduplicated by updating
 // the existing queue record instead of creating duplicates.
 type PublishQueueRecord struct {
-	ID        string     `json:"id"`         // Database primary key
-	AccountID string     `json:"account_id"` // Foreign key to accounts table
-	Action    string     `json:"action"`     // Operation type: "upsert" or "delete"
-	Message   string     `json:"message"`    // Error message for failed operations
-	Attempts  int        `json:"attempts"`   // Retry attempt counter
-	FailedAt  *time.Time `json:"failed_at"`  // Timestamp when marked as permanently failed
-	Created   time.Time  `json:"created"`    // Creation timestamp
-	Updated   time.Time  `json:"updated"`    // Last update timestamp
+	ID        string     `json:"id"`
+	AccountID string     `json:"account_id"`
+	Action    string     `json:"action"`
+	Message   string     `json:"message"`
+	Attempts  int        `json:"attempts"`
+	FailedAt  *time.Time `json:"failed_at"`
+	Created   time.Time  `json:"created"`
+	Updated   time.Time  `json:"updated"`
 }
 
 // RetryConfig defines the retry and failover behavior for NATS connections.
@@ -211,24 +233,14 @@ type PublishQueueRecord struct {
 // When connected to backup server, periodically check primary health
 // at FailbackInterval and switch back when primary recovers.
 type RetryConfig struct {
-	MaxPrimaryRetries int           `json:"max_primary_retries"` // Retries on primary before failover
-	InitialBackoff    time.Duration `json:"initial_backoff"`     // Initial retry delay
-	MaxBackoff        time.Duration `json:"max_backoff"`         // Maximum retry delay
-	BackoffMultiplier float64       `json:"backoff_multiplier"`  // Exponential backoff multiplier
-	FailbackInterval  time.Duration `json:"failback_interval"`   // Primary health check interval
+	MaxPrimaryRetries int           `json:"max_primary_retries"`
+	InitialBackoff    time.Duration `json:"initial_backoff"`
+	MaxBackoff        time.Duration `json:"max_backoff"`
+	BackoffMultiplier float64       `json:"backoff_multiplier"`
+	FailbackInterval  time.Duration `json:"failback_interval"`
 }
 
 // DefaultRetryConfig returns production-ready defaults for retry configuration.
-//
-// DEFAULT VALUES:
-// - 4 primary retries before failover (reasonable for temporary issues)
-// - 1 second initial backoff (responsive but not aggressive)
-// - 8 second max backoff (prevents excessive delays)
-// - 2.0 multiplier (standard exponential backoff)
-// - 30 second failback checks (balances responsiveness and overhead)
-//
-// RETURNS:
-// - RetryConfig with sensible production defaults
 func DefaultRetryConfig() *RetryConfig {
 	return &RetryConfig{
 		MaxPrimaryRetries: 4,
@@ -240,32 +252,13 @@ func DefaultRetryConfig() *RetryConfig {
 }
 
 // TimeoutConfig defines timeout settings for various NATS operations.
-// These timeouts prevent operations from hanging indefinitely.
-//
-// TIMEOUT TYPES:
-// - ConnectTimeout: Maximum time to establish TCP connection
-// - PublishTimeout: Maximum time for publish operations (unused with async)
-// - RequestTimeout: Maximum time to wait for request responses
-//
-// PRODUCTION CONSIDERATIONS:
-// - ConnectTimeout should be short enough for responsive failover
-// - RequestTimeout should accommodate network latency and NATS processing
-// - PublishTimeout mainly affects synchronous publish operations
 type TimeoutConfig struct {
-	ConnectTimeout time.Duration `json:"connect_timeout"` // TCP connection establishment timeout
-	PublishTimeout time.Duration `json:"publish_timeout"` // Publish operation timeout (async operations)
-	RequestTimeout time.Duration `json:"request_timeout"` // Request-response timeout
+	ConnectTimeout time.Duration `json:"connect_timeout"`
+	PublishTimeout time.Duration `json:"publish_timeout"`
+	RequestTimeout time.Duration `json:"request_timeout"`
 }
 
 // DefaultTimeoutConfig returns production-ready defaults for timeout configuration.
-//
-// DEFAULT VALUES:
-// - 5 second connect timeout (responsive failover)
-// - 10 second publish timeout (generous for large JWTs)
-// - 10 second request timeout (accommodates NATS processing)
-//
-// RETURNS:
-// - TimeoutConfig with sensible production defaults
 func DefaultTimeoutConfig() *TimeoutConfig {
 	return &TimeoutConfig{
 		ConnectTimeout: 5 * time.Second,
@@ -275,63 +268,48 @@ func DefaultTimeoutConfig() *TimeoutConfig {
 }
 
 // Options configures the behavior of NATS JWT synchronization.
-// This is the main configuration structure passed to Setup().
-//
-// CONFIGURATION CATEGORIES:
-// - Collection Names: Customize PocketBase collection names
-// - NATS Configuration: Server URLs and connection settings
-// - Connection Management: Retry, timeout, and failover behavior
-// - Performance: Queue processing and debouncing intervals
-// - Security: Default permissions and JWT expiration
-// - Operational: Logging, cleanup, and event filtering
-//
-// CUSTOMIZATION PHILOSOPHY:
-// All aspects of pb-nats behavior can be customized through this options
-// structure, with sensible defaults provided by DefaultOptions().
 type Options struct {
 	// Collection names (customizable for different deployments)
-	UserCollectionName    string // Default: "nats_users"
-	RoleCollectionName    string // Default: "nats_roles"
-	AccountCollectionName string // Default: "nats_accounts"
+	UserCollectionName    string
+	RoleCollectionName    string
+	AccountCollectionName string
 	
 	// NATS server configuration
-	OperatorName              string   // NATS operator name
-	NATSServerURL             string   // Primary NATS server URL
-	BackupNATSServerURLs      []string // Backup server URLs for failover
+	OperatorName         string
+	NATSServerURL        string
+	BackupNATSServerURLs []string
 	
 	// Connection management (nil values use defaults)
-	ConnectionRetryConfig     *RetryConfig  // Retry and failover behavior
-	ConnectionTimeouts        *TimeoutConfig // Connection timeout settings
+	ConnectionRetryConfig *RetryConfig
+	ConnectionTimeouts    *TimeoutConfig
 	
 	// JWT configuration
-	DefaultJWTExpiry          time.Duration // JWT expiration (0 = never expires)
+	DefaultJWTExpiry time.Duration
 	
 	// Performance and reliability
-	PublishQueueInterval time.Duration // Queue processing frequency
-	DebounceInterval     time.Duration // Change debouncing delay
-	LogToConsole         bool          // Enable console logging
+	PublishQueueInterval time.Duration
+	DebounceInterval     time.Duration
+	LogToConsole         bool
 	
-	// Failed record cleanup (prevents unbounded queue growth)
-	FailedRecordCleanupInterval time.Duration // Cleanup job frequency
-	FailedRecordRetentionTime   time.Duration // Failed record retention period
+	// Failed record cleanup
+	FailedRecordCleanupInterval time.Duration
+	FailedRecordRetentionTime   time.Duration
 	
 	// Default permissions applied when role permissions are empty
-	// Note: Account boundaries provide isolation, these are user defaults within accounts
-	DefaultPublishPermissions   []string // Default publish subjects
-	DefaultSubscribePermissions []string // Default subscribe subjects
+	DefaultPublishPermissions   []string
+	DefaultSubscribePermissions []string
 	
 	// Event filtering (optional custom logic)
-	// Return true to process event, false to ignore
 	EventFilter func(collectionName, eventType string) bool
 }
 
 // Collection names with nats_ prefix for clear identification
 const (
-	DefaultAccountCollectionName      = "nats_accounts"         // Account records
-	DefaultUserCollectionName         = "nats_users"            // User records (auth collection)
-	DefaultRoleCollectionName         = "nats_roles"            // Role/permission templates
-	SystemOperatorCollectionName      = "nats_system_operator" // System operator (hidden)
-	PublishQueueCollectionName        = "nats_publish_queue"   // Reliable operation queue (hidden)
+	DefaultAccountCollectionName = "nats_accounts"
+	DefaultUserCollectionName    = "nats_users"
+	DefaultRoleCollectionName    = "nats_roles"
+	SystemOperatorCollectionName = "nats_system_operator"
+	PublishQueueCollectionName   = "nats_publish_queue"
 )
 
 // Default operator name used when not specified
@@ -341,127 +319,96 @@ const (
 
 // Publishing actions for queue operations
 const (
-	PublishActionUpsert = "upsert" // Create or update account in NATS
-	PublishActionDelete = "delete" // Remove account from NATS
+	PublishActionUpsert = "upsert"
+	PublishActionDelete = "delete"
 )
 
 // Event types for logging and filtering
-// These constants enable consistent event classification across components
 const (
-	EventTypeAccountCreate = "account_create" // Account creation events
-	EventTypeAccountUpdate = "account_update" // Account modification events  
-	EventTypeAccountDelete = "account_delete" // Account deletion events
-	EventTypeUserCreate    = "user_create"    // User creation events
-	EventTypeUserUpdate    = "user_update"    // User modification events
-	EventTypeUserDelete    = "user_delete"    // User deletion events
-	EventTypeRoleCreate    = "role_create"    // Role creation events
-	EventTypeRoleUpdate    = "role_update"    // Role modification events
-	EventTypeRoleDelete    = "role_delete"    // Role deletion events
+	EventTypeAccountCreate = "account_create"
+	EventTypeAccountUpdate = "account_update"
+	EventTypeAccountDelete = "account_delete"
+	EventTypeUserCreate    = "user_create"
+	EventTypeUserUpdate    = "user_update"
+	EventTypeUserDelete    = "user_delete"
+	EventTypeRoleCreate    = "role_create"
+	EventTypeRoleUpdate    = "role_update"
+	EventTypeRoleDelete    = "role_delete"
 )
 
 // Standard NATS inbox pattern for request-response
 const (
-	DefaultInboxSubscribe = "_INBOX.>" // Standard NATS inbox pattern
+	DefaultInboxSubscribe = "_INBOX.>"
 )
 
 // Default permission arrays applied when role permissions are empty.
-// These provide reasonable defaults within account isolation boundaries.
-var DefaultPublishPermissions = []string{">"}                    // Full publish access within account
-var DefaultSubscribePermissions = []string{">", "_INBOX.>"}      // Full access + inbox within account
+var DefaultPublishPermissions = []string{">"}
+var DefaultSubscribePermissions = []string{">", "_INBOX.>"}
 
-// System constants to eliminate magic numbers and improve maintainability
+// System constants
 const (
-	DefaultNATSTimeout        = 10 * time.Second // Standard NATS operation timeout
-	DefaultNATSConnectTimeout = 5 * time.Second  // Connection establishment timeout
-	MaxQueueRetries           = 5                // Maximum queue operation retries
-	DefaultJWTCacheSize       = 1000             // JWT cache capacity (future use)
-	MaxQueueAttempts          = 10               // Maximum queue record retry attempts
-	DefaultProcessingTimeout  = 30 * time.Second // Background operation timeout
+	DefaultNATSTimeout        = 10 * time.Second
+	DefaultNATSConnectTimeout = 5 * time.Second
+	MaxQueueRetries           = 5
+	DefaultJWTCacheSize       = 1000
+	MaxQueueAttempts          = 10
+	DefaultProcessingTimeout  = 30 * time.Second
 )
 
-// GetPublishPermissions extracts publish permissions from role's JSON field.
-// This handles the conversion from database JSON storage to Go string slice.
-//
-// JSON PARSING:
-// The database stores permissions as JSON arrays of strings. This method
-// safely parses the JSON and returns a Go slice for permission processing.
-//
-// RETURNS:
-// - []string containing publish subject patterns
-// - error if JSON parsing fails
-//
-// EMPTY HANDLING:
-// Empty or null JSON returns empty slice (not error) - this triggers
-// default permission application in JWT generation.
+// GetPublishPermissions extracts publish allow permissions from role's JSON field.
 func (r *RoleRecord) GetPublishPermissions() ([]string, error) {
 	var permissions []string
 	if len(r.PublishPermissions) == 0 {
 		return permissions, nil
 	}
-	
 	if err := json.Unmarshal(r.PublishPermissions, &permissions); err != nil {
 		return nil, err
 	}
 	return permissions, nil
 }
 
-// GetSubscribePermissions extracts subscribe permissions from role's JSON field.
-// This handles the conversion from database JSON storage to Go string slice.
-//
-// JSON PARSING:
-// The database stores permissions as JSON arrays of strings. This method
-// safely parses the JSON and returns a Go slice for permission processing.
-//
-// RETURNS:
-// - []string containing subscribe subject patterns
-// - error if JSON parsing fails
-//
-// EMPTY HANDLING:
-// Empty or null JSON returns empty slice (not error) - this triggers
-// default permission application in JWT generation.
+// GetSubscribePermissions extracts subscribe allow permissions from role's JSON field.
 func (r *RoleRecord) GetSubscribePermissions() ([]string, error) {
 	var permissions []string
 	if len(r.SubscribePermissions) == 0 {
 		return permissions, nil
 	}
-	
 	if err := json.Unmarshal(r.SubscribePermissions, &permissions); err != nil {
 		return nil, err
 	}
 	return permissions, nil
 }
 
+// GetPublishDenyPermissions extracts publish deny permissions from role's JSON field.
+func (r *RoleRecord) GetPublishDenyPermissions() ([]string, error) {
+	var permissions []string
+	if len(r.PublishDenyPermissions) == 0 {
+		return permissions, nil
+	}
+	if err := json.Unmarshal(r.PublishDenyPermissions, &permissions); err != nil {
+		return nil, err
+	}
+	return permissions, nil
+}
+
+// GetSubscribeDenyPermissions extracts subscribe deny permissions from role's JSON field.
+func (r *RoleRecord) GetSubscribeDenyPermissions() ([]string, error) {
+	var permissions []string
+	if len(r.SubscribeDenyPermissions) == 0 {
+		return permissions, nil
+	}
+	if err := json.Unmarshal(r.SubscribeDenyPermissions, &permissions); err != nil {
+		return nil, err
+	}
+	return permissions, nil
+}
+
 // NormalizeName creates a valid NATS account name from the display name.
-// NATS account names have specific character restrictions that must be enforced.
-//
-// NORMALIZATION RULES:
-// - Convert to lowercase for consistency
-// - Replace spaces and hyphens with underscores
-// - Remove non-alphanumeric characters (except underscores)
-// - Provide fallback for empty results
-//
-// ACCOUNT ISOLATION BENEFIT:
-// Since accounts provide isolation boundaries, normalized names can be simple
-// without complex scoping prefixes. "My Company" → "my_company" is sufficient.
-//
-// PARAMETERS: None (uses a.Name field)
-//
-// RETURNS:
-// - string: Normalized account name safe for NATS
-// - Never returns empty string (uses "unnamed_account" fallback)
-//
-// EXAMPLES:
-// - "My Company" → "my_company"
-// - "Test-Account" → "test_account" 
-// - "Special@#$%Chars" → "specialchars"
-// - "" → "unnamed_account"
 func (a *AccountRecord) NormalizeName() string {
-	// Convert to lowercase and replace spaces/special chars with underscores
 	name := strings.ToLower(a.Name)
 	name = strings.ReplaceAll(name, " ", "_")
 	name = strings.ReplaceAll(name, "-", "_")
 	
-	// Remove any characters that aren't alphanumeric or underscore
 	var result strings.Builder
 	for _, char := range name {
 		if (char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') || char == '_' {
@@ -470,11 +417,8 @@ func (a *AccountRecord) NormalizeName() string {
 	}
 	
 	normalized := result.String()
-	
-	// Ensure it's not empty
 	if normalized == "" {
 		return "unnamed_account"
 	}
-	
 	return normalized
 }
