@@ -46,6 +46,9 @@ func main() {
 	}
 
 	log.Println("✅ NATS JWT sync configured successfully")
+	
+	// Register NATS Commands
+	pbnats.RegisterCommands(app)
 
 	// Setup demo data after the app starts
 	app.OnServe().BindFunc(func(e *core.ServeEvent) error {

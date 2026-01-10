@@ -25,6 +25,9 @@ func main() {
 	if err := pbnats.Setup(app, options); err != nil {
 		log.Fatalf("Failed to setup NATS JWT sync: %v", err)
 	}
+        
+	// Register NATS Commands
+	pbnats.RegisterCommands(app)
 
 	log.Println("✅ PocketBase NATS JWT sync initialized")
 	log.Println("📝 Collections will be auto-created on first startup:")

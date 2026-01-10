@@ -42,6 +42,9 @@ func main() {
         log.Fatalf("Failed to setup NATS sync: %v", err)
     }
     
+    // Register CLI commands for NATS configuration export
+    pbnats.RegisterCommands(app)
+    
     if err := app.Start(); err != nil {
         log.Fatal(err)
     }
@@ -52,12 +55,61 @@ func main() {
 
 **Problem**: Need operator JWT to configure NATS, but pb-nats needs NATS running.
 
-**Solution**: Graceful bootstrap mode:
+**Solution**: Graceful bootstrap mode with CLI export command:
 
-1. **Start PocketBase** (works without NATS)
-2. **Extract operator JWT** from admin interface: Collections → `nats_system_operator`
-3. **Configure NATS** with operator JWT in `nats.conf`
-4. **Start NATS** - pb-nats automatically connects and processes queued operations
+### Step 1: Initialize PocketBase
+```bash
+# Build and run to initialize the database
+./myapp serve
+
+# Create a superuser when prompted, then stop the server (Ctrl+C)
+```
+
+### Step 2: Export NATS Configuration
+```bash
+# Export all configuration files to a directory
+./myapp nats export --output ./nats-config/
+
+# This creates:
+#   ./nats-config/operator.jwt
+#   ./nats-config/operator.conf
+#   ./nats-config/nats.conf
+#   ./nats-config/README.txt
+```
+
+### Step 3: Start NATS Server
+```bash
+cd nats-config
+mkdir -p ./jwt ./storage/jetstream
+nats-server -c nats.conf
+```
+
+### Step 4: Start PocketBase
+```bash
+./myapp serve
+# pb-nats automatically connects and syncs
+```
+
+### CLI Export Options
+```bash
+# Export all files to directory
+./myapp nats export --output ./nats-config/
+
+# Export only operator JWT to stdout (for scripting)
+./myapp nats export --operator-jwt
+
+# Export only nats.conf to stdout
+./myapp nats export --config
+
+# Export only operator.conf to stdout
+./myapp nats export --operator-conf
+
+# Customize server settings
+./myapp nats export --output ./nats-config/ \
+  --server-name my-production-nats \
+  --port 4222 \
+  --jetstream-store /var/lib/nats/jetstream
+```
 
 ## 📋 Collections Schema
 
@@ -261,6 +313,19 @@ options.DefaultJWTExpiry = 0 // Never expires (default)
 
 // Logging
 options.LogToConsole = true
+```
+
+### CLI Command Options
+
+You can customize CLI command defaults:
+
+```go
+pbnats.RegisterCommandsWithOptions(app, pbnats.CommandOptions{
+    DefaultServerName:     "my-nats-server",
+    DefaultPort:           4222,
+    DefaultJetstreamStore: "/var/lib/nats/jetstream",
+    DefaultOutputDir:      "./nats-config",
+})
 ```
 
 ## 🔒 Security Features

@@ -94,6 +94,9 @@ func main() {
 		log.Fatalf("Failed to setup NATS JWT sync: %v", err)
 	}
 	
+	// Register NATS Commands
+	pbnats.RegisterCommands(app)
+
 	log.Println("🏢 Custom collections:", natsOptions.AccountCollectionName, 
 		natsOptions.UserCollectionName, natsOptions.RoleCollectionName)
 	log.Println("🔗 Primary NATS server:", natsOptions.NATSServerURL)
