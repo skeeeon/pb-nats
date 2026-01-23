@@ -3,6 +3,7 @@
 package pbnats
 
 import (
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -401,6 +402,7 @@ func createSystemAccount(app *pocketbase.PocketBase, jwtGen *jwt.Generator, nkey
 
 // createSystemRole creates the system administrator role with full NATS access.
 // System role has response permissions enabled by default.
+// Permission fields use actual JSON arrays (not JSON strings) for JSON field type.
 func createSystemRole(app *pocketbase.PocketBase, options Options, logger *utils.Logger) (string, error) {
 	collection, err := app.FindCollectionByNameOrId(options.RoleCollectionName)
 	if err != nil {
@@ -410,10 +412,13 @@ func createSystemRole(app *pocketbase.PocketBase, options Options, logger *utils
 	record := core.NewRecord(collection)
 	record.Set("name", "system_admin")
 	record.Set("description", "System administrator role with full NATS access")
-	record.Set("publish_permissions", `["$SYS.>", ">"]`)
-	record.Set("subscribe_permissions", `["$SYS.>", ">"]`)
-	record.Set("publish_deny_permissions", "[]")
-	record.Set("subscribe_deny_permissions", "[]")
+	
+	// Set permissions as actual arrays for JSON fields
+	record.Set("publish_permissions", []string{"$SYS.>", ">"})
+	record.Set("subscribe_permissions", []string{"$SYS.>", ">"})
+	record.Set("publish_deny_permissions", []string{})
+	record.Set("subscribe_deny_permissions", []string{})
+	
 	record.Set("is_default", false)
 	
 	// System role has response permissions enabled by default
@@ -558,22 +563,46 @@ func recordToAccountModel(record *core.Record) *pbtypes.AccountRecord {
 }
 
 // recordToRoleModel converts PocketBase role record to internal role model.
-// Updated to include deny permissions and response permission fields.
+// Uses proper JSON marshaling for JSON fields.
 func recordToRoleModel(record *core.Record) *pbtypes.RoleRecord {
-	return &pbtypes.RoleRecord{
-		ID:                       record.Id,
-		Name:                     record.GetString("name"),
-		PublishPermissions:       []byte(record.GetString("publish_permissions")),
-		SubscribePermissions:     []byte(record.GetString("subscribe_permissions")),
-		PublishDenyPermissions:   []byte(record.GetString("publish_deny_permissions")),
-		SubscribeDenyPermissions: []byte(record.GetString("subscribe_deny_permissions")),
-		AllowResponse:            record.GetBool("allow_response"),
-		AllowResponseMax:         record.GetInt("allow_response_max"),
-		AllowResponseTTL:         record.GetInt("allow_response_ttl"),
-		MaxSubscriptions:         int64(record.GetInt("max_subscriptions")),
-		MaxData:                  int64(record.GetInt("max_data")),
-		MaxPayload:               int64(record.GetInt("max_payload")),
+	role := &pbtypes.RoleRecord{
+		ID:               record.Id,
+		Name:             record.GetString("name"),
+		Description:      record.GetString("description"),
+		IsDefault:        record.GetBool("is_default"),
+		AllowResponse:    record.GetBool("allow_response"),
+		AllowResponseMax: record.GetInt("allow_response_max"),
+		AllowResponseTTL: record.GetInt("allow_response_ttl"),
+		MaxSubscriptions: int64(record.GetInt("max_subscriptions")),
+		MaxData:          int64(record.GetInt("max_data")),
+		MaxPayload:       int64(record.GetInt("max_payload")),
+		Created:          record.GetDateTime("created").Time(),
+		Updated:          record.GetDateTime("updated").Time(),
 	}
+
+	// Marshal JSON fields from record.Get() which returns the actual data structure
+	if val := record.Get("publish_permissions"); val != nil {
+		if bytes, err := json.Marshal(val); err == nil {
+			role.PublishPermissions = bytes
+		}
+	}
+	if val := record.Get("subscribe_permissions"); val != nil {
+		if bytes, err := json.Marshal(val); err == nil {
+			role.SubscribePermissions = bytes
+		}
+	}
+	if val := record.Get("publish_deny_permissions"); val != nil {
+		if bytes, err := json.Marshal(val); err == nil {
+			role.PublishDenyPermissions = bytes
+		}
+	}
+	if val := record.Get("subscribe_deny_permissions"); val != nil {
+		if bytes, err := json.Marshal(val); err == nil {
+			role.SubscribeDenyPermissions = bytes
+		}
+	}
+
+	return role
 }
 
 // validateOptions validates the provided options.
@@ -657,7 +686,7 @@ func GetDefaultCollectionNames() (user, role, account string) {
 }
 
 // Version information
-const Version = "1.1.0"
+const Version = "1.2.0"
 
 // GetVersion returns the library version
 func GetVersion() string {

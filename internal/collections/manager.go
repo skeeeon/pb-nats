@@ -122,7 +122,8 @@ func (cm *Manager) createAccountsCollection() error {
 }
 
 // createRolesCollection creates the roles collection for permission templates.
-// Now includes deny permissions and response permission fields.
+// Includes allow/deny permissions stored as JSON arrays, response permission fields,
+// and per-user resource limits.
 func (cm *Manager) createRolesCollection() error {
 	_, err := cm.app.FindCollectionByNameOrId(cm.options.RoleCollectionName)
 	if err == nil {
@@ -143,12 +144,12 @@ func (cm *Manager) createRolesCollection() error {
 	collection.Fields.Add(&core.BoolField{Name: "is_default"})
 	
 	// Allow permission fields (JSON arrays of subjects)
-	collection.Fields.Add(&core.TextField{Name: "publish_permissions", Required: false, Max: 5000})
-	collection.Fields.Add(&core.TextField{Name: "subscribe_permissions", Required: false, Max: 5000})
+	collection.Fields.Add(&core.JSONField{Name: "publish_permissions", Required: false, MaxSize: 5000})
+	collection.Fields.Add(&core.JSONField{Name: "subscribe_permissions", Required: false, MaxSize: 5000})
 	
 	// Deny permission fields (JSON arrays of subjects - takes precedence over allow)
-	collection.Fields.Add(&core.TextField{Name: "publish_deny_permissions", Required: false, Max: 5000})
-	collection.Fields.Add(&core.TextField{Name: "subscribe_deny_permissions", Required: false, Max: 5000})
+	collection.Fields.Add(&core.JSONField{Name: "publish_deny_permissions", Required: false, MaxSize: 5000})
+	collection.Fields.Add(&core.JSONField{Name: "subscribe_deny_permissions", Required: false, MaxSize: 5000})
 	
 	// Response permission fields for request-reply patterns
 	// allow_response: When true, enables response permissions for the user
@@ -162,6 +163,10 @@ func (cm *Manager) createRolesCollection() error {
 	collection.Fields.Add(&core.NumberField{Name: "max_subscriptions", OnlyInt: true, Min: types.Pointer(-1.0)})
 	collection.Fields.Add(&core.NumberField{Name: "max_data", OnlyInt: true, Min: types.Pointer(-1.0)})
 	collection.Fields.Add(&core.NumberField{Name: "max_payload", OnlyInt: true, Min: types.Pointer(-1.0)})
+
+	// Timestamps
+	collection.Fields.Add(&core.AutodateField{Name: "created", OnCreate: true})
+	collection.Fields.Add(&core.AutodateField{Name: "updated", OnCreate: true, OnUpdate: true})
 
 	return cm.app.Save(collection)
 }

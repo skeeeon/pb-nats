@@ -158,6 +158,10 @@ type RoleRecord struct {
 	MaxSubscriptions int64 `json:"max_subscriptions"`
 	MaxData          int64 `json:"max_data"`
 	MaxPayload       int64 `json:"max_payload"`
+
+	// Timestamps
+	Created time.Time `json:"created"`
+	Updated time.Time `json:"updated"`
 }
 
 // SystemOperatorRecord represents the system operator (root of trust).
@@ -357,47 +361,33 @@ const (
 
 // GetPublishPermissions extracts publish allow permissions from role's JSON field.
 func (r *RoleRecord) GetPublishPermissions() ([]string, error) {
-	var permissions []string
-	if len(r.PublishPermissions) == 0 {
-		return permissions, nil
-	}
-	if err := json.Unmarshal(r.PublishPermissions, &permissions); err != nil {
-		return nil, err
-	}
-	return permissions, nil
+	return parseJSONPermissions(r.PublishPermissions)
 }
 
 // GetSubscribePermissions extracts subscribe allow permissions from role's JSON field.
 func (r *RoleRecord) GetSubscribePermissions() ([]string, error) {
-	var permissions []string
-	if len(r.SubscribePermissions) == 0 {
-		return permissions, nil
-	}
-	if err := json.Unmarshal(r.SubscribePermissions, &permissions); err != nil {
-		return nil, err
-	}
-	return permissions, nil
+	return parseJSONPermissions(r.SubscribePermissions)
 }
 
 // GetPublishDenyPermissions extracts publish deny permissions from role's JSON field.
 func (r *RoleRecord) GetPublishDenyPermissions() ([]string, error) {
-	var permissions []string
-	if len(r.PublishDenyPermissions) == 0 {
-		return permissions, nil
-	}
-	if err := json.Unmarshal(r.PublishDenyPermissions, &permissions); err != nil {
-		return nil, err
-	}
-	return permissions, nil
+	return parseJSONPermissions(r.PublishDenyPermissions)
 }
 
 // GetSubscribeDenyPermissions extracts subscribe deny permissions from role's JSON field.
 func (r *RoleRecord) GetSubscribeDenyPermissions() ([]string, error) {
-	var permissions []string
-	if len(r.SubscribeDenyPermissions) == 0 {
-		return permissions, nil
+	return parseJSONPermissions(r.SubscribeDenyPermissions)
+}
+
+// parseJSONPermissions is a helper function to parse JSON permission arrays.
+// Handles empty/nil input gracefully.
+func parseJSONPermissions(data json.RawMessage) ([]string, error) {
+	if len(data) == 0 {
+		return []string{}, nil
 	}
-	if err := json.Unmarshal(r.SubscribeDenyPermissions, &permissions); err != nil {
+	
+	var permissions []string
+	if err := json.Unmarshal(data, &permissions); err != nil {
 		return nil, err
 	}
 	return permissions, nil

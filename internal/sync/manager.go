@@ -2,6 +2,7 @@
 package sync
 
 import (
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -440,22 +441,46 @@ func (sm *Manager) recordToAccountModel(record *core.Record) *pbtypes.AccountRec
 }
 
 // recordToRoleModel converts PocketBase role record to internal role model.
-// Updated to include deny permissions and response permission fields.
+// Uses proper JSON marshaling for JSON fields.
 func (sm *Manager) recordToRoleModel(record *core.Record) *pbtypes.RoleRecord {
-	return &pbtypes.RoleRecord{
-		ID:                       record.Id,
-		Name:                     record.GetString("name"),
-		PublishPermissions:       []byte(record.GetString("publish_permissions")),
-		SubscribePermissions:     []byte(record.GetString("subscribe_permissions")),
-		PublishDenyPermissions:   []byte(record.GetString("publish_deny_permissions")),
-		SubscribeDenyPermissions: []byte(record.GetString("subscribe_deny_permissions")),
-		AllowResponse:            record.GetBool("allow_response"),
-		AllowResponseMax:         record.GetInt("allow_response_max"),
-		AllowResponseTTL:         record.GetInt("allow_response_ttl"),
-		MaxSubscriptions:         int64(record.GetInt("max_subscriptions")),
-		MaxData:                  int64(record.GetInt("max_data")),
-		MaxPayload:               int64(record.GetInt("max_payload")),
+	role := &pbtypes.RoleRecord{
+		ID:               record.Id,
+		Name:             record.GetString("name"),
+		Description:      record.GetString("description"),
+		IsDefault:        record.GetBool("is_default"),
+		AllowResponse:    record.GetBool("allow_response"),
+		AllowResponseMax: record.GetInt("allow_response_max"),
+		AllowResponseTTL: record.GetInt("allow_response_ttl"),
+		MaxSubscriptions: int64(record.GetInt("max_subscriptions")),
+		MaxData:          int64(record.GetInt("max_data")),
+		MaxPayload:       int64(record.GetInt("max_payload")),
+		Created:          record.GetDateTime("created").Time(),
+		Updated:          record.GetDateTime("updated").Time(),
 	}
+
+	// Marshal JSON fields from record.Get() which returns the actual data structure
+	if val := record.Get("publish_permissions"); val != nil {
+		if bytes, err := json.Marshal(val); err == nil {
+			role.PublishPermissions = bytes
+		}
+	}
+	if val := record.Get("subscribe_permissions"); val != nil {
+		if bytes, err := json.Marshal(val); err == nil {
+			role.SubscribePermissions = bytes
+		}
+	}
+	if val := record.Get("publish_deny_permissions"); val != nil {
+		if bytes, err := json.Marshal(val); err == nil {
+			role.PublishDenyPermissions = bytes
+		}
+	}
+	if val := record.Get("subscribe_deny_permissions"); val != nil {
+		if bytes, err := json.Marshal(val); err == nil {
+			role.SubscribeDenyPermissions = bytes
+		}
+	}
+
+	return role
 }
 
 // getSystemOperator retrieves the system operator record for JWT signing operations.
