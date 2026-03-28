@@ -41,7 +41,9 @@ func (g *Generator) GenerateOperatorJWT(operator *pbtypes.SystemOperatorRecord, 
 		operatorClaims.SystemAccount = systemAccountPubKey
 	}
 	
-	operatorClaims.SigningKeys.Add(operator.SigningPublicKey)
+	for _, pubKey := range operator.AllSigningPublicKeys() {
+		operatorClaims.SigningKeys.Add(pubKey)
+	}
 
 	jwtValue, err := operatorClaims.Encode(operatorKP)
 	if err != nil {
@@ -65,7 +67,9 @@ func (g *Generator) GenerateAccountJWT(account *pbtypes.AccountRecord, operatorS
 
 	accountClaims := jwt.NewAccountClaims(account.PublicKey)
 	accountClaims.Name = account.NormalizeName()
-	accountClaims.SigningKeys.Add(account.SigningPublicKey)
+	for _, pubKey := range account.AllSigningPublicKeys() {
+		accountClaims.SigningKeys.Add(pubKey)
+	}
 
 	g.applyAccountLimits(accountClaims, account)
 
@@ -80,7 +84,11 @@ func (g *Generator) GenerateAccountJWT(account *pbtypes.AccountRecord, operatorS
 // GenerateUserJWT generates a NATS user JWT with role-based permissions.
 // Now supports allow permissions, deny permissions, and response permissions.
 func (g *Generator) GenerateUserJWT(user *pbtypes.NatsUserRecord, account *pbtypes.AccountRecord, role *pbtypes.RoleRecord) (string, error) {
-	accountKP, err := g.nkeyManager.KeyPairFromSeed(account.SigningSeed)
+	latestKey := account.LatestSigningKey()
+	if latestKey == nil {
+		return "", fmt.Errorf("account has no signing keys")
+	}
+	accountKP, err := g.nkeyManager.KeyPairFromSeed(latestKey.Seed)
 	if err != nil {
 		return "", fmt.Errorf("failed to create account signing key pair: %w", err)
 	}
@@ -375,7 +383,9 @@ func (g *Generator) GenerateSystemAccountJWT(sysAccount *pbtypes.AccountRecord, 
 
 	accountClaims := jwt.NewAccountClaims(sysAccount.PublicKey)
 	accountClaims.Name = "SYS"
-	accountClaims.SigningKeys.Add(sysAccount.SigningPublicKey)
+	for _, pubKey := range sysAccount.AllSigningPublicKeys() {
+		accountClaims.SigningKeys.Add(pubKey)
+	}
 
 	// System account has special exports for monitoring
 	accountClaims.Exports = jwt.Exports{

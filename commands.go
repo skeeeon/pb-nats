@@ -139,13 +139,7 @@ func getOperatorAndSystemAccount(app *pocketbase.PocketBase) (*pbtypes.SystemOpe
 	}
 
 	record := operatorRecords[0]
-	operator := &pbtypes.SystemOperatorRecord{
-		ID:               record.Id,
-		Name:             record.GetString("name"),
-		PublicKey:        record.GetString("public_key"),
-		SigningPublicKey: record.GetString("signing_public_key"),
-		JWT:              record.GetString("jwt"),
-	}
+	operator := pbtypes.RecordToOperatorModel(record)
 
 	if operator.JWT == "" {
 		return nil, nil, fmt.Errorf("operator JWT is empty - please run the server first to complete initialization")

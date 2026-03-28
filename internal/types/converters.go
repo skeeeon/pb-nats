@@ -3,6 +3,7 @@ package types
 
 import (
 	"encoding/json"
+	"time"
 
 	"github.com/pocketbase/pocketbase/core"
 )
@@ -36,16 +37,13 @@ func RecordToUserModel(record *core.Record) *NatsUserRecord {
 
 // RecordToAccountModel converts a PocketBase account record to an AccountRecord.
 func RecordToAccountModel(record *core.Record) *AccountRecord {
-	return &AccountRecord{
+	account := &AccountRecord{
 		ID:                        record.Id,
 		Name:                      record.GetString("name"),
 		Description:               record.GetString("description"),
 		PublicKey:                 record.GetString("public_key"),
 		PrivateKey:                record.GetString("private_key"),
 		Seed:                      record.GetString("seed"),
-		SigningPublicKey:          record.GetString("signing_public_key"),
-		SigningPrivateKey:         record.GetString("signing_private_key"),
-		SigningSeed:               record.GetString("signing_seed"),
 		JWT:                       record.GetString("jwt"),
 		Active:                    record.GetBool("active"),
 		MaxConnections:            int64(record.GetInt("max_connections")),
@@ -55,6 +53,46 @@ func RecordToAccountModel(record *core.Record) *AccountRecord {
 		MaxJetStreamDiskStorage:   int64(record.GetInt("max_jetstream_disk_storage")),
 		MaxJetStreamMemoryStorage: int64(record.GetInt("max_jetstream_memory_storage")),
 	}
+
+	// Parse signing keys from JSON fields
+	account.SigningKeys, account.SigningKeysPrivate = parseSigningKeysFromRecord(record)
+
+	// Fallback: if no signing_keys_private, try old scalar fields (pre-migration)
+	if len(account.SigningKeysPrivate) == 0 {
+		if pub, priv := signingKeyFromScalarFields(record); priv != nil {
+			account.SigningKeys = []SigningKeyPublic{*pub}
+			account.SigningKeysPrivate = []SigningKeyPrivate{*priv}
+		}
+	}
+
+	return account
+}
+
+// RecordToOperatorModel converts a PocketBase operator record to a SystemOperatorRecord.
+func RecordToOperatorModel(record *core.Record) *SystemOperatorRecord {
+	operator := &SystemOperatorRecord{
+		ID:         record.Id,
+		Name:       record.GetString("name"),
+		PublicKey:  record.GetString("public_key"),
+		PrivateKey: record.GetString("private_key"),
+		Seed:       record.GetString("seed"),
+		JWT:        record.GetString("jwt"),
+		Created:    record.GetDateTime("created").Time(),
+		Updated:    record.GetDateTime("updated").Time(),
+	}
+
+	// Parse signing keys from JSON fields
+	operator.SigningKeys, operator.SigningKeysPrivate = parseSigningKeysFromRecord(record)
+
+	// Fallback: if no signing_keys_private, try old scalar fields (pre-migration)
+	if len(operator.SigningKeysPrivate) == 0 {
+		if pub, priv := signingKeyFromScalarFields(record); priv != nil {
+			operator.SigningKeys = []SigningKeyPublic{*pub}
+			operator.SigningKeysPrivate = []SigningKeyPrivate{*priv}
+		}
+	}
+
+	return operator
 }
 
 // RecordToRoleModel converts a PocketBase role record to a RoleRecord.
@@ -81,6 +119,47 @@ func RecordToRoleModel(record *core.Record) *RoleRecord {
 	marshalJSONField(record, "subscribe_deny_permissions", &role.SubscribeDenyPermissions)
 
 	return role
+}
+
+// parseSigningKeysFromRecord extracts signing key arrays from a PocketBase record's JSON fields.
+func parseSigningKeysFromRecord(record *core.Record) ([]SigningKeyPublic, []SigningKeyPrivate) {
+	var pub []SigningKeyPublic
+	var priv []SigningKeyPrivate
+
+	if val := record.Get("signing_keys"); val != nil {
+		if bytes, err := json.Marshal(val); err == nil {
+			_ = json.Unmarshal(bytes, &pub)
+		}
+	}
+	if val := record.Get("signing_keys_private"); val != nil {
+		if bytes, err := json.Marshal(val); err == nil {
+			_ = json.Unmarshal(bytes, &priv)
+		}
+	}
+
+	return pub, priv
+}
+
+// signingKeyFromScalarFields builds signing key entries from old scalar fields (pre-migration fallback).
+func signingKeyFromScalarFields(record *core.Record) (*SigningKeyPublic, *SigningKeyPrivate) {
+	pubKey := record.GetString("signing_public_key")
+	privKey := record.GetString("signing_private_key")
+	seed := record.GetString("signing_seed")
+
+	if pubKey == "" || seed == "" {
+		return nil, nil
+	}
+
+	now := time.Now()
+	return &SigningKeyPublic{
+			PublicKey: pubKey,
+			CreatedAt: now,
+		}, &SigningKeyPrivate{
+			PublicKey:  pubKey,
+			PrivateKey: privKey,
+			Seed:      seed,
+			CreatedAt: now,
+		}
 }
 
 // marshalJSONField extracts a JSON field from a PocketBase record and marshals it.

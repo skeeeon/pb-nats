@@ -442,17 +442,7 @@ func (p *Manager) getSystemOperator() (*pbtypes.SystemOperatorRecord, error) {
 	}
 
 	record := records[0]
-	operator := &pbtypes.SystemOperatorRecord{
-		ID:                record.Id,
-		Name:              record.GetString("name"),
-		PublicKey:         record.GetString("public_key"),
-		PrivateKey:        record.GetString("private_key"),
-		Seed:              record.GetString("seed"),
-		SigningPublicKey:  record.GetString("signing_public_key"),
-		SigningPrivateKey: record.GetString("signing_private_key"),
-		SigningSeed:       record.GetString("signing_seed"),
-		JWT:               record.GetString("jwt"),
-	}
+	operator := pbtypes.RecordToOperatorModel(record)
 
 	if err := utils.ValidateRequired(operator.PublicKey, "operator public key"); err != nil {
 		return nil, utils.WrapError(err, "invalid system operator")
@@ -460,8 +450,8 @@ func (p *Manager) getSystemOperator() (*pbtypes.SystemOperatorRecord, error) {
 	if err := utils.ValidateRequired(operator.Seed, "operator seed"); err != nil {
 		return nil, utils.WrapError(err, "invalid system operator")
 	}
-	if err := utils.ValidateRequired(operator.SigningSeed, "operator signing seed"); err != nil {
-		return nil, utils.WrapError(err, "invalid system operator")
+	if operator.LatestSigningKey() == nil {
+		return nil, utils.WrapError(fmt.Errorf("operator has no signing keys"), "invalid system operator")
 	}
 
 	return operator, nil

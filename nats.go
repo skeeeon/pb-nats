@@ -179,17 +179,7 @@ func initializeSystemComponents(app *pocketbase.PocketBase, jwtGen *jwt.Generato
 		logger.Success("Created and configured system operator with system account reference")
 	} else {
 		record := operatorRecords[0]
-		operator = &pbtypes.SystemOperatorRecord{
-			ID:                record.Id,
-			Name:              record.GetString("name"),
-			PublicKey:         record.GetString("public_key"),
-			PrivateKey:        record.GetString("private_key"),
-			Seed:              record.GetString("seed"),
-			SigningPublicKey:  record.GetString("signing_public_key"),
-			SigningPrivateKey: record.GetString("signing_private_key"),
-			SigningSeed:       record.GetString("signing_seed"),
-			JWT:               record.GetString("jwt"),
-		}
+		operator = pbtypes.RecordToOperatorModel(record)
 
 		sysAccountRecords, err := app.FindAllRecords(options.AccountCollectionName, dbx.HashExp{"name": "System Account"})
 		if err != nil {
@@ -259,15 +249,23 @@ func createSystemOperatorWithoutJWT(app *pocketbase.PocketBase, nkeyManager *nke
 		return nil, utils.WrapError(err, "failed to get signing private key")
 	}
 
+	signingPub, signingPriv := pbtypes.NewSigningKeyPair(signingPublic, signingPrivateKey, signingKey)
+	pubJSON, privJSON, err := pbtypes.MarshalSigningKeys(
+		[]pbtypes.SigningKeyPublic{signingPub},
+		[]pbtypes.SigningKeyPrivate{signingPriv},
+	)
+	if err != nil {
+		return nil, utils.WrapError(err, "failed to marshal signing keys")
+	}
+
 	operator := &pbtypes.SystemOperatorRecord{
-		Name:              options.OperatorName,
-		PublicKey:         public,
-		PrivateKey:        privateKey,
-		Seed:              seed,
-		SigningPublicKey:  signingPublic,
-		SigningPrivateKey: signingPrivateKey,
-		SigningSeed:       signingKey,
-		JWT:               "",
+		Name:               options.OperatorName,
+		PublicKey:          public,
+		PrivateKey:         privateKey,
+		Seed:               seed,
+		SigningKeys:        []pbtypes.SigningKeyPublic{signingPub},
+		SigningKeysPrivate: []pbtypes.SigningKeyPrivate{signingPriv},
+		JWT:                "",
 	}
 
 	collection, err := app.FindCollectionByNameOrId(pbtypes.SystemOperatorCollectionName)
@@ -280,9 +278,8 @@ func createSystemOperatorWithoutJWT(app *pocketbase.PocketBase, nkeyManager *nke
 	record.Set("public_key", operator.PublicKey)
 	record.Set("private_key", operator.PrivateKey)
 	record.Set("seed", operator.Seed)
-	record.Set("signing_public_key", operator.SigningPublicKey)
-	record.Set("signing_private_key", operator.SigningPrivateKey)
-	record.Set("signing_seed", operator.SigningSeed)
+	record.Set("signing_keys", pubJSON)
+	record.Set("signing_keys_private", privJSON)
 	record.Set("jwt", "")
 
 	if err := app.Save(record); err != nil {
@@ -302,16 +299,7 @@ func updateOperatorJWT(app *pocketbase.PocketBase, jwtGen *jwt.Generator, operat
 		return utils.WrapError(err, "failed to find operator record")
 	}
 
-	operator := &pbtypes.SystemOperatorRecord{
-		ID:                operatorRecord.Id,
-		Name:              operatorRecord.GetString("name"),
-		PublicKey:         operatorRecord.GetString("public_key"),
-		PrivateKey:        operatorRecord.GetString("private_key"),
-		Seed:              operatorRecord.GetString("seed"),
-		SigningPublicKey:  operatorRecord.GetString("signing_public_key"),
-		SigningPrivateKey: operatorRecord.GetString("signing_private_key"),
-		SigningSeed:       operatorRecord.GetString("signing_seed"),
-	}
+	operator := pbtypes.RecordToOperatorModel(operatorRecord)
 
 	jwtValue, err := jwtGen.GenerateOperatorJWT(operator, systemAccountPubKey)
 	if err != nil {
@@ -343,15 +331,16 @@ func createSystemAccount(app *pocketbase.PocketBase, jwtGen *jwt.Generator, nkey
 		return "", "", utils.WrapError(err, "failed to get signing private key")
 	}
 
+	signingPub, signingPriv := pbtypes.NewSigningKeyPair(signingPublic, signingPrivateKey, signingKey)
+
 	sysAccount := &pbtypes.AccountRecord{
 		Name:                      "System Account",
 		Description:               "Automatically created system account for NATS management",
 		PublicKey:                 public,
 		PrivateKey:                privateKey,
 		Seed:                      seed,
-		SigningPublicKey:          signingPublic,
-		SigningPrivateKey:         signingPrivateKey,
-		SigningSeed:               signingKey,
+		SigningKeys:               []pbtypes.SigningKeyPublic{signingPub},
+		SigningKeysPrivate:        []pbtypes.SigningKeyPrivate{signingPriv},
 		Active:                    true,
 		MaxConnections:            -1,
 		MaxSubscriptions:          -1,
@@ -361,7 +350,11 @@ func createSystemAccount(app *pocketbase.PocketBase, jwtGen *jwt.Generator, nkey
 		MaxJetStreamMemoryStorage: -1,
 	}
 
-	jwtValue, err := jwtGen.GenerateSystemAccountJWT(sysAccount, operator.SigningSeed)
+	operatorKey := operator.LatestSigningKey()
+	if operatorKey == nil {
+		return "", "", utils.WrapError(fmt.Errorf("operator has no signing keys"), "invalid operator")
+	}
+	jwtValue, err := jwtGen.GenerateSystemAccountJWT(sysAccount, operatorKey.Seed)
 	if err != nil {
 		return "", "", utils.WrapError(err, "failed to generate system account JWT")
 	}
@@ -375,12 +368,16 @@ func createSystemAccount(app *pocketbase.PocketBase, jwtGen *jwt.Generator, nkey
 	record := core.NewRecord(collection)
 	record.Set("name", sysAccount.Name)
 	record.Set("description", sysAccount.Description)
+	pubJSON, privJSON, err := pbtypes.MarshalSigningKeys(sysAccount.SigningKeys, sysAccount.SigningKeysPrivate)
+	if err != nil {
+		return "", "", utils.WrapError(err, "failed to marshal signing keys")
+	}
+
 	record.Set("public_key", sysAccount.PublicKey)
 	record.Set("private_key", sysAccount.PrivateKey)
 	record.Set("seed", sysAccount.Seed)
-	record.Set("signing_public_key", sysAccount.SigningPublicKey)
-	record.Set("signing_private_key", sysAccount.SigningPrivateKey)
-	record.Set("signing_seed", sysAccount.SigningSeed)
+	record.Set("signing_keys", pubJSON)
+	record.Set("signing_keys_private", privJSON)
 	record.Set("jwt", sysAccount.JWT)
 	record.Set("active", sysAccount.Active)
 	record.Set("max_connections", sysAccount.MaxConnections)

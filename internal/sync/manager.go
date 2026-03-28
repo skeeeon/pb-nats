@@ -99,8 +99,20 @@ func (sm *Manager) setupAccountHooks() {
 			if err := sm.rotateAccountSigningKeys(e.Record); err != nil {
 				return utils.WrapError(err, "failed to rotate account signing keys")
 			}
-			sm.logger.Info("Signing keys rotated for account %s - all user JWTs in this account are now invalid", 
+			sm.logger.Info("Signing keys rotated for account %s - all user JWTs in this account are now invalid",
 				e.Record.GetString("name"))
+		} else if e.Record.GetBool("add_signing_key") {
+			e.Record.Set("add_signing_key", false)
+			if err := sm.addAccountSigningKey(e.Record); err != nil {
+				return utils.WrapError(err, "failed to add account signing key")
+			}
+			sm.logger.Info("New signing key added to account %s", e.Record.GetString("name"))
+		} else if removeKey := e.Record.GetString("remove_signing_key"); removeKey != "" {
+			e.Record.Set("remove_signing_key", "")
+			if err := sm.removeAccountSigningKey(e.Record, removeKey); err != nil {
+				return utils.WrapError(err, "failed to remove account signing key")
+			}
+			sm.logger.Info("Signing key removed from account %s", e.Record.GetString("name"))
 		} else {
 			if err := sm.generateAccountJWT(e.Record); err != nil {
 				return utils.WrapError(err, "failed to regenerate account JWT")
@@ -247,20 +259,112 @@ func (sm *Manager) rotateAccountSigningKeys(record *core.Record) error {
 		return utils.WrapError(err, "failed to get signing private key from seed")
 	}
 
-	oldSigningPublicKey := record.GetString("signing_public_key")
+	// Emergency rotation: replace entire array with single new key
+	pub, priv := pbtypes.NewSigningKeyPair(signingPublic, signingPrivateKey, signingKey)
+	pubJSON, privJSON, err := pbtypes.MarshalSigningKeys(
+		[]pbtypes.SigningKeyPublic{pub},
+		[]pbtypes.SigningKeyPrivate{priv},
+	)
+	if err != nil {
+		return utils.WrapError(err, "failed to marshal signing keys")
+	}
 
-	record.Set("signing_public_key", signingPublic)
-	record.Set("signing_private_key", signingPrivateKey)
-	record.Set("signing_seed", signingKey)
+	record.Set("signing_keys", pubJSON)
+	record.Set("signing_keys_private", privJSON)
 
 	if err := sm.generateAccountJWT(record); err != nil {
 		return utils.WrapError(err, "failed to regenerate account JWT with new signing keys")
 	}
 
 	sm.logger.Success("Account signing keys rotated successfully for %s", record.GetString("name"))
-	sm.logger.Info("   Old signing key: %s", utils.TruncateString(oldSigningPublicKey, 20))
 	sm.logger.Info("   New signing key: %s", utils.TruncateString(signingPublic, 20))
-	sm.logger.Warning("   All user JWTs in this account are now invalid and must be regenerated")
+	sm.logger.Warning("   All previous signing keys removed — user JWTs signed with old keys are now invalid")
+
+	return nil
+}
+
+// addAccountSigningKey generates a new signing key and appends it to the account's key array.
+// The new key becomes the latest (used for signing new user JWTs). Existing keys remain valid.
+func (sm *Manager) addAccountSigningKey(record *core.Record) error {
+	_, _, signingKey, signingPublic, err := sm.nkeyManager.GenerateAccountKeyPair()
+	if err != nil {
+		return utils.WrapError(err, "failed to generate new account signing key pair")
+	}
+
+	signingPrivateKey, err := sm.nkeyManager.GetPrivateKeyFromSeed(signingKey)
+	if err != nil {
+		return utils.WrapError(err, "failed to get signing private key from seed")
+	}
+
+	// Parse existing keys
+	account := pbtypes.RecordToAccountModel(record)
+
+	newPub, newPriv := pbtypes.NewSigningKeyPair(signingPublic, signingPrivateKey, signingKey)
+	pubKeys := append(account.SigningKeys, newPub)
+	privKeys := append(account.SigningKeysPrivate, newPriv)
+
+	pubJSON, privJSON, err := pbtypes.MarshalSigningKeys(pubKeys, privKeys)
+	if err != nil {
+		return utils.WrapError(err, "failed to marshal signing keys")
+	}
+
+	record.Set("signing_keys", pubJSON)
+	record.Set("signing_keys_private", privJSON)
+
+	if err := sm.generateAccountJWT(record); err != nil {
+		return utils.WrapError(err, "failed to regenerate account JWT")
+	}
+
+	sm.logger.Info("   New signing key: %s (now %d total keys)", utils.TruncateString(signingPublic, 20), len(pubKeys))
+
+	return nil
+}
+
+// removeAccountSigningKey removes a specific signing key from the account's key array.
+// Fails if the key is the only one remaining.
+func (sm *Manager) removeAccountSigningKey(record *core.Record, publicKeyToRemove string) error {
+	account := pbtypes.RecordToAccountModel(record)
+
+	if len(account.SigningKeysPrivate) <= 1 {
+		return fmt.Errorf("cannot remove the only signing key — use rotate_keys for emergency replacement")
+	}
+
+	// Filter out the key to remove
+	var newPub []pbtypes.SigningKeyPublic
+	var newPriv []pbtypes.SigningKeyPrivate
+	found := false
+
+	for _, k := range account.SigningKeys {
+		if k.PublicKey != publicKeyToRemove {
+			newPub = append(newPub, k)
+		} else {
+			found = true
+		}
+	}
+	for _, k := range account.SigningKeysPrivate {
+		if k.PublicKey != publicKeyToRemove {
+			newPriv = append(newPriv, k)
+		}
+	}
+
+	if !found {
+		return fmt.Errorf("signing key %s not found on this account", utils.TruncateString(publicKeyToRemove, 20))
+	}
+
+	pubJSON, privJSON, err := pbtypes.MarshalSigningKeys(newPub, newPriv)
+	if err != nil {
+		return utils.WrapError(err, "failed to marshal signing keys")
+	}
+
+	record.Set("signing_keys", pubJSON)
+	record.Set("signing_keys_private", privJSON)
+
+	if err := sm.generateAccountJWT(record); err != nil {
+		return utils.WrapError(err, "failed to regenerate account JWT")
+	}
+
+	sm.logger.Info("   Removed signing key: %s (now %d total keys)", utils.TruncateString(publicKeyToRemove, 20), len(newPub))
+	sm.logger.Warning("   User JWTs signed with the removed key are now invalid")
 
 	return nil
 }
@@ -317,9 +421,17 @@ func (sm *Manager) generateAccountKeys(record *core.Record) error {
 	record.Set("public_key", public)
 	record.Set("private_key", privateKey)
 	record.Set("seed", seed)
-	record.Set("signing_public_key", signingPublic)
-	record.Set("signing_private_key", signingPrivateKey)
-	record.Set("signing_seed", signingKey)
+
+	pub, priv := pbtypes.NewSigningKeyPair(signingPublic, signingPrivateKey, signingKey)
+	pubJSON, privJSON, err := pbtypes.MarshalSigningKeys(
+		[]pbtypes.SigningKeyPublic{pub},
+		[]pbtypes.SigningKeyPrivate{priv},
+	)
+	if err != nil {
+		return utils.WrapError(err, "failed to marshal signing keys")
+	}
+	record.Set("signing_keys", pubJSON)
+	record.Set("signing_keys_private", privJSON)
 
 	return sm.generateAccountJWT(record)
 }
@@ -333,7 +445,12 @@ func (sm *Manager) generateAccountJWT(record *core.Record) error {
 
 	account := pbtypes.RecordToAccountModel(record)
 
-	jwtValue, err := sm.jwtGen.GenerateAccountJWT(account, operator.SigningSeed)
+	latestKey := operator.LatestSigningKey()
+	if latestKey == nil {
+		return utils.WrapError(fmt.Errorf("operator has no signing keys"), "invalid system operator")
+	}
+
+	jwtValue, err := sm.jwtGen.GenerateAccountJWT(account, latestKey.Seed)
 	if err != nil {
 		return utils.WrapError(err, "failed to generate account JWT")
 	}
@@ -417,18 +534,13 @@ func (sm *Manager) getSystemOperator() (*pbtypes.SystemOperatorRecord, error) {
 	}
 
 	record := records[0]
-	operator := &pbtypes.SystemOperatorRecord{
-		ID:          record.Id,
-		Name:        record.GetString("name"),
-		PublicKey:   record.GetString("public_key"),
-		SigningSeed: record.GetString("signing_seed"),
-	}
+	operator := pbtypes.RecordToOperatorModel(record)
 
 	if err := utils.ValidateRequired(operator.PublicKey, "operator public key"); err != nil {
 		return nil, utils.WrapError(err, "invalid system operator")
 	}
-	if err := utils.ValidateRequired(operator.SigningSeed, "operator signing seed"); err != nil {
-		return nil, utils.WrapError(err, "invalid system operator")
+	if operator.LatestSigningKey() == nil {
+		return nil, utils.WrapError(fmt.Errorf("operator has no signing keys"), "invalid system operator")
 	}
 
 	return operator, nil

@@ -225,7 +225,7 @@ func (m *Manager) GenerateUserKeyPair() (seed, public string, err error) {
 //
 // USAGE PATTERN:
 // This method is typically called before JWT signing operations:
-//   kp, err := manager.KeyPairFromSeed(account.SigningSeed)
+//   kp, err := manager.KeyPairFromSeed(account.LatestSigningKey().Seed)
 //   jwt, err := userClaims.Encode(kp)
 //
 // PARAMETERS:

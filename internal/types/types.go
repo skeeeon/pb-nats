@@ -3,9 +3,50 @@ package types
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 )
+
+// SigningKeyPublic is the API-visible portion of a signing key.
+// Contains only public key and metadata — safe to expose via REST API.
+type SigningKeyPublic struct {
+	PublicKey string    `json:"public_key"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// SigningKeyPrivate contains the full key material for JWT signing.
+// This data is stored in a hidden field and never exposed via API.
+type SigningKeyPrivate struct {
+	PublicKey  string    `json:"public_key"`
+	PrivateKey string    `json:"private_key"`
+	Seed      string    `json:"seed"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// ParseSigningKeysPublic parses a JSON array of public signing keys.
+func ParseSigningKeysPublic(data json.RawMessage) ([]SigningKeyPublic, error) {
+	if len(data) == 0 {
+		return nil, nil
+	}
+	var keys []SigningKeyPublic
+	if err := json.Unmarshal(data, &keys); err != nil {
+		return nil, err
+	}
+	return keys, nil
+}
+
+// ParseSigningKeysPrivate parses a JSON array of private signing keys.
+func ParseSigningKeysPrivate(data json.RawMessage) ([]SigningKeyPrivate, error) {
+	if len(data) == 0 {
+		return nil, nil
+	}
+	var keys []SigningKeyPrivate
+	if err := json.Unmarshal(data, &keys); err != nil {
+		return nil, err
+	}
+	return keys, nil
+}
 
 // AccountRecord represents a NATS account that provides isolation boundary for users.
 // Accounts are the fundamental unit of tenant isolation in NATS - users within an
@@ -18,12 +59,14 @@ import (
 //
 // KEY ARCHITECTURE:
 // - Main key pair: Account identity (public key is the account identifier)
-// - Signing key pair: Used to sign user JWTs within this account
+// - Signing keys: Multiple signing keys supported, all embedded in account JWT
+// - The most recently added key (last in array) signs new user JWTs
 // - JWT: Account definition published to NATS server
 //
-// SIGNING KEY ROTATION:
-// The rotate_keys field triggers emergency key rotation that immediately
-// invalidates all user JWTs in the account (they were signed with old key).
+// SIGNING KEY MANAGEMENT:
+// - add_signing_key: Generates and appends a new signing key (graceful rotation)
+// - remove_signing_key: Removes a specific key by public key
+// - rotate_keys: Emergency rotation — purges all keys, generates single new one
 //
 // ACCOUNT LIMITS (FIXED - CORRECT NATS SEMANTICS):
 // Account-level limits control resources across the entire account:
@@ -43,12 +86,11 @@ type AccountRecord struct {
 	PublicKey         string    `json:"public_key"`
 	PrivateKey        string    `json:"private_key"`
 	Seed              string    `json:"seed"`
-	SigningPublicKey  string    `json:"signing_public_key"`
-	SigningPrivateKey string    `json:"signing_private_key"`
-	SigningSeed       string    `json:"signing_seed"`
-	JWT               string    `json:"jwt"`
-	Active            bool      `json:"active"`
-	RotateKeys        bool      `json:"rotate_keys"`
+	SigningKeys        []SigningKeyPublic  `json:"signing_keys"`
+	SigningKeysPrivate []SigningKeyPrivate `json:"signing_keys_private"`
+	JWT               string              `json:"jwt"`
+	Active            bool                `json:"active"`
+	RotateKeys        bool                `json:"rotate_keys"`
 	
 	// Account-level limits (NATS semantics: -1 = unlimited, 0 = disabled, positive = limit)
 	MaxConnections            int64 `json:"max_connections"`
@@ -185,17 +227,79 @@ type RoleRecord struct {
 // Each pb-nats deployment has exactly one operator. Multiple operators
 // would require more complex key management and are not currently supported.
 type SystemOperatorRecord struct {
-	ID                string    `json:"id"`
-	Name              string    `json:"name"`
-	PublicKey         string    `json:"public_key"`
-	PrivateKey        string    `json:"private_key"`
-	Seed              string    `json:"seed"`
-	SigningPublicKey  string    `json:"signing_public_key"`
-	SigningPrivateKey string    `json:"signing_private_key"`
-	SigningSeed       string    `json:"signing_seed"`
-	JWT               string    `json:"jwt"`
-	Created           time.Time `json:"created"`
-	Updated           time.Time `json:"updated"`
+	ID                 string              `json:"id"`
+	Name               string              `json:"name"`
+	PublicKey          string              `json:"public_key"`
+	PrivateKey         string              `json:"private_key"`
+	Seed               string              `json:"seed"`
+	SigningKeys        []SigningKeyPublic  `json:"signing_keys"`
+	SigningKeysPrivate []SigningKeyPrivate `json:"signing_keys_private"`
+	JWT                string              `json:"jwt"`
+	Created            time.Time           `json:"created"`
+	Updated            time.Time           `json:"updated"`
+}
+
+// LatestSigningKey returns the most recently added signing key (last in array).
+// This is the key used to sign new account JWTs.
+func (o *SystemOperatorRecord) LatestSigningKey() *SigningKeyPrivate {
+	if len(o.SigningKeysPrivate) == 0 {
+		return nil
+	}
+	return &o.SigningKeysPrivate[len(o.SigningKeysPrivate)-1]
+}
+
+// AllSigningPublicKeys returns all signing public keys for JWT embedding.
+func (o *SystemOperatorRecord) AllSigningPublicKeys() []string {
+	keys := make([]string, len(o.SigningKeys))
+	for i, k := range o.SigningKeys {
+		keys[i] = k.PublicKey
+	}
+	return keys
+}
+
+// LatestSigningKey returns the most recently added signing key (last in array).
+// This is the key used to sign new user JWTs within this account.
+func (a *AccountRecord) LatestSigningKey() *SigningKeyPrivate {
+	if len(a.SigningKeysPrivate) == 0 {
+		return nil
+	}
+	return &a.SigningKeysPrivate[len(a.SigningKeysPrivate)-1]
+}
+
+// AllSigningPublicKeys returns all signing public keys for JWT embedding.
+func (a *AccountRecord) AllSigningPublicKeys() []string {
+	keys := make([]string, len(a.SigningKeys))
+	for i, k := range a.SigningKeys {
+		keys[i] = k.PublicKey
+	}
+	return keys
+}
+
+// NewSigningKeyPair creates a matched pair of public and private signing key entries.
+func NewSigningKeyPair(publicKey, privateKey, seed string) (SigningKeyPublic, SigningKeyPrivate) {
+	now := time.Now()
+	return SigningKeyPublic{
+			PublicKey: publicKey,
+			CreatedAt: now,
+		}, SigningKeyPrivate{
+			PublicKey:  publicKey,
+			PrivateKey: privateKey,
+			Seed:      seed,
+			CreatedAt: now,
+		}
+}
+
+// MarshalSigningKeys marshals signing key slices to JSON for record storage.
+func MarshalSigningKeys(pub []SigningKeyPublic, priv []SigningKeyPrivate) (json.RawMessage, json.RawMessage, error) {
+	pubJSON, err := json.Marshal(pub)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to marshal public signing keys: %w", err)
+	}
+	privJSON, err := json.Marshal(priv)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to marshal private signing keys: %w", err)
+	}
+	return pubJSON, privJSON, nil
 }
 
 // PublishQueueRecord represents a queued account publish operation for reliability.

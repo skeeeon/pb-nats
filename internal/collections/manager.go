@@ -2,7 +2,9 @@
 package collections
 
 import (
+	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/pocketbase/pocketbase"
 	"github.com/pocketbase/pocketbase/core"
@@ -41,6 +43,12 @@ func (cm *Manager) InitializeCollections() error {
 	if err := cm.ensureUserPermissionFields(); err != nil {
 		return fmt.Errorf("failed to ensure user permission fields: %w", err)
 	}
+	if err := cm.ensureOperatorSigningKeysFields(); err != nil {
+		return fmt.Errorf("failed to ensure operator signing keys fields: %w", err)
+	}
+	if err := cm.ensureAccountSigningKeysFields(); err != nil {
+		return fmt.Errorf("failed to ensure account signing keys fields: %w", err)
+	}
 	if err := cm.createPublishQueueCollection(); err != nil {
 		return fmt.Errorf("failed to create publish queue collection: %w", err)
 	}
@@ -67,9 +75,8 @@ func (cm *Manager) createSystemOperatorCollection() error {
 	collection.Fields.Add(&core.TextField{Name: "public_key", Required: true, Max: 200})
 	collection.Fields.Add(&core.TextField{Name: "private_key", Required: true, Max: 200})
 	collection.Fields.Add(&core.TextField{Name: "seed", Required: true, Max: 200})
-	collection.Fields.Add(&core.TextField{Name: "signing_public_key", Required: true, Max: 200})
-	collection.Fields.Add(&core.TextField{Name: "signing_private_key", Required: true, Max: 200})
-	collection.Fields.Add(&core.TextField{Name: "signing_seed", Required: true, Max: 200})
+	collection.Fields.Add(&core.JSONField{Name: "signing_keys", Required: false, MaxSize: 10000})
+	collection.Fields.Add(&core.JSONField{Name: "signing_keys_private", Required: false, MaxSize: 10000, Hidden: true})
 	collection.Fields.Add(&core.TextField{Name: "jwt", Max: 5000})
 	collection.Fields.Add(&core.AutodateField{Name: "created", OnCreate: true})
 	collection.Fields.Add(&core.AutodateField{Name: "updated", OnCreate: true, OnUpdate: true})
@@ -100,14 +107,15 @@ func (cm *Manager) createAccountsCollection() error {
 	collection.Fields.Add(&core.TextField{Name: "public_key", Max: 200})
 	collection.Fields.Add(&core.TextField{Name: "private_key", Max: 200})
 	collection.Fields.Add(&core.TextField{Name: "seed", Max: 200})
-	collection.Fields.Add(&core.TextField{Name: "signing_public_key", Max: 200})
-	collection.Fields.Add(&core.TextField{Name: "signing_private_key", Max: 200})
-	collection.Fields.Add(&core.TextField{Name: "signing_seed", Max: 200})
+	collection.Fields.Add(&core.JSONField{Name: "signing_keys", Required: false, MaxSize: 10000})
+	collection.Fields.Add(&core.JSONField{Name: "signing_keys_private", Required: false, MaxSize: 10000, Hidden: true})
 	collection.Fields.Add(&core.TextField{Name: "jwt", Max: 5000})
-	
+
 	// Management fields
 	collection.Fields.Add(&core.BoolField{Name: "active"})
 	collection.Fields.Add(&core.BoolField{Name: "rotate_keys"})
+	collection.Fields.Add(&core.BoolField{Name: "add_signing_key"})
+	collection.Fields.Add(&core.TextField{Name: "remove_signing_key", Max: 200})
 	
 	// Account-level limits (-1 = unlimited, 0 = disabled, positive = limit)
 	collection.Fields.Add(&core.NumberField{Name: "max_connections", OnlyInt: true, Min: types.Pointer(-1.0)})
@@ -302,4 +310,94 @@ func (cm *Manager) ensureUserPermissionFields() error {
 	collection.Fields.Add(&core.JSONField{Name: "subscribe_deny_permissions", Required: false, MaxSize: 5000})
 
 	return cm.app.Save(collection)
+}
+
+// ensureOperatorSigningKeysFields migrates the operator collection from scalar signing key
+// fields to JSON array fields. For existing deployments with the old schema.
+func (cm *Manager) ensureOperatorSigningKeysFields() error {
+	collection, err := cm.app.FindCollectionByNameOrId(pbtypes.SystemOperatorCollectionName)
+	if err != nil {
+		return nil // Collection doesn't exist yet
+	}
+
+	if collection.Fields.GetByName("signing_keys") != nil {
+		return cm.migrateSigningKeyData(pbtypes.SystemOperatorCollectionName)
+	}
+
+	collection.Fields.Add(&core.JSONField{Name: "signing_keys", Required: false, MaxSize: 10000})
+	collection.Fields.Add(&core.JSONField{Name: "signing_keys_private", Required: false, MaxSize: 10000, Hidden: true})
+
+	if err := cm.app.Save(collection); err != nil {
+		return err
+	}
+
+	return cm.migrateSigningKeyData(pbtypes.SystemOperatorCollectionName)
+}
+
+// ensureAccountSigningKeysFields migrates the accounts collection from scalar signing key
+// fields to JSON array fields. Also adds trigger fields for key management.
+func (cm *Manager) ensureAccountSigningKeysFields() error {
+	collection, err := cm.app.FindCollectionByNameOrId(cm.options.AccountCollectionName)
+	if err != nil {
+		return nil // Collection doesn't exist yet
+	}
+
+	if collection.Fields.GetByName("signing_keys") != nil {
+		return cm.migrateSigningKeyData(cm.options.AccountCollectionName)
+	}
+
+	collection.Fields.Add(&core.JSONField{Name: "signing_keys", Required: false, MaxSize: 10000})
+	collection.Fields.Add(&core.JSONField{Name: "signing_keys_private", Required: false, MaxSize: 10000, Hidden: true})
+	collection.Fields.Add(&core.BoolField{Name: "add_signing_key"})
+	collection.Fields.Add(&core.TextField{Name: "remove_signing_key", Max: 200})
+
+	if err := cm.app.Save(collection); err != nil {
+		return err
+	}
+
+	return cm.migrateSigningKeyData(cm.options.AccountCollectionName)
+}
+
+// migrateSigningKeyData converts existing records from scalar signing key fields to JSON arrays.
+func (cm *Manager) migrateSigningKeyData(collectionName string) error {
+	records, err := cm.app.FindAllRecords(collectionName)
+	if err != nil {
+		return nil // No records to migrate
+	}
+
+	for _, record := range records {
+		// Skip if already has signing_keys_private data
+		if val := record.Get("signing_keys_private"); val != nil {
+			if bytes, err := json.Marshal(val); err == nil && len(bytes) > 2 {
+				continue
+			}
+		}
+
+		// Read old scalar fields
+		pubKey := record.GetString("signing_public_key")
+		privKey := record.GetString("signing_private_key")
+		seed := record.GetString("signing_seed")
+
+		if pubKey == "" || seed == "" {
+			continue
+		}
+
+		now := time.Now()
+		pub := []pbtypes.SigningKeyPublic{{PublicKey: pubKey, CreatedAt: now}}
+		priv := []pbtypes.SigningKeyPrivate{{PublicKey: pubKey, PrivateKey: privKey, Seed: seed, CreatedAt: now}}
+
+		pubJSON, privJSON, err := pbtypes.MarshalSigningKeys(pub, priv)
+		if err != nil {
+			continue
+		}
+
+		record.Set("signing_keys", pubJSON)
+		record.Set("signing_keys_private", privJSON)
+
+		if err := cm.app.Save(record); err != nil {
+			return fmt.Errorf("failed to migrate signing keys for record %s: %w", record.Id, err)
+		}
+	}
+
+	return nil
 }

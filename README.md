@@ -9,7 +9,7 @@ A high-performance library for seamless integration between [PocketBase](https:/
 - **🏢 Account-Based Architecture**: Natural isolation boundaries without subject scoping
 - **🥾 Graceful Bootstrap**: Starts without NATS, connects when available (solves chicken-and-egg problem)
 - **🔗 Persistent Connections**: Single connection with automatic failover and intelligent failback
-- **🔒 Security Features**: Account signing key rotation with immediate user JWT invalidation
+- **🔒 Security Features**: Multiple signing keys per account with graceful and emergency rotation
 - **⚡ Queue-Based Publishing**: Reliable operations with retry logic and automatic cleanup
 - **🔑 Simple Regeneration**: JWT refresh via boolean field triggers
 - **📊 Account Limits**: Configurable resource limits at both account and user levels
@@ -123,9 +123,8 @@ nats-server -c nats.conf
 | `public_key` | Text | Operator public key |
 | `private_key` | Text | Operator private key |
 | `seed` | Text | Operator seed |
-| `signing_public_key` | Text | Signing public key |
-| `signing_private_key` | Text | Signing private key |
-| `signing_seed` | Text | Signing seed |
+| `signing_keys` | JSON | Array of signing public keys and metadata (API-visible) |
+| `signing_keys_private` | JSON | Array of full signing key material (hidden from API) |
 | `jwt` | Text | **Operator JWT for NATS configuration** |
 
 ### Accounts (`nats_accounts`)
@@ -138,12 +137,13 @@ nats-server -c nats.conf
 | `public_key` | Text | Account public key |
 | `private_key` | Text | Account private key |
 | `seed` | Text | Account seed |
-| `signing_public_key` | Text | Account signing public key |
-| `signing_private_key` | Text | Account signing private key |
-| `signing_seed` | Text | Account signing seed |
+| `signing_keys` | JSON | Array of signing public keys and metadata (API-visible) |
+| `signing_keys_private` | JSON | Array of full signing key material (hidden from API) |
 | `jwt` | Text | Account JWT |
 | `active` | Boolean | Account status |
-| `rotate_keys` | Boolean | **Triggers signing key rotation** |
+| `add_signing_key` | Boolean | **Triggers new signing key generation (graceful rotation)** |
+| `remove_signing_key` | Text | **Public key to remove from signing keys** |
+| `rotate_keys` | Boolean | **Emergency rotation — purges all keys, generates new one** |
 | `max_connections` | Number | Max concurrent connections (-1 = unlimited, 0 = disabled) |
 | `max_subscriptions` | Number | Max subscriptions across account (-1 = unlimited, 0 = disabled) |
 | `max_data` | Number | Max bytes in-flight across account (-1 = unlimited, 0 = disabled) |
@@ -367,16 +367,41 @@ pbnats.RegisterCommandsWithOptions(app, pbnats.CommandOptions{
 
 ## 🔒 Security Features
 
-### Account Signing Key Rotation
+### Multiple Signing Keys
 
-Immediate response for security incidents:
+Accounts support multiple signing keys simultaneously. All signing public keys are embedded in the account JWT, so NATS validates user JWTs signed by any of them. The most recently added key is used to sign new user JWTs.
 
+This enables **graceful key rotation** — add a new key, let existing JWTs remain valid, then remove the old key when ready.
+
+### Signing Key Management
+
+**Add a new signing key (graceful rotation):**
+```http
+PATCH /api/collections/nats_accounts/records/{account_id}
+{"add_signing_key": true}
+```
+Generates a new signing key and appends it. Existing user JWTs remain valid. New user JWTs will be signed with the new key.
+
+**Remove an old signing key:**
+```http
+PATCH /api/collections/nats_accounts/records/{account_id}
+{"remove_signing_key": "AABC...the_public_key_to_remove"}
+```
+Removes the specified key. User JWTs signed by the removed key become invalid. Cannot remove the only remaining key.
+
+**Emergency rotation (hard cutover):**
 ```http
 PATCH /api/collections/nats_accounts/records/{account_id}
 {"rotate_keys": true}
 ```
+Purges all existing signing keys and generates a single new one. All user JWTs in the account are immediately invalidated. User JWT regeneration is a separate, explicit action.
 
-All user JWTs in the account are immediately invalidated.
+### Graceful Rotation Workflow
+
+1. Add a new signing key: `{"add_signing_key": true}`
+2. New user JWTs are signed with the new key; old JWTs still work
+3. Regenerate user JWTs at your own pace (via `regenerate` flag on each user)
+4. Remove the old key when ready: `{"remove_signing_key": "OLD_PUBLIC_KEY"}`
 
 ## 🌐 API Usage
 
@@ -471,6 +496,12 @@ Accounts provide natural boundaries - no subject scoping needed:
 - Ensure `allow_response` is set to `true` on the role
 - Check `allow_response_max` isn't set to `0` (which uses default of 1)
 - Verify `allow_response_ttl` isn't expiring before response is sent
+
+**Signing Key Issues:**
+- After emergency rotation (`rotate_keys`), all user JWTs are invalid — regenerate them explicitly
+- After removing a signing key, only JWTs signed by that specific key are invalidated
+- The `signing_keys` field (API-visible) shows public keys only; private material is in the hidden `signing_keys_private` field
+- Existing deployments are automatically migrated from old scalar signing key fields on startup
 
 **Resource Limits:**
 - Use `-1` for unlimited resources
