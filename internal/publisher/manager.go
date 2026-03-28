@@ -294,7 +294,7 @@ func (p *Manager) processQueueRecord(record *core.Record) error {
 		return p.app.Delete(record)
 	}
 
-	accountRecord := p.recordToAccountModel(account)
+	accountRecord := pbtypes.RecordToAccountModel(account)
 
 	var processErr error
 	switch action {
@@ -429,29 +429,6 @@ func (p *Manager) validateAccount(account *pbtypes.AccountRecord) error {
 		return fmt.Errorf("account %s has invalid name", account.Name)
 	}
 	return nil
-}
-
-// recordToAccountModel converts PocketBase record to internal account model.
-func (p *Manager) recordToAccountModel(record *core.Record) *pbtypes.AccountRecord {
-	return &pbtypes.AccountRecord{
-		ID:                        record.Id,
-		Name:                      record.GetString("name"),
-		Description:               record.GetString("description"),
-		PublicKey:                 record.GetString("public_key"),
-		PrivateKey:                record.GetString("private_key"),
-		Seed:                      record.GetString("seed"),
-		SigningPublicKey:          record.GetString("signing_public_key"),
-		SigningPrivateKey:         record.GetString("signing_private_key"),
-		SigningSeed:               record.GetString("signing_seed"),
-		JWT:                       record.GetString("jwt"),
-		Active:                    record.GetBool("active"),
-		MaxConnections:            int64(record.GetInt("max_connections")),
-		MaxSubscriptions:          int64(record.GetInt("max_subscriptions")),
-		MaxData:                   int64(record.GetInt("max_data")),
-		MaxPayload:                int64(record.GetInt("max_payload")),
-		MaxJetStreamDiskStorage:   int64(record.GetInt("max_jetstream_disk_storage")),
-		MaxJetStreamMemoryStorage: int64(record.GetInt("max_jetstream_memory_storage")),
-	}
 }
 
 // getSystemOperator retrieves system operator record for JWT signing operations.

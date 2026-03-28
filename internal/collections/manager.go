@@ -38,6 +38,9 @@ func (cm *Manager) InitializeCollections() error {
 	if err := cm.createUsersCollection(); err != nil {
 		return fmt.Errorf("failed to create users collection: %w", err)
 	}
+	if err := cm.ensureUserPermissionFields(); err != nil {
+		return fmt.Errorf("failed to ensure user permission fields: %w", err)
+	}
 	if err := cm.createPublishQueueCollection(); err != nil {
 		return fmt.Errorf("failed to create publish queue collection: %w", err)
 	}
@@ -224,6 +227,12 @@ func (cm *Manager) createUsersCollection() error {
 	collection.Fields.Add(&core.BoolField{Name: "regenerate"})
 	collection.Fields.Add(&core.BoolField{Name: "active"})
 
+	// Per-user permission overrides (JSON arrays of subjects, merged with role permissions)
+	collection.Fields.Add(&core.JSONField{Name: "publish_permissions", Required: false, MaxSize: 5000})
+	collection.Fields.Add(&core.JSONField{Name: "subscribe_permissions", Required: false, MaxSize: 5000})
+	collection.Fields.Add(&core.JSONField{Name: "publish_deny_permissions", Required: false, MaxSize: 5000})
+	collection.Fields.Add(&core.JSONField{Name: "subscribe_deny_permissions", Required: false, MaxSize: 5000})
+
 	return cm.app.Save(collection)
 }
 
@@ -269,6 +278,28 @@ func (cm *Manager) createPublishQueueCollection() error {
 	collection.Fields.Add(&core.DateField{Name: "failed_at"})
 	collection.Fields.Add(&core.AutodateField{Name: "created", OnCreate: true})
 	collection.Fields.Add(&core.AutodateField{Name: "updated", OnCreate: true, OnUpdate: true})
+
+	return cm.app.Save(collection)
+}
+
+// ensureUserPermissionFields adds per-user permission JSON fields to existing
+// nats_users collections. This is a migration for deployments created before
+// per-user permissions were supported.
+func (cm *Manager) ensureUserPermissionFields() error {
+	collection, err := cm.app.FindCollectionByNameOrId(cm.options.UserCollectionName)
+	if err != nil {
+		return nil // Collection doesn't exist yet; createUsersCollection will handle it
+	}
+
+	// Check if already migrated by looking for one of the permission fields
+	if collection.Fields.GetByName("publish_permissions") != nil {
+		return nil
+	}
+
+	collection.Fields.Add(&core.JSONField{Name: "publish_permissions", Required: false, MaxSize: 5000})
+	collection.Fields.Add(&core.JSONField{Name: "subscribe_permissions", Required: false, MaxSize: 5000})
+	collection.Fields.Add(&core.JSONField{Name: "publish_deny_permissions", Required: false, MaxSize: 5000})
+	collection.Fields.Add(&core.JSONField{Name: "subscribe_deny_permissions", Required: false, MaxSize: 5000})
 
 	return cm.app.Save(collection)
 }

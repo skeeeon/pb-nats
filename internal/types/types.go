@@ -99,6 +99,12 @@ type NatsUserRecord struct {
 	JWTExpiresAt *time.Time `json:"jwt_expires_at"`
 	Regenerate   bool       `json:"regenerate"`
 	Active       bool       `json:"active"`
+
+	// Per-user permission overrides (merged with role permissions via union)
+	PublishPermissions       json.RawMessage `json:"publish_permissions"`
+	SubscribePermissions     json.RawMessage `json:"subscribe_permissions"`
+	PublishDenyPermissions   json.RawMessage `json:"publish_deny_permissions"`
+	SubscribeDenyPermissions json.RawMessage `json:"subscribe_deny_permissions"`
 }
 
 // RoleRecord represents a NATS role with permissions and per-user limits.
@@ -377,6 +383,26 @@ func (r *RoleRecord) GetPublishDenyPermissions() ([]string, error) {
 // GetSubscribeDenyPermissions extracts subscribe deny permissions from role's JSON field.
 func (r *RoleRecord) GetSubscribeDenyPermissions() ([]string, error) {
 	return parseJSONPermissions(r.SubscribeDenyPermissions)
+}
+
+// GetPublishPermissions extracts publish allow permissions from user's JSON field.
+func (u *NatsUserRecord) GetPublishPermissions() ([]string, error) {
+	return parseJSONPermissions(u.PublishPermissions)
+}
+
+// GetSubscribePermissions extracts subscribe allow permissions from user's JSON field.
+func (u *NatsUserRecord) GetSubscribePermissions() ([]string, error) {
+	return parseJSONPermissions(u.SubscribePermissions)
+}
+
+// GetPublishDenyPermissions extracts publish deny permissions from user's JSON field.
+func (u *NatsUserRecord) GetPublishDenyPermissions() ([]string, error) {
+	return parseJSONPermissions(u.PublishDenyPermissions)
+}
+
+// GetSubscribeDenyPermissions extracts subscribe deny permissions from user's JSON field.
+func (u *NatsUserRecord) GetSubscribeDenyPermissions() ([]string, error) {
+	return parseJSONPermissions(u.SubscribeDenyPermissions)
 }
 
 // parseJSONPermissions is a helper function to parse JSON permission arrays.

@@ -15,6 +15,7 @@ A high-performance library for seamless integration between [PocketBase](https:/
 - **📊 Account Limits**: Configurable resource limits at both account and user levels
 - **⚙️ Hierarchical Limits**: Account-level limits control overall resources, role-based limits control per-user resources
 - **🚫 Deny Permissions**: Fine-grained access control with allow/deny subject patterns
+- **👤 Per-User Permissions**: Optional user-level permission overrides merged with role permissions
 - **📨 Response Permissions**: Request-reply pattern support with configurable limits
 
 ## 📦 Installation
@@ -169,6 +170,10 @@ nats-server -c nats.conf
 | `creds_file` | Text | Complete .creds file |
 | `regenerate` | Boolean | **Triggers JWT regeneration** |
 | `active` | Boolean | User status |
+| `publish_permissions` | JSON | Per-user allowed publish subjects (merged with role) |
+| `subscribe_permissions` | JSON | Per-user allowed subscribe subjects (merged with role) |
+| `publish_deny_permissions` | JSON | Per-user denied publish subjects (merged with role) |
+| `subscribe_deny_permissions` | JSON | Per-user denied subscribe subjects (merged with role) |
 
 ### Roles (`nats_roles`)
 *Permission templates with per-user limits and deny permissions*
@@ -215,6 +220,38 @@ This role:
 - ❌ Cannot publish to `sensors.internal.config` (denied)
 - ✅ Can subscribe to `alerts.critical`
 - ❌ Cannot subscribe to `alerts.admin.notifications` (denied)
+
+### Per-User Permission Overrides
+
+In addition to role-based permissions, you can set permissions directly on individual users. User-level permissions are **merged (union)** with role permissions — they extend the role's baseline rather than replacing it.
+
+This is useful for:
+- Granting a specific user access to additional subjects beyond their role
+- Adding user-level deny rules to restrict a specific user below their role's access
+
+**Example: User with additional permissions beyond their role**
+
+Role grants `sensors.>`, user also needs `admin.reports.>`:
+```json
+{
+  "publish_permissions": ["admin.reports.>"],
+  "subscribe_permissions": ["admin.reports.>"]
+}
+```
+
+The resulting JWT contains the union: `sensors.>` + `admin.reports.>` for both pub/sub.
+
+**Example: User with additional restrictions**
+
+Role grants `events.>`, but this user should not access internal events:
+```json
+{
+  "publish_deny_permissions": ["events.internal.>"],
+  "subscribe_deny_permissions": ["events.internal.>"]
+}
+```
+
+**Note:** User-level permissions are optional. When empty, the user inherits only their role's permissions (unchanged behavior). Response permissions and per-user resource limits remain role-only.
 
 ### Response Permissions (Request-Reply)
 
@@ -372,6 +409,26 @@ POST /api/collections/nats_roles/records
 }
 ```
 
+### Creating Users with Per-User Permissions
+```bash
+POST /api/collections/nats_users/records
+{
+    "email": "alice@example.com",
+    "password": "securepassword",
+    "passwordConfirm": "securepassword",
+    "nats_username": "alice",
+    "account_id": "ACCOUNT_ID",
+    "role_id": "ROLE_ID",
+    "active": true,
+    "publish_permissions": "[\"admin.reports.>\"]",
+    "subscribe_permissions": "[\"admin.reports.>\"]",
+    "publish_deny_permissions": "[]",
+    "subscribe_deny_permissions": "[\"events.internal.>\"]"
+}
+```
+
+Per-user permissions are merged with the role's permissions. Leave permission fields empty to inherit only from the role.
+
 ### Client Connection
 ```javascript
 const pb = new PocketBase('http://localhost:8090');
@@ -404,8 +461,10 @@ Accounts provide natural boundaries - no subject scoping needed:
 ## 🐛 Troubleshooting
 
 **Permission Issues:**
-- Check if deny permissions are blocking expected access
+- Check if deny permissions are blocking expected access (both role-level and user-level)
 - Verify allow permissions include required subjects
+- Remember that per-user permissions are merged with role permissions (union), not replaced
+- User-level deny rules take effect even if the role allows the subject
 - Check response permissions for request-reply patterns
 
 **Response Permission Issues:**

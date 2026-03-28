@@ -3,7 +3,6 @@
 package pbnats
 
 import (
-	"encoding/json"
 	"fmt"
 	"time"
 
@@ -507,9 +506,9 @@ func generateUserJWT(app *pocketbase.PocketBase, jwtGen *jwt.Generator, record *
 		return utils.WrapErrorf(err, "failed to find role %s", record.GetString("role_id"))
 	}
 
-	user := recordToUserModel(record)
-	accountModel := recordToAccountModel(account)
-	roleModel := recordToRoleModel(role)
+	user := pbtypes.RecordToUserModel(record)
+	accountModel := pbtypes.RecordToAccountModel(account)
+	roleModel := pbtypes.RecordToRoleModel(role)
 
 	jwtValue, err := jwtGen.GenerateUserJWT(user, accountModel, roleModel)
 	if err != nil {
@@ -526,83 +525,6 @@ func generateUserJWT(app *pocketbase.PocketBase, jwtGen *jwt.Generator, record *
 
 	record.Set("creds_file", credsFile)
 	return nil
-}
-
-// recordToUserModel converts PocketBase user record to internal user model.
-func recordToUserModel(record *core.Record) *pbtypes.NatsUserRecord {
-	return &pbtypes.NatsUserRecord{
-		ID:           record.Id,
-		NatsUsername: record.GetString("nats_username"),
-		PublicKey:    record.GetString("public_key"),
-		Seed:         record.GetString("seed"),
-		AccountID:    record.GetString("account_id"),
-		RoleID:       record.GetString("role_id"),
-		JWT:          record.GetString("jwt"),
-		BearerToken:  record.GetBool("bearer_token"),
-		Active:       record.GetBool("active"),
-		Regenerate:   record.GetBool("regenerate"),
-	}
-}
-
-// recordToAccountModel converts PocketBase account record to internal account model.
-func recordToAccountModel(record *core.Record) *pbtypes.AccountRecord {
-	return &pbtypes.AccountRecord{
-		ID:                        record.Id,
-		Name:                      record.GetString("name"),
-		PublicKey:                 record.GetString("public_key"),
-		SigningPublicKey:          record.GetString("signing_public_key"),
-		SigningSeed:               record.GetString("signing_seed"),
-		JWT:                       record.GetString("jwt"),
-		MaxConnections:            int64(record.GetInt("max_connections")),
-		MaxSubscriptions:          int64(record.GetInt("max_subscriptions")),
-		MaxData:                   int64(record.GetInt("max_data")),
-		MaxPayload:                int64(record.GetInt("max_payload")),
-		MaxJetStreamDiskStorage:   int64(record.GetInt("max_jetstream_disk_storage")),
-		MaxJetStreamMemoryStorage: int64(record.GetInt("max_jetstream_memory_storage")),
-	}
-}
-
-// recordToRoleModel converts PocketBase role record to internal role model.
-// Uses proper JSON marshaling for JSON fields.
-func recordToRoleModel(record *core.Record) *pbtypes.RoleRecord {
-	role := &pbtypes.RoleRecord{
-		ID:               record.Id,
-		Name:             record.GetString("name"),
-		Description:      record.GetString("description"),
-		IsDefault:        record.GetBool("is_default"),
-		AllowResponse:    record.GetBool("allow_response"),
-		AllowResponseMax: record.GetInt("allow_response_max"),
-		AllowResponseTTL: record.GetInt("allow_response_ttl"),
-		MaxSubscriptions: int64(record.GetInt("max_subscriptions")),
-		MaxData:          int64(record.GetInt("max_data")),
-		MaxPayload:       int64(record.GetInt("max_payload")),
-		Created:          record.GetDateTime("created").Time(),
-		Updated:          record.GetDateTime("updated").Time(),
-	}
-
-	// Marshal JSON fields from record.Get() which returns the actual data structure
-	if val := record.Get("publish_permissions"); val != nil {
-		if bytes, err := json.Marshal(val); err == nil {
-			role.PublishPermissions = bytes
-		}
-	}
-	if val := record.Get("subscribe_permissions"); val != nil {
-		if bytes, err := json.Marshal(val); err == nil {
-			role.SubscribePermissions = bytes
-		}
-	}
-	if val := record.Get("publish_deny_permissions"); val != nil {
-		if bytes, err := json.Marshal(val); err == nil {
-			role.PublishDenyPermissions = bytes
-		}
-	}
-	if val := record.Get("subscribe_deny_permissions"); val != nil {
-		if bytes, err := json.Marshal(val); err == nil {
-			role.SubscribeDenyPermissions = bytes
-		}
-	}
-
-	return role
 }
 
 // validateOptions validates the provided options.

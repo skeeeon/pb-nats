@@ -97,9 +97,9 @@ func (g *Generator) GenerateUserJWT(user *pbtypes.NatsUserRecord, account *pbtyp
 		userClaims.Expires = time.Now().Add(g.options.DefaultJWTExpiry).Unix()
 	}
 
-	// Apply permissions from role (allow, deny, and response)
-	if err := g.applyRolePermissions(userClaims, user, account, role); err != nil {
-		return "", fmt.Errorf("failed to apply role permissions: %w", err)
+	// Apply permissions from role and user-level overrides (merged via union)
+	if err := g.applyPermissions(userClaims, user, account, role); err != nil {
+		return "", fmt.Errorf("failed to apply permissions: %w", err)
 	}
 
 	// Apply limits from role
@@ -219,35 +219,59 @@ func (g *Generator) isSystemUser(user *pbtypes.NatsUserRecord, account *pbtypes.
 	return account.NormalizeName() == "SYS" && user.NatsUsername == "sys"
 }
 
-// applyRolePermissions applies role-based permissions to user JWT claims.
-// Now supports allow permissions, deny permissions, and response permissions.
+// applyPermissions merges role-based and per-user permissions into user JWT claims.
+// Per-user permissions are unioned with role permissions (additive).
 //
 // PERMISSION EVALUATION ORDER (NATS semantics):
 // 1. Check if subject matches any Allow pattern
 // 2. If allowed, check if subject matches any Deny pattern
 // 3. Deny takes precedence over Allow for matching subjects
-func (g *Generator) applyRolePermissions(userClaims *jwt.UserClaims, user *pbtypes.NatsUserRecord, account *pbtypes.AccountRecord, role *pbtypes.RoleRecord) error {
-	// Get allow permissions
+func (g *Generator) applyPermissions(userClaims *jwt.UserClaims, user *pbtypes.NatsUserRecord, account *pbtypes.AccountRecord, role *pbtypes.RoleRecord) error {
+	// Get role allow permissions
 	publishPerms, err := role.GetPublishPermissions()
 	if err != nil {
-		return fmt.Errorf("failed to get publish permissions: %w", err)
+		return fmt.Errorf("failed to get role publish permissions: %w", err)
 	}
 	subscribePerms, err := role.GetSubscribePermissions()
 	if err != nil {
-		return fmt.Errorf("failed to get subscribe permissions: %w", err)
+		return fmt.Errorf("failed to get role subscribe permissions: %w", err)
 	}
 
-	// Get deny permissions
+	// Get role deny permissions
 	publishDenyPerms, err := role.GetPublishDenyPermissions()
 	if err != nil {
-		return fmt.Errorf("failed to get publish deny permissions: %w", err)
+		return fmt.Errorf("failed to get role publish deny permissions: %w", err)
 	}
 	subscribeDenyPerms, err := role.GetSubscribeDenyPermissions()
 	if err != nil {
-		return fmt.Errorf("failed to get subscribe deny permissions: %w", err)
+		return fmt.Errorf("failed to get role subscribe deny permissions: %w", err)
 	}
 
-	// Apply default permissions if role permissions are empty
+	// Get per-user permission overrides
+	userPubPerms, err := user.GetPublishPermissions()
+	if err != nil {
+		return fmt.Errorf("failed to get user publish permissions: %w", err)
+	}
+	userSubPerms, err := user.GetSubscribePermissions()
+	if err != nil {
+		return fmt.Errorf("failed to get user subscribe permissions: %w", err)
+	}
+	userPubDenyPerms, err := user.GetPublishDenyPermissions()
+	if err != nil {
+		return fmt.Errorf("failed to get user publish deny permissions: %w", err)
+	}
+	userSubDenyPerms, err := user.GetSubscribeDenyPermissions()
+	if err != nil {
+		return fmt.Errorf("failed to get user subscribe deny permissions: %w", err)
+	}
+
+	// Merge: union of role + user permissions
+	publishPerms = append(publishPerms, userPubPerms...)
+	subscribePerms = append(subscribePerms, userSubPerms...)
+	publishDenyPerms = append(publishDenyPerms, userPubDenyPerms...)
+	subscribeDenyPerms = append(subscribeDenyPerms, userSubDenyPerms...)
+
+	// Apply default permissions if both role and user permissions are empty
 	if len(publishPerms) == 0 {
 		if g.isSystemUser(user, account) {
 			publishPerms = []string{"$SYS.>", ">"}

@@ -11,6 +11,7 @@ require (
 	github.com/pocketbase/dbx v1.11.0
 	github.com/pocketbase/pocketbase v0.31.0
 	github.com/skeeeon/pb-audit v0.0.0-20250511213441-da9141559cac
+	github.com/spf13/cobra v1.10.1
 )
 
 require (
@@ -31,9 +32,7 @@ require (
 	github.com/nats-io/nuid v1.0.1 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
-	github.com/skeeeon/pb-tenancy v0.0.0-20251126004748-da57c8293c1f // indirect
 	github.com/spf13/cast v1.10.0 // indirect
-	github.com/spf13/cobra v1.10.1 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
 	golang.org/x/crypto v0.43.0 // indirect
 	golang.org/x/exp v0.0.0-20251017212417-90e834f514db // indirect
