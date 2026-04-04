@@ -129,6 +129,47 @@ func RecordToRoleModel(record *core.Record) *RoleRecord {
 	return role
 }
 
+// RecordToExportModel converts a PocketBase export record to an AccountExportRecord.
+// Exports contain no sensitive fields, so no encryption handling is needed.
+func RecordToExportModel(record *core.Record) *AccountExportRecord {
+	return &AccountExportRecord{
+		ID:                   record.Id,
+		AccountID:            record.GetString("account_id"),
+		Name:                 record.GetString("name"),
+		Subject:              record.GetString("subject"),
+		Type:                 record.GetString("type"),
+		TokenReq:             record.GetBool("token_req"),
+		ResponseType:         record.GetString("response_type"),
+		ResponseThreshold:    int64(record.GetInt("response_threshold")),
+		AccountTokenPosition: record.GetInt("account_token_position"),
+		Advertise:            record.GetBool("advertise"),
+		AllowTrace:           record.GetBool("allow_trace"),
+		Description:          record.GetString("description"),
+		Created:              record.GetDateTime("created").Time(),
+		Updated:              record.GetDateTime("updated").Time(),
+	}
+}
+
+// RecordToImportModel converts a PocketBase import record to an AccountImportRecord.
+// Imports contain no sensitive fields, so no encryption handling is needed.
+func RecordToImportModel(record *core.Record) *AccountImportRecord {
+	return &AccountImportRecord{
+		ID:           record.Id,
+		AccountID:    record.GetString("account_id"),
+		Name:         record.GetString("name"),
+		Subject:      record.GetString("subject"),
+		Account:      record.GetString("account"),
+		Token:        record.GetString("token"),
+		LocalSubject: record.GetString("local_subject"),
+		Type:         record.GetString("type"),
+		Share:        record.GetBool("share"),
+		AllowTrace:   record.GetBool("allow_trace"),
+		Description:  record.GetString("description"),
+		Created:      record.GetDateTime("created").Time(),
+		Updated:      record.GetDateTime("updated").Time(),
+	}
+}
+
 // signingKeyFromScalarFields builds signing key entries from old scalar fields (pre-migration fallback).
 func signingKeyFromScalarFields(record *core.Record) (*SigningKeyPublic, *SigningKeyPrivate) {
 	pubKey := record.GetString("signing_public_key")

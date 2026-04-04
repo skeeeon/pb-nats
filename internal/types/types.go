@@ -332,6 +332,59 @@ type PublishQueueRecord struct {
 	Updated   time.Time  `json:"updated"`
 }
 
+// AccountExportRecord represents a NATS account export for cross-account communication.
+// Exports declare subjects that other accounts can import.
+//
+// EXPORT TYPES:
+// - Stream: Continuous data flow — exporter publishes, importer subscribes
+// - Service: Request-reply — importer sends requests, exporter responds
+//
+// TOKEN REQUIREMENT:
+// When token_req is true, importing accounts must present an activation token
+// (JWT) to access this export. This enables fine-grained access control.
+type AccountExportRecord struct {
+	ID                   string    `json:"id"`
+	AccountID            string    `json:"account_id"`
+	Name                 string    `json:"name"`
+	Subject              string    `json:"subject"`
+	Type                 string    `json:"type"`                  // "stream" or "service"
+	TokenReq             bool      `json:"token_req"`
+	ResponseType         string    `json:"response_type"`         // "Singleton", "Stream", "Chunked" (service only)
+	ResponseThreshold    int64     `json:"response_threshold"`    // milliseconds (service only)
+	AccountTokenPosition int       `json:"account_token_position"`
+	Advertise            bool      `json:"advertise"`
+	AllowTrace           bool      `json:"allow_trace"`
+	Description          string    `json:"description"`
+	Created              time.Time `json:"created"`
+	Updated              time.Time `json:"updated"`
+}
+
+// AccountImportRecord represents a NATS account import for cross-account communication.
+// Imports consume subjects exported by other accounts.
+//
+// IMPORT TYPES:
+// - Stream: Subscribe to data published by the exporting account
+// - Service: Send requests to a service provided by the exporting account
+//
+// LOCAL SUBJECT REMAPPING:
+// LocalSubject allows remapping the imported subject to a different local subject.
+// Supports positional references ($1, $2) for wildcard subjects.
+type AccountImportRecord struct {
+	ID           string    `json:"id"`
+	AccountID    string    `json:"account_id"`
+	Name         string    `json:"name"`
+	Subject      string    `json:"subject"`
+	Account      string    `json:"account"`       // public key of exporting account
+	Token        string    `json:"token"`          // optional activation JWT
+	LocalSubject string    `json:"local_subject"`
+	Type         string    `json:"type"`           // "stream" or "service"
+	Share        bool      `json:"share"`
+	AllowTrace   bool      `json:"allow_trace"`
+	Description  string    `json:"description"`
+	Created      time.Time `json:"created"`
+	Updated      time.Time `json:"updated"`
+}
+
 // RetryConfig defines the retry and failover behavior for NATS connections.
 // This configuration controls how the connection manager handles network failures.
 //
@@ -385,9 +438,11 @@ func DefaultTimeoutConfig() *TimeoutConfig {
 // Options configures the behavior of NATS JWT synchronization.
 type Options struct {
 	// Collection names (customizable for different deployments)
-	UserCollectionName    string
-	RoleCollectionName    string
-	AccountCollectionName string
+	UserCollectionName      string
+	RoleCollectionName      string
+	AccountCollectionName   string
+	ExportCollectionName    string
+	ImportCollectionName    string
 	
 	// NATS server configuration
 	OperatorName         string
@@ -428,6 +483,8 @@ const (
 	DefaultAccountCollectionName = "nats_accounts"
 	DefaultUserCollectionName    = "nats_users"
 	DefaultRoleCollectionName    = "nats_roles"
+	DefaultExportCollectionName  = "nats_account_exports"
+	DefaultImportCollectionName  = "nats_account_imports"
 	SystemOperatorCollectionName = "nats_system_operator"
 	PublishQueueCollectionName   = "nats_publish_queue"
 )

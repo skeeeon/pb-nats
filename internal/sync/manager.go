@@ -56,6 +56,8 @@ func (sm *Manager) SetupHooks() error {
 	sm.setupAccountHooks()
 	sm.setupUserHooks()
 	sm.setupRoleHooks()
+	sm.setupExportHooks()
+	sm.setupImportHooks()
 
 	sm.logger.Success("PocketBase hooks configured for NATS sync")
 	return nil
@@ -245,6 +247,92 @@ func (sm *Manager) setupRoleHooks() {
 		}
 		return e.Next()
 	})
+}
+
+// setupExportHooks registers hooks for account export changes.
+// When exports change, the owning account's JWT is regenerated and published.
+func (sm *Manager) setupExportHooks() {
+	regenerateAccountFromRecord := func(e *core.RecordEvent) error {
+		accountID := e.Record.GetString("account_id")
+		if accountID == "" || accountID == sm.systemAccountID {
+			return e.Next()
+		}
+		sm.regenerateAndSyncAccount(accountID)
+		return e.Next()
+	}
+
+	sm.app.OnRecordAfterCreateSuccess().BindFunc(func(e *core.RecordEvent) error {
+		if e.Record.Collection().Name != sm.options.ExportCollectionName {
+			return e.Next()
+		}
+		return regenerateAccountFromRecord(e)
+	})
+
+	sm.app.OnRecordAfterUpdateSuccess().BindFunc(func(e *core.RecordEvent) error {
+		if e.Record.Collection().Name != sm.options.ExportCollectionName {
+			return e.Next()
+		}
+		return regenerateAccountFromRecord(e)
+	})
+
+	sm.app.OnRecordAfterDeleteSuccess().BindFunc(func(e *core.RecordEvent) error {
+		if e.Record.Collection().Name != sm.options.ExportCollectionName {
+			return e.Next()
+		}
+		return regenerateAccountFromRecord(e)
+	})
+}
+
+// setupImportHooks registers hooks for account import changes.
+// When imports change, the owning account's JWT is regenerated and published.
+func (sm *Manager) setupImportHooks() {
+	regenerateAccountFromRecord := func(e *core.RecordEvent) error {
+		accountID := e.Record.GetString("account_id")
+		if accountID == "" || accountID == sm.systemAccountID {
+			return e.Next()
+		}
+		sm.regenerateAndSyncAccount(accountID)
+		return e.Next()
+	}
+
+	sm.app.OnRecordAfterCreateSuccess().BindFunc(func(e *core.RecordEvent) error {
+		if e.Record.Collection().Name != sm.options.ImportCollectionName {
+			return e.Next()
+		}
+		return regenerateAccountFromRecord(e)
+	})
+
+	sm.app.OnRecordAfterUpdateSuccess().BindFunc(func(e *core.RecordEvent) error {
+		if e.Record.Collection().Name != sm.options.ImportCollectionName {
+			return e.Next()
+		}
+		return regenerateAccountFromRecord(e)
+	})
+
+	sm.app.OnRecordAfterDeleteSuccess().BindFunc(func(e *core.RecordEvent) error {
+		if e.Record.Collection().Name != sm.options.ImportCollectionName {
+			return e.Next()
+		}
+		return regenerateAccountFromRecord(e)
+	})
+}
+
+// regenerateAndSyncAccount regenerates an account's JWT and schedules it for NATS publishing.
+func (sm *Manager) regenerateAndSyncAccount(accountID string) {
+	accountRecord, err := sm.app.FindRecordById(sm.options.AccountCollectionName, accountID)
+	if err != nil {
+		sm.logger.Warning("Failed to find account %s for JWT regeneration: %v", accountID, err)
+		return
+	}
+	if err := sm.generateAccountJWT(accountRecord); err != nil {
+		sm.logger.Warning("Failed to regenerate account JWT for %s: %v", accountID, err)
+		return
+	}
+	if err := sm.app.Save(accountRecord); err != nil {
+		sm.logger.Warning("Failed to save account %s after JWT regeneration: %v", accountID, err)
+		return
+	}
+	sm.scheduleSync(accountID, pbtypes.PublishActionUpsert)
 }
 
 // rotateAccountSigningKeys performs emergency signing key rotation for an account.
@@ -451,6 +539,7 @@ func (sm *Manager) generateAccountKeys(record *core.Record) error {
 }
 
 // generateAccountJWT creates an account JWT using the system operator's signing key.
+// Fetches exports and imports for the account to embed in the JWT.
 func (sm *Manager) generateAccountJWT(record *core.Record) error {
 	operator, err := sm.getSystemOperator()
 	if err != nil {
@@ -464,13 +553,42 @@ func (sm *Manager) generateAccountJWT(record *core.Record) error {
 		return utils.WrapError(fmt.Errorf("operator has no signing keys"), "invalid system operator")
 	}
 
-	jwtValue, err := sm.jwtGen.GenerateAccountJWT(account, latestKey.Seed)
+	exports := sm.getAccountExports(record.Id)
+	imports := sm.getAccountImports(record.Id)
+
+	jwtValue, err := sm.jwtGen.GenerateAccountJWT(account, latestKey.Seed, exports, imports)
 	if err != nil {
 		return utils.WrapError(err, "failed to generate account JWT")
 	}
 
 	record.Set("jwt", jwtValue)
 	return nil
+}
+
+// getAccountExports fetches all export records for an account.
+func (sm *Manager) getAccountExports(accountID string) []*pbtypes.AccountExportRecord {
+	records, err := sm.app.FindAllRecords(sm.options.ExportCollectionName, dbx.HashExp{"account_id": accountID})
+	if err != nil {
+		return nil
+	}
+	exports := make([]*pbtypes.AccountExportRecord, len(records))
+	for i, r := range records {
+		exports[i] = pbtypes.RecordToExportModel(r)
+	}
+	return exports
+}
+
+// getAccountImports fetches all import records for an account.
+func (sm *Manager) getAccountImports(accountID string) []*pbtypes.AccountImportRecord {
+	records, err := sm.app.FindAllRecords(sm.options.ImportCollectionName, dbx.HashExp{"account_id": accountID})
+	if err != nil {
+		return nil
+	}
+	imports := make([]*pbtypes.AccountImportRecord, len(records))
+	for i, r := range records {
+		imports[i] = pbtypes.RecordToImportModel(r)
+	}
+	return imports
 }
 
 // generateUserKeys generates key pairs and JWT for a new user record.

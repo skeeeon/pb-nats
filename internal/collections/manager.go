@@ -49,6 +49,12 @@ func (cm *Manager) InitializeCollections() error {
 	if err := cm.ensureAccountSigningKeysFields(); err != nil {
 		return fmt.Errorf("failed to ensure account signing keys fields: %w", err)
 	}
+	if err := cm.createExportsCollection(); err != nil {
+		return fmt.Errorf("failed to create exports collection: %w", err)
+	}
+	if err := cm.createImportsCollection(); err != nil {
+		return fmt.Errorf("failed to create imports collection: %w", err)
+	}
 	if err := cm.createPublishQueueCollection(); err != nil {
 		return fmt.Errorf("failed to create publish queue collection: %w", err)
 	}
@@ -244,6 +250,106 @@ func (cm *Manager) createUsersCollection() error {
 	collection.Fields.Add(&core.JSONField{Name: "subscribe_permissions", Required: false, MaxSize: 5000})
 	collection.Fields.Add(&core.JSONField{Name: "publish_deny_permissions", Required: false, MaxSize: 5000})
 	collection.Fields.Add(&core.JSONField{Name: "subscribe_deny_permissions", Required: false, MaxSize: 5000})
+
+	return cm.app.Save(collection)
+}
+
+// createExportsCollection creates the account exports collection for cross-account communication.
+func (cm *Manager) createExportsCollection() error {
+	_, err := cm.app.FindCollectionByNameOrId(cm.options.ExportCollectionName)
+	if err == nil {
+		return nil
+	}
+
+	collection := core.NewBaseCollection(cm.options.ExportCollectionName)
+
+	// Locked by default - consuming app should set appropriate API rules
+	collection.ListRule = nil
+	collection.ViewRule = nil
+	collection.CreateRule = nil
+	collection.UpdateRule = nil
+	collection.DeleteRule = nil
+
+	if err := cm.app.Save(collection); err != nil {
+		return fmt.Errorf("failed to save exports collection: %w", err)
+	}
+
+	// Get accounts collection for relation
+	accountsCollection, err := cm.app.FindCollectionByNameOrId(cm.options.AccountCollectionName)
+	if err != nil {
+		return fmt.Errorf("accounts collection not found: %w", err)
+	}
+
+	collection.Fields.Add(&core.RelationField{
+		Name: "account_id", Required: true, MaxSelect: 1,
+		CollectionId: accountsCollection.Id, CascadeDelete: true,
+	})
+	collection.Fields.Add(&core.TextField{Name: "name", Required: true, Max: 100})
+	collection.Fields.Add(&core.TextField{Name: "subject", Required: true, Max: 500})
+	collection.Fields.Add(&core.SelectField{
+		Name: "type", Required: true, MaxSelect: 1,
+		Values: []string{"stream", "service"},
+	})
+	collection.Fields.Add(&core.BoolField{Name: "token_req"})
+	collection.Fields.Add(&core.SelectField{
+		Name: "response_type", MaxSelect: 1,
+		Values: []string{"Singleton", "Stream", "Chunked"},
+	})
+	collection.Fields.Add(&core.NumberField{Name: "response_threshold", OnlyInt: true, Min: types.Pointer(0.0)})
+	collection.Fields.Add(&core.NumberField{Name: "account_token_position", OnlyInt: true, Min: types.Pointer(0.0)})
+	collection.Fields.Add(&core.BoolField{Name: "advertise"})
+	collection.Fields.Add(&core.BoolField{Name: "allow_trace"})
+	collection.Fields.Add(&core.TextField{Name: "description", Max: 500})
+	collection.Fields.Add(&core.AutodateField{Name: "created", OnCreate: true})
+	collection.Fields.Add(&core.AutodateField{Name: "updated", OnCreate: true, OnUpdate: true})
+
+	return cm.app.Save(collection)
+}
+
+// createImportsCollection creates the account imports collection for cross-account communication.
+func (cm *Manager) createImportsCollection() error {
+	_, err := cm.app.FindCollectionByNameOrId(cm.options.ImportCollectionName)
+	if err == nil {
+		return nil
+	}
+
+	collection := core.NewBaseCollection(cm.options.ImportCollectionName)
+
+	// Locked by default - consuming app should set appropriate API rules
+	collection.ListRule = nil
+	collection.ViewRule = nil
+	collection.CreateRule = nil
+	collection.UpdateRule = nil
+	collection.DeleteRule = nil
+
+	if err := cm.app.Save(collection); err != nil {
+		return fmt.Errorf("failed to save imports collection: %w", err)
+	}
+
+	// Get accounts collection for relation
+	accountsCollection, err := cm.app.FindCollectionByNameOrId(cm.options.AccountCollectionName)
+	if err != nil {
+		return fmt.Errorf("accounts collection not found: %w", err)
+	}
+
+	collection.Fields.Add(&core.RelationField{
+		Name: "account_id", Required: true, MaxSelect: 1,
+		CollectionId: accountsCollection.Id, CascadeDelete: true,
+	})
+	collection.Fields.Add(&core.TextField{Name: "name", Required: true, Max: 100})
+	collection.Fields.Add(&core.TextField{Name: "subject", Required: true, Max: 500})
+	collection.Fields.Add(&core.TextField{Name: "account", Required: true, Max: 200})
+	collection.Fields.Add(&core.TextField{Name: "token", Max: 10000})
+	collection.Fields.Add(&core.TextField{Name: "local_subject", Max: 500})
+	collection.Fields.Add(&core.SelectField{
+		Name: "type", Required: true, MaxSelect: 1,
+		Values: []string{"stream", "service"},
+	})
+	collection.Fields.Add(&core.BoolField{Name: "share"})
+	collection.Fields.Add(&core.BoolField{Name: "allow_trace"})
+	collection.Fields.Add(&core.TextField{Name: "description", Max: 500})
+	collection.Fields.Add(&core.AutodateField{Name: "created", OnCreate: true})
+	collection.Fields.Add(&core.AutodateField{Name: "updated", OnCreate: true, OnUpdate: true})
 
 	return cm.app.Save(collection)
 }

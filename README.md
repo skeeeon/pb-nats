@@ -6,6 +6,7 @@ A Go library for extending [PocketBase](https://pocketbase.io/) for managing [NA
 
 - **Real-time JWT Sync**: PocketBase CRUD hooks trigger JWT generation and publish to NATS via `$SYS.REQ.CLAIMS.UPDATE`
 - **Account-Based Multi-Tenancy**: NATS accounts provide hard isolation boundaries without subject scoping
+- **Cross-Account Communication**: Account-level imports and exports for sharing streams and services between accounts
 - **Graceful Bootstrap**: Starts without NATS running, operator JWT generated in-memory for initial NATS config
 - **Persistent Connections**: Single NATS connection with automatic failover to backup servers and exponential backoff
 - **Multiple Signing Keys**: Graceful and emergency key rotation per account
@@ -124,9 +125,9 @@ NATS Server ($SYS.REQ.CLAIMS.UPDATE)
 
 ### Initialization Order
 
-1. **Collections** — Creates 5 PocketBase collections (all API rules locked by default)
+1. **Collections** — Creates 7 PocketBase collections (all API rules locked by default)
 2. **NKey Manager** — Generates NATS NKey pairs (operator, account, user)
-3. **JWT Generator** — Generates NATS JWTs with permissions and limits
+3. **JWT Generator** — Generates NATS JWTs with permissions, limits, imports, and exports
 4. **System Components** — Creates operator, system account, system role, system user
 5. **Publisher** — Starts persistent NATS connection with failover
 6. **Sync Manager** — Registers PocketBase hooks for real-time sync
@@ -137,13 +138,14 @@ NATS Server ($SYS.REQ.CLAIMS.UPDATE)
 - **Graceful bootstrap**: operator JWT generated before NATS is running
 - **Two-tier permissions**: role provides baseline, per-user permissions merged via union
 - **Two-tier limits**: account-level and role-based per-user limits
+- **Cross-account imports/exports**: managed as separate collections, embedded in account JWTs
 - **Multiple signing keys**: most recent key signs new JWTs, older keys remain valid
 - **Locked collections by default**: consuming app sets API rules appropriate to its deployment model
 - **NKeys stored in PocketBase** (PocketBase is the authority, optional encryption at rest)
 
 ## Collections
 
-pb-nats creates 5 collections. All have `nil` API rules by default — the consuming app must explicitly configure access rules appropriate for its deployment.
+pb-nats creates 7 collections. All have `nil` API rules by default — the consuming app must explicitly configure access rules appropriate for its deployment.
 
 ### System Operator (`nats_system_operator`)
 
@@ -184,6 +186,41 @@ Each account is an isolation boundary in NATS. Users within an account cannot se
 | `max_payload` | Number | | Max message size (-1=unlimited, 0=disabled) |
 | `max_jetstream_disk_storage` | Number | | JetStream disk limit (-1=unlimited, 0=disabled) |
 | `max_jetstream_memory_storage` | Number | | JetStream memory limit (-1=unlimited, 0=disabled) |
+
+### Account Exports (`nats_account_exports`)
+
+Declares subjects that an account makes available to other accounts. Supports both streams (continuous data flow) and services (request-reply).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `account_id` | Relation | Owning account (cascade delete) |
+| `name` | Text | Export name |
+| `subject` | Text | NATS subject pattern (supports wildcards) |
+| `type` | Select | `stream` or `service` |
+| `token_req` | Bool | Require activation token for import |
+| `response_type` | Select | `Singleton`, `Stream`, or `Chunked` (service only) |
+| `response_threshold` | Number | Response timeout in milliseconds (service only) |
+| `account_token_position` | Number | Position of account token in wildcard subject |
+| `advertise` | Bool | Advertise this export |
+| `allow_trace` | Bool | Allow trace (service only) |
+| `description` | Text | Export description |
+
+### Account Imports (`nats_account_imports`)
+
+Consumes subjects exported by other accounts. The exporting account is referenced by public key, not by relation, since it may be in a different deployment.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `account_id` | Relation | Importing account (cascade delete) |
+| `name` | Text | Import name |
+| `subject` | Text | Subject being imported |
+| `account` | Text | Exporting account's public key |
+| `token` | Text | Activation JWT (required when export has `token_req`) |
+| `local_subject` | Text | Local subject remapping (supports `$1`, `$2` references) |
+| `type` | Select | `stream` or `service` |
+| `share` | Bool | Enable latency tracking (service only) |
+| `allow_trace` | Bool | Allow trace (stream only) |
+| `description` | Text | Import description |
 
 ### Roles (`nats_roles`)
 
@@ -241,15 +278,85 @@ Internal queue for reliable JWT publishing. Should remain locked.
 | `attempts` | Number | Retry count (0-10) |
 | `failed_at` | Date | Set on permanent failure |
 
+## Cross-Account Communication
+
+NATS accounts are isolated by default. Imports and exports enable controlled cross-account communication without breaking isolation boundaries.
+
+### Exports
+
+An export declares a subject that other accounts can access. Two types:
+
+- **Stream**: The exporting account publishes data, importing accounts subscribe. One-way data flow.
+- **Service**: The importing account sends requests, the exporting account responds. Request-reply pattern.
+
+```http
+POST /api/collections/nats_account_exports/records
+{
+  "account_id": "ACCOUNT_RECORD_ID",
+  "name": "sensor-data",
+  "subject": "sensors.>",
+  "type": "stream"
+}
+```
+
+Service export with response configuration:
+```http
+POST /api/collections/nats_account_exports/records
+{
+  "account_id": "ACCOUNT_RECORD_ID",
+  "name": "auth-service",
+  "subject": "auth.validate",
+  "type": "service",
+  "response_type": "Singleton"
+}
+```
+
+### Imports
+
+An import consumes a subject exported by another account. The exporting account is referenced by its public key.
+
+```http
+POST /api/collections/nats_account_imports/records
+{
+  "account_id": "IMPORTING_ACCOUNT_RECORD_ID",
+  "name": "sensor-data",
+  "subject": "sensors.>",
+  "account": "AABC...EXPORTING_ACCOUNT_PUBLIC_KEY",
+  "type": "stream"
+}
+```
+
+Import with local subject remapping:
+```http
+POST /api/collections/nats_account_imports/records
+{
+  "account_id": "IMPORTING_ACCOUNT_RECORD_ID",
+  "name": "auth-service",
+  "subject": "auth.validate",
+  "account": "AABC...EXPORTING_ACCOUNT_PUBLIC_KEY",
+  "type": "service",
+  "local_subject": "external.auth.validate"
+}
+```
+
+### Token-Required Exports
+
+For restricted access, set `token_req: true` on the export. Importing accounts must provide an activation token (JWT) in the import's `token` field.
+
+### How It Works
+
+Exports and imports are embedded in the account JWT. When you create, update, or delete an export or import record, the owning account's JWT is automatically regenerated and published to NATS. No manual intervention required.
+
 ## Security
 
 ### Collection Access Rules
 
-All collections default to `nil` (no API access). This is intentional — pb-nats is a library, and the consuming app is responsible for setting API rules appropriate to its deployment model.
+All collections default to `nil` (no API access). This is intentional — pb-nats is a library, and the consuming app is responsible for setting API rules appropriate for its deployment model.
 
 **Recommended approach:**
 - Keep `nats_system_operator` and `nats_publish_queue` locked (system-only)
-- Set accounts and roles rules to allow trusted admin/service access
+- Set accounts, exports, and imports rules to allow trusted admin/service access
+- Set roles rules to allow trusted admin/service access
 - Set user rules to allow self-service credential retrieval
 
 Example (consuming app's migration or setup code):
@@ -394,6 +501,13 @@ options.NATSServerURL = "nats://localhost:4222"
 options.BackupNATSServerURLs = []string{"nats://backup1:4222", "nats://backup2:4222"}
 options.OperatorName = "my-operator"
 
+// Custom collection names (optional)
+options.AccountCollectionName = "nats_accounts"
+options.UserCollectionName = "nats_users"
+options.RoleCollectionName = "nats_roles"
+options.ExportCollectionName = "nats_account_exports"
+options.ImportCollectionName = "nats_account_imports"
+
 // Connection retry
 options.ConnectionRetryConfig = &pbnats.RetryConfig{
     MaxPrimaryRetries: 4,           // attempts before trying backup
@@ -487,6 +601,8 @@ if pbnats.IsConfigurationError(err) {
 **Resource limits**: `-1` = unlimited, `0` = **disabled** (blocks access), positive = specific limit.
 
 **Encryption**: If you enable encryption on an existing deployment, data encrypts on next write. Changing the key without re-encryption breaks reads of previously encrypted data.
+
+**Cross-account imports/exports**: Changes to export or import records automatically regenerate the owning account's JWT and publish it to NATS. The exporting account's public key (not record ID) is used in imports, so external accounts from other deployments are supported.
 
 ## License
 

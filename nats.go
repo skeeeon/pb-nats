@@ -26,6 +26,8 @@ type NatsUserRecord = pbtypes.NatsUserRecord
 type RoleRecord = pbtypes.RoleRecord
 type SystemOperatorRecord = pbtypes.SystemOperatorRecord
 type PublishQueueRecord = pbtypes.PublishQueueRecord
+type AccountExportRecord = pbtypes.AccountExportRecord
+type AccountImportRecord = pbtypes.AccountImportRecord
 type RetryConfig = pbtypes.RetryConfig
 type TimeoutConfig = pbtypes.TimeoutConfig
 
@@ -34,6 +36,8 @@ const (
 	DefaultAccountCollectionName = pbtypes.DefaultAccountCollectionName
 	DefaultUserCollectionName    = pbtypes.DefaultUserCollectionName
 	DefaultRoleCollectionName    = pbtypes.DefaultRoleCollectionName
+	DefaultExportCollectionName  = pbtypes.DefaultExportCollectionName
+	DefaultImportCollectionName  = pbtypes.DefaultImportCollectionName
 	SystemOperatorCollectionName = pbtypes.SystemOperatorCollectionName
 	PublishQueueCollectionName   = pbtypes.PublishQueueCollectionName
 	

@@ -59,7 +59,8 @@ func (g *Generator) GenerateOperatorJWTWithoutSystemAccount(operator *pbtypes.Sy
 }
 
 // GenerateAccountJWT generates a NATS account JWT for tenant isolation.
-func (g *Generator) GenerateAccountJWT(account *pbtypes.AccountRecord, operatorSigningSeed string) (string, error) {
+// Exports and imports enable cross-account communication and are embedded in the JWT.
+func (g *Generator) GenerateAccountJWT(account *pbtypes.AccountRecord, operatorSigningSeed string, exports []*pbtypes.AccountExportRecord, imports []*pbtypes.AccountImportRecord) (string, error) {
 	operatorKP, err := g.nkeyManager.KeyPairFromSeed(operatorSigningSeed)
 	if err != nil {
 		return "", fmt.Errorf("failed to create operator signing key pair: %w", err)
@@ -72,6 +73,8 @@ func (g *Generator) GenerateAccountJWT(account *pbtypes.AccountRecord, operatorS
 	}
 
 	g.applyAccountLimits(accountClaims, account)
+	g.applyAccountExports(accountClaims, exports)
+	g.applyAccountImports(accountClaims, imports)
 
 	jwtValue, err := accountClaims.Encode(operatorKP)
 	if err != nil {
@@ -219,6 +222,74 @@ func (g *Generator) applyAccountLimits(accountClaims *jwt.AccountClaims, account
 		} else {
 			accountClaims.Limits.NatsLimits.Payload = jwt.NoLimit
 		}
+	}
+}
+
+// applyAccountExports converts export records to NATS JWT exports and adds them to account claims.
+func (g *Generator) applyAccountExports(accountClaims *jwt.AccountClaims, exports []*pbtypes.AccountExportRecord) {
+	for _, export := range exports {
+		e := &jwt.Export{
+			Name:                 export.Name,
+			Subject:              jwt.Subject(export.Subject),
+			TokenReq:             export.TokenReq,
+			AccountTokenPosition: uint(export.AccountTokenPosition),
+			Advertise:            export.Advertise,
+			AllowTrace:           export.AllowTrace,
+		}
+
+		switch export.Type {
+		case "service":
+			e.Type = jwt.Service
+		default:
+			e.Type = jwt.Stream
+		}
+
+		if e.Type == jwt.Service {
+			switch export.ResponseType {
+			case "Stream":
+				e.ResponseType = jwt.ResponseTypeStream
+			case "Chunked":
+				e.ResponseType = jwt.ResponseTypeChunked
+			default:
+				e.ResponseType = jwt.ResponseTypeSingleton
+			}
+			if export.ResponseThreshold > 0 {
+				e.ResponseThreshold = time.Duration(export.ResponseThreshold) * time.Millisecond
+			}
+		}
+
+		if export.Description != "" {
+			e.Info.Description = export.Description
+		}
+
+		accountClaims.Exports.Add(e)
+	}
+}
+
+// applyAccountImports converts import records to NATS JWT imports and adds them to account claims.
+func (g *Generator) applyAccountImports(accountClaims *jwt.AccountClaims, imports []*pbtypes.AccountImportRecord) {
+	for _, imp := range imports {
+		i := &jwt.Import{
+			Name:       imp.Name,
+			Subject:    jwt.Subject(imp.Subject),
+			Account:    imp.Account,
+			Token:      imp.Token,
+			Share:      imp.Share,
+			AllowTrace: imp.AllowTrace,
+		}
+
+		switch imp.Type {
+		case "service":
+			i.Type = jwt.Service
+		default:
+			i.Type = jwt.Stream
+		}
+
+		if imp.LocalSubject != "" {
+			i.LocalSubject = jwt.RenamingSubject(imp.LocalSubject)
+		}
+
+		accountClaims.Imports.Add(i)
 	}
 }
 

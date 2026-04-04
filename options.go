@@ -8,9 +8,11 @@ import (
 // DefaultOptions returns sensible defaults for the NATS JWT synchronization options
 func DefaultOptions() Options {
 	return Options{
-		UserCollectionName:    pbtypes.DefaultUserCollectionName,
-		RoleCollectionName:    pbtypes.DefaultRoleCollectionName,
-		AccountCollectionName: pbtypes.DefaultAccountCollectionName,
+		UserCollectionName:      pbtypes.DefaultUserCollectionName,
+		RoleCollectionName:      pbtypes.DefaultRoleCollectionName,
+		AccountCollectionName:   pbtypes.DefaultAccountCollectionName,
+		ExportCollectionName:    pbtypes.DefaultExportCollectionName,
+		ImportCollectionName:    pbtypes.DefaultImportCollectionName,
 		
 		OperatorName:              pbtypes.DefaultOperatorName,
 		NATSServerURL:             "nats://localhost:4222",
@@ -50,6 +52,12 @@ func applyDefaultOptions(options Options) Options {
 	}
 	if options.AccountCollectionName == "" {
 		options.AccountCollectionName = defaults.AccountCollectionName
+	}
+	if options.ExportCollectionName == "" {
+		options.ExportCollectionName = defaults.ExportCollectionName
+	}
+	if options.ImportCollectionName == "" {
+		options.ImportCollectionName = defaults.ImportCollectionName
 	}
 
 	// Apply NATS configuration
