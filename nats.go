@@ -3,8 +3,9 @@
 package pbnats
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
-	"time"
 
 	"github.com/pocketbase/dbx"
 	"github.com/pocketbase/pocketbase"
@@ -118,7 +119,8 @@ func initializeComponents(app *pocketbase.PocketBase, options Options, logger *u
 
 	// Step 4: Initialize system components
 	logger.Info("   Creating system components...")
-	if err := initializeSystemComponents(app, jwtGenerator, nkeyManager, options, logger); err != nil {
+	sysAccountID, err := initializeSystemComponents(app, jwtGenerator, nkeyManager, options, logger)
+	if err != nil {
 		return utils.WrapError(err, "failed to initialize system components")
 	}
 	logger.Success("   System components initialized")
@@ -133,7 +135,7 @@ func initializeComponents(app *pocketbase.PocketBase, options Options, logger *u
 
 	// Step 6: Initialize sync manager
 	logger.Info("   Setting up sync hooks...")
-	syncManager := sync.NewManager(app, jwtGenerator, nkeyManager, accountPublisher, options)
+	syncManager := sync.NewManager(app, jwtGenerator, nkeyManager, accountPublisher, options, sysAccountID)
 	if err := syncManager.SetupHooks(); err != nil {
 		return utils.WrapError(err, "failed to setup sync hooks")
 	}
@@ -143,15 +145,19 @@ func initializeComponents(app *pocketbase.PocketBase, options Options, logger *u
 	logger.Info("   System operator: %s", options.OperatorName)
 	logger.Info("   Queue processing: %v intervals", options.PublishQueueInterval)
 	logger.Info("   Debounce delay: %v", options.DebounceInterval)
+	if options.EncryptionKey != "" {
+		logger.Info("   At-rest encryption: enabled")
+	}
 
 	return nil
 }
 
 // initializeSystemComponents creates system operator, account, role, and user if they don't exist.
-func initializeSystemComponents(app *pocketbase.PocketBase, jwtGen *jwt.Generator, nkeyManager *nkey.Manager, options Options, logger *utils.Logger) error {
+// Returns the system account record ID for use by other components.
+func initializeSystemComponents(app *pocketbase.PocketBase, jwtGen *jwt.Generator, nkeyManager *nkey.Manager, options Options, logger *utils.Logger) (string, error) {
 	operatorRecords, err := app.FindAllRecords(pbtypes.SystemOperatorCollectionName)
 	if err != nil {
-		return utils.WrapError(err, "failed to find system operator records")
+		return "", utils.WrapError(err, "failed to find system operator records")
 	}
 
 	var operator *pbtypes.SystemOperatorRecord
@@ -162,56 +168,69 @@ func initializeSystemComponents(app *pocketbase.PocketBase, jwtGen *jwt.Generato
 		// Create operator without JWT initially
 		operator, err = createSystemOperatorWithoutJWT(app, nkeyManager, options, logger)
 		if err != nil {
-			return utils.WrapError(err, "failed to create system operator")
+			return "", utils.WrapError(err, "failed to create system operator")
 		}
 
 		// Create system account
 		sysAccountID, sysAccountPubKey, err = createSystemAccount(app, jwtGen, nkeyManager, operator, options, logger)
 		if err != nil {
-			return utils.WrapError(err, "failed to create system account")
+			return "", utils.WrapError(err, "failed to create system account")
 		}
 
-		// Update operator JWT with system account reference
-		if err := updateOperatorJWT(app, jwtGen, operator.ID, sysAccountPubKey, logger); err != nil {
-			return utils.WrapError(err, "failed to update operator JWT")
+		// Update operator JWT with system account reference and store system account ID
+		if err := updateOperatorJWT(app, jwtGen, operator.ID, sysAccountID, sysAccountPubKey, options.EncryptionKey, logger); err != nil {
+			return "", utils.WrapError(err, "failed to update operator JWT")
 		}
 
 		logger.Success("Created and configured system operator with system account reference")
 	} else {
 		record := operatorRecords[0]
-		operator = pbtypes.RecordToOperatorModel(record)
+		operator = pbtypes.RecordToOperatorModel(record, options.EncryptionKey)
 
-		sysAccountRecords, err := app.FindAllRecords(options.AccountCollectionName, dbx.HashExp{"name": "System Account"})
-		if err != nil {
-			return utils.WrapError(err, "failed to find system account records")
+		// Look up system account by stored ID, fall back to name for backward compatibility
+		if operator.SystemAccountID != "" {
+			sysAccountRecord, err := app.FindRecordById(options.AccountCollectionName, operator.SystemAccountID)
+			if err == nil {
+				sysAccountID = sysAccountRecord.Id
+				sysAccountPubKey = sysAccountRecord.GetString("public_key")
+			}
 		}
 
-		if len(sysAccountRecords) == 0 {
-			sysAccountID, sysAccountPubKey, err = createSystemAccount(app, jwtGen, nkeyManager, operator, options, logger)
+		if sysAccountID == "" {
+			// Fallback: find by name (pre-migration) or create
+			sysAccountRecords, err := app.FindAllRecords(options.AccountCollectionName, dbx.HashExp{"name": "System Account"})
 			if err != nil {
-				return utils.WrapError(err, "failed to create system account")
+				return "", utils.WrapError(err, "failed to find system account records")
 			}
 
-			if err := updateOperatorJWT(app, jwtGen, operator.ID, sysAccountPubKey, logger); err != nil {
-				return utils.WrapError(err, "failed to update operator JWT")
+			if len(sysAccountRecords) == 0 {
+				sysAccountID, sysAccountPubKey, err = createSystemAccount(app, jwtGen, nkeyManager, operator, options, logger)
+				if err != nil {
+					return "", utils.WrapError(err, "failed to create system account")
+				}
+			} else {
+				sysAccountID = sysAccountRecords[0].Id
+				sysAccountPubKey = sysAccountRecords[0].GetString("public_key")
 			}
-		} else {
-			sysAccountID = sysAccountRecords[0].Id
-			sysAccountPubKey = sysAccountRecords[0].GetString("public_key")
+
+			// Persist system account ID on operator for future lookups
+			if err := updateOperatorJWT(app, jwtGen, operator.ID, sysAccountID, sysAccountPubKey, options.EncryptionKey, logger); err != nil {
+				return "", utils.WrapError(err, "failed to update operator JWT")
+			}
 		}
 	}
 
 	// Check if system role exists
 	sysRoleRecords, err := app.FindAllRecords(options.RoleCollectionName, dbx.HashExp{"name": "system_admin"})
 	if err != nil {
-		return utils.WrapError(err, "failed to find system role records")
+		return "", utils.WrapError(err, "failed to find system role records")
 	}
 
 	var sysRoleID string
 	if len(sysRoleRecords) == 0 {
 		sysRoleID, err = createSystemRole(app, options, logger)
 		if err != nil {
-			return utils.WrapError(err, "failed to create system role")
+			return "", utils.WrapError(err, "failed to create system role")
 		}
 	} else {
 		sysRoleID = sysRoleRecords[0].Id
@@ -220,16 +239,16 @@ func initializeSystemComponents(app *pocketbase.PocketBase, jwtGen *jwt.Generato
 	// Check if system user exists
 	sysUserRecords, err := app.FindAllRecords(options.UserCollectionName, dbx.HashExp{"nats_username": "sys", "account_id": sysAccountID})
 	if err != nil {
-		return utils.WrapError(err, "failed to find system user records")
+		return "", utils.WrapError(err, "failed to find system user records")
 	}
 
 	if len(sysUserRecords) == 0 {
 		if err := createSystemUser(app, jwtGen, nkeyManager, sysAccountID, sysRoleID, options, logger); err != nil {
-			return utils.WrapError(err, "failed to create system user")
+			return "", utils.WrapError(err, "failed to create system user")
 		}
 	}
 
-	return nil
+	return sysAccountID, nil
 }
 
 // createSystemOperatorWithoutJWT creates the system operator record with keys but no JWT.
@@ -276,10 +295,16 @@ func createSystemOperatorWithoutJWT(app *pocketbase.PocketBase, nkeyManager *nke
 	record := core.NewRecord(collection)
 	record.Set("name", operator.Name)
 	record.Set("public_key", operator.PublicKey)
-	record.Set("private_key", operator.PrivateKey)
-	record.Set("seed", operator.Seed)
+	if err := pbtypes.EncryptAndSet(record, "private_key", operator.PrivateKey, options.EncryptionKey); err != nil {
+		return nil, utils.WrapError(err, "failed to encrypt operator private key")
+	}
+	if err := pbtypes.EncryptAndSet(record, "seed", operator.Seed, options.EncryptionKey); err != nil {
+		return nil, utils.WrapError(err, "failed to encrypt operator seed")
+	}
 	record.Set("signing_keys", pubJSON)
-	record.Set("signing_keys_private", privJSON)
+	if err := pbtypes.EncryptJSONAndSet(record, "signing_keys_private", privJSON, options.EncryptionKey); err != nil {
+		return nil, utils.WrapError(err, "failed to encrypt operator signing keys")
+	}
 	record.Set("jwt", "")
 
 	if err := app.Save(record); err != nil {
@@ -293,13 +318,13 @@ func createSystemOperatorWithoutJWT(app *pocketbase.PocketBase, nkeyManager *nke
 }
 
 // updateOperatorJWT generates and saves the final operator JWT with system account reference.
-func updateOperatorJWT(app *pocketbase.PocketBase, jwtGen *jwt.Generator, operatorID, systemAccountPubKey string, logger *utils.Logger) error {
+func updateOperatorJWT(app *pocketbase.PocketBase, jwtGen *jwt.Generator, operatorID, systemAccountID, systemAccountPubKey, encryptionKey string, logger *utils.Logger) error {
 	operatorRecord, err := app.FindRecordById(pbtypes.SystemOperatorCollectionName, operatorID)
 	if err != nil {
 		return utils.WrapError(err, "failed to find operator record")
 	}
 
-	operator := pbtypes.RecordToOperatorModel(operatorRecord)
+	operator := pbtypes.RecordToOperatorModel(operatorRecord, encryptionKey)
 
 	jwtValue, err := jwtGen.GenerateOperatorJWT(operator, systemAccountPubKey)
 	if err != nil {
@@ -307,6 +332,7 @@ func updateOperatorJWT(app *pocketbase.PocketBase, jwtGen *jwt.Generator, operat
 	}
 
 	operatorRecord.Set("jwt", jwtValue)
+	operatorRecord.Set("system_account_id", systemAccountID)
 	if err := app.Save(operatorRecord); err != nil {
 		return utils.WrapError(err, "failed to save updated operator JWT")
 	}
@@ -374,10 +400,16 @@ func createSystemAccount(app *pocketbase.PocketBase, jwtGen *jwt.Generator, nkey
 	}
 
 	record.Set("public_key", sysAccount.PublicKey)
-	record.Set("private_key", sysAccount.PrivateKey)
-	record.Set("seed", sysAccount.Seed)
+	if err := pbtypes.EncryptAndSet(record, "private_key", sysAccount.PrivateKey, options.EncryptionKey); err != nil {
+		return "", "", utils.WrapError(err, "failed to encrypt account private key")
+	}
+	if err := pbtypes.EncryptAndSet(record, "seed", sysAccount.Seed, options.EncryptionKey); err != nil {
+		return "", "", utils.WrapError(err, "failed to encrypt account seed")
+	}
 	record.Set("signing_keys", pubJSON)
-	record.Set("signing_keys_private", privJSON)
+	if err := pbtypes.EncryptJSONAndSet(record, "signing_keys_private", privJSON, options.EncryptionKey); err != nil {
+		return "", "", utils.WrapError(err, "failed to encrypt account signing keys")
+	}
 	record.Set("jwt", sysAccount.JWT)
 	record.Set("active", sysAccount.Active)
 	record.Set("max_connections", sysAccount.MaxConnections)
@@ -445,7 +477,11 @@ func createSystemUser(app *pocketbase.PocketBase, jwtGen *jwt.Generator, nkeyMan
 
 	record := core.NewRecord(collection)
 	record.Set("email", "system@localhost.com")
-	record.Set("password", "system-generated-password-"+time.Now().Format("20060102150405"))
+	passwordBytes := make([]byte, 32)
+	if _, err := rand.Read(passwordBytes); err != nil {
+		return utils.WrapError(err, "failed to generate system user password")
+	}
+	record.Set("password", hex.EncodeToString(passwordBytes))
 	record.Set("verified", true)
 	record.Set("nats_username", "sys")
 	record.Set("description", "System user for NATS management operations")
@@ -485,8 +521,12 @@ func generateUserKeys(app *pocketbase.PocketBase, jwtGen *jwt.Generator, nkeyMan
 	}
 
 	record.Set("public_key", public)
-	record.Set("private_key", privateKey)
-	record.Set("seed", seed)
+	if err := pbtypes.EncryptAndSet(record, "private_key", privateKey, options.EncryptionKey); err != nil {
+		return utils.WrapError(err, "failed to encrypt user private key")
+	}
+	if err := pbtypes.EncryptAndSet(record, "seed", seed, options.EncryptionKey); err != nil {
+		return utils.WrapError(err, "failed to encrypt user seed")
+	}
 
 	return generateUserJWT(app, jwtGen, record, options)
 }
@@ -503,8 +543,8 @@ func generateUserJWT(app *pocketbase.PocketBase, jwtGen *jwt.Generator, record *
 		return utils.WrapErrorf(err, "failed to find role %s", record.GetString("role_id"))
 	}
 
-	user := pbtypes.RecordToUserModel(record)
-	accountModel := pbtypes.RecordToAccountModel(account)
+	user := pbtypes.RecordToUserModel(record, options.EncryptionKey)
+	accountModel := pbtypes.RecordToAccountModel(account, options.EncryptionKey)
 	roleModel := pbtypes.RecordToRoleModel(role)
 
 	jwtValue, err := jwtGen.GenerateUserJWT(user, accountModel, roleModel)
@@ -589,6 +629,10 @@ func validateOptions(options Options) error {
 		if err := utils.ValidatePositiveDuration(options.ConnectionTimeouts.RequestTimeout, "request timeout"); err != nil {
 			return err
 		}
+	}
+
+	if options.EncryptionKey != "" && len(options.EncryptionKey) != 32 {
+		return fmt.Errorf("encryption key must be exactly 32 characters, got %d", len(options.EncryptionKey))
 	}
 
 	return nil

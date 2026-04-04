@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/pocketbase/dbx"
 	"github.com/pocketbase/pocketbase"
 	"github.com/spf13/cobra"
 	pbtypes "github.com/skeeeon/pb-nats/internal/types"
@@ -145,15 +146,24 @@ func getOperatorAndSystemAccount(app *pocketbase.PocketBase) (*pbtypes.SystemOpe
 		return nil, nil, fmt.Errorf("operator JWT is empty - please run the server first to complete initialization")
 	}
 
-	// Get system account
-	sysAccountRecords, err := app.FindAllRecords(DefaultAccountCollectionName)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to find account records: %w", err)
+	// Get system account by stored ID, fall back to name for backward compatibility
+	var sysAccount *systemAccountInfo
+	if operator.SystemAccountID != "" {
+		rec, err := app.FindRecordById(DefaultAccountCollectionName, operator.SystemAccountID)
+		if err == nil {
+			sysAccount = &systemAccountInfo{
+				PublicKey: rec.GetString("public_key"),
+				JWT:       rec.GetString("jwt"),
+			}
+		}
 	}
 
-	var sysAccount *systemAccountInfo
-	for _, rec := range sysAccountRecords {
-		if rec.GetString("name") == "System Account" {
+	if sysAccount == nil {
+		sysAccountRecords, err := app.FindAllRecords(DefaultAccountCollectionName, dbx.HashExp{"name": "System Account"})
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to find account records: %w", err)
+		}
+		for _, rec := range sysAccountRecords {
 			sysAccount = &systemAccountInfo{
 				PublicKey: rec.GetString("public_key"),
 				JWT:       rec.GetString("jwt"),

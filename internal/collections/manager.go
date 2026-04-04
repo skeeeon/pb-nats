@@ -78,6 +78,7 @@ func (cm *Manager) createSystemOperatorCollection() error {
 	collection.Fields.Add(&core.JSONField{Name: "signing_keys", Required: false, MaxSize: 10000})
 	collection.Fields.Add(&core.JSONField{Name: "signing_keys_private", Required: false, MaxSize: 10000, Hidden: true})
 	collection.Fields.Add(&core.TextField{Name: "jwt", Max: 5000})
+	collection.Fields.Add(&core.TextField{Name: "system_account_id", Max: 200})
 	collection.Fields.Add(&core.AutodateField{Name: "created", OnCreate: true})
 	collection.Fields.Add(&core.AutodateField{Name: "updated", OnCreate: true, OnUpdate: true})
 
@@ -93,11 +94,12 @@ func (cm *Manager) createAccountsCollection() error {
 
 	collection := core.NewBaseCollection(cm.options.AccountCollectionName)
 	
-	collection.ListRule = types.Pointer("@request.auth.id != '' && active = true")
-	collection.ViewRule = types.Pointer("@request.auth.id != '' && active = true")
-	collection.CreateRule = types.Pointer("@request.auth.id != ''")
-	collection.UpdateRule = types.Pointer("@request.auth.id != ''")
-	collection.DeleteRule = types.Pointer("@request.auth.id != ''")
+	// Locked by default - consuming app should set appropriate API rules
+	collection.ListRule = nil
+	collection.ViewRule = nil
+	collection.CreateRule = nil
+	collection.UpdateRule = nil
+	collection.DeleteRule = nil
 
 	// Identity fields
 	collection.Fields.Add(&core.TextField{Name: "name", Required: true, Max: 100})
@@ -105,8 +107,8 @@ func (cm *Manager) createAccountsCollection() error {
 	
 	// Key fields
 	collection.Fields.Add(&core.TextField{Name: "public_key", Max: 200})
-	collection.Fields.Add(&core.TextField{Name: "private_key", Max: 200})
-	collection.Fields.Add(&core.TextField{Name: "seed", Max: 200})
+	collection.Fields.Add(&core.TextField{Name: "private_key", Max: 200, Hidden: true})
+	collection.Fields.Add(&core.TextField{Name: "seed", Max: 200, Hidden: true})
 	collection.Fields.Add(&core.JSONField{Name: "signing_keys", Required: false, MaxSize: 10000})
 	collection.Fields.Add(&core.JSONField{Name: "signing_keys_private", Required: false, MaxSize: 10000, Hidden: true})
 	collection.Fields.Add(&core.TextField{Name: "jwt", Max: 5000})
@@ -143,11 +145,12 @@ func (cm *Manager) createRolesCollection() error {
 
 	collection := core.NewBaseCollection(cm.options.RoleCollectionName)
 	
-	collection.ListRule = types.Pointer("@request.auth.id != ''")
-	collection.ViewRule = types.Pointer("@request.auth.id != ''")
-	collection.CreateRule = types.Pointer("@request.auth.id != ''")
-	collection.UpdateRule = types.Pointer("@request.auth.id != ''")
-	collection.DeleteRule = types.Pointer("@request.auth.id != ''")
+	// Locked by default - consuming app should set appropriate API rules
+	collection.ListRule = nil
+	collection.ViewRule = nil
+	collection.CreateRule = nil
+	collection.UpdateRule = nil
+	collection.DeleteRule = nil
 
 	// Identity fields
 	collection.Fields.Add(&core.TextField{Name: "name", Required: true, Max: 100})
@@ -191,18 +194,19 @@ func (cm *Manager) createUsersCollection() error {
 
 	collection := core.NewAuthCollection(cm.options.UserCollectionName)
 	
-	collection.ListRule = types.Pointer("@request.auth.id = id")
-	collection.ViewRule = types.Pointer("@request.auth.id = id")
-	collection.CreateRule = types.Pointer("@request.auth.id != ''")
-	collection.UpdateRule = types.Pointer("@request.auth.id = id")
-	collection.DeleteRule = types.Pointer("@request.auth.id = id")
+	// Locked by default - consuming app should set appropriate API rules
+	collection.ListRule = nil
+	collection.ViewRule = nil
+	collection.CreateRule = nil
+	collection.UpdateRule = nil
+	collection.DeleteRule = nil
 
 	// NATS-specific fields
 	collection.Fields.Add(&core.TextField{Name: "nats_username", Required: true, Max: 100})
 	collection.Fields.Add(&core.TextField{Name: "description", Max: 500})
 	collection.Fields.Add(&core.TextField{Name: "public_key", Max: 200})
-	collection.Fields.Add(&core.TextField{Name: "private_key", Max: 200})
-	collection.Fields.Add(&core.TextField{Name: "seed", Max: 200})
+	collection.Fields.Add(&core.TextField{Name: "private_key", Max: 200, Hidden: true})
+	collection.Fields.Add(&core.TextField{Name: "seed", Max: 200, Hidden: true})
 
 	// Save collection first to get ID for relations
 	if err := cm.app.Save(collection); err != nil {
@@ -392,7 +396,9 @@ func (cm *Manager) migrateSigningKeyData(collectionName string) error {
 		}
 
 		record.Set("signing_keys", pubJSON)
-		record.Set("signing_keys_private", privJSON)
+		if err := pbtypes.EncryptJSONAndSet(record, "signing_keys_private", privJSON, cm.options.EncryptionKey); err != nil {
+			continue
+		}
 
 		if err := cm.app.Save(record); err != nil {
 			return fmt.Errorf("failed to migrate signing keys for record %s: %w", record.Id, err)

@@ -18,32 +18,34 @@ import (
 
 // Manager orchestrates real-time synchronization between PocketBase record changes and NATS.
 type Manager struct {
-	app         *pocketbase.PocketBase
-	jwtGen      *jwt.Generator
-	nkeyManager *nkey.Manager
-	publisher   *publisher.Manager
-	options     pbtypes.Options
-	logger      *utils.Logger
-	
+	app              *pocketbase.PocketBase
+	jwtGen           *jwt.Generator
+	nkeyManager      *nkey.Manager
+	publisher        *publisher.Manager
+	options          pbtypes.Options
+	logger           *utils.Logger
+	systemAccountID  string
+
 	// Debouncing state
 	timer      *time.Timer
 	timerMutex sync.Mutex
-	
-	// Processing state  
+
+	// Processing state
 	isProcessing    bool
 	processingMutex sync.Mutex
 }
 
 // NewManager creates a new sync manager with all required dependencies.
-func NewManager(app *pocketbase.PocketBase, jwtGen *jwt.Generator, nkeyManager *nkey.Manager, 
-	publisher *publisher.Manager, options pbtypes.Options) *Manager {
+func NewManager(app *pocketbase.PocketBase, jwtGen *jwt.Generator, nkeyManager *nkey.Manager,
+	publisher *publisher.Manager, options pbtypes.Options, systemAccountID string) *Manager {
 	return &Manager{
-		app:         app,
-		jwtGen:      jwtGen,
-		nkeyManager: nkeyManager,
-		publisher:   publisher,
-		options:     options,
-		logger:      utils.NewLogger(options.LogToConsole),
+		app:             app,
+		jwtGen:          jwtGen,
+		nkeyManager:     nkeyManager,
+		publisher:       publisher,
+		options:         options,
+		systemAccountID: systemAccountID,
+		logger:          utils.NewLogger(options.LogToConsole),
 	}
 }
 
@@ -66,7 +68,7 @@ func (sm *Manager) setupAccountHooks() {
 		if e.Record.Collection().Name != sm.options.AccountCollectionName {
 			return e.Next()
 		}
-		if e.Record.GetString("name") == "System Account" {
+		if e.Record.Id == sm.systemAccountID {
 			return e.Next()
 		}
 
@@ -125,7 +127,7 @@ func (sm *Manager) setupAccountHooks() {
 		if e.Record.Collection().Name != sm.options.AccountCollectionName {
 			return e.Next()
 		}
-		if e.Record.GetString("name") == "System Account" {
+		if e.Record.Id == sm.systemAccountID {
 			return e.Next()
 		}
 		if sm.shouldHandleEvent(sm.options.AccountCollectionName, pbtypes.EventTypeAccountUpdate) {
@@ -139,7 +141,7 @@ func (sm *Manager) setupAccountHooks() {
 		if e.Collection.Name != sm.options.AccountCollectionName {
 			return e.Next()
 		}
-		if e.Record.GetString("name") == "System Account" {
+		if e.Record.Id == sm.systemAccountID {
 			return utils.WrapError(fmt.Errorf("cannot delete system account"), "account deletion validation failed")
 		}
 		if sm.shouldHandleEvent(sm.options.AccountCollectionName, pbtypes.EventTypeAccountDelete) {
@@ -270,7 +272,9 @@ func (sm *Manager) rotateAccountSigningKeys(record *core.Record) error {
 	}
 
 	record.Set("signing_keys", pubJSON)
-	record.Set("signing_keys_private", privJSON)
+	if err := pbtypes.EncryptJSONAndSet(record, "signing_keys_private", privJSON, sm.options.EncryptionKey); err != nil {
+		return utils.WrapError(err, "failed to encrypt signing keys")
+	}
 
 	if err := sm.generateAccountJWT(record); err != nil {
 		return utils.WrapError(err, "failed to regenerate account JWT with new signing keys")
@@ -297,7 +301,7 @@ func (sm *Manager) addAccountSigningKey(record *core.Record) error {
 	}
 
 	// Parse existing keys
-	account := pbtypes.RecordToAccountModel(record)
+	account := pbtypes.RecordToAccountModel(record, sm.options.EncryptionKey)
 
 	newPub, newPriv := pbtypes.NewSigningKeyPair(signingPublic, signingPrivateKey, signingKey)
 	pubKeys := append(account.SigningKeys, newPub)
@@ -309,7 +313,9 @@ func (sm *Manager) addAccountSigningKey(record *core.Record) error {
 	}
 
 	record.Set("signing_keys", pubJSON)
-	record.Set("signing_keys_private", privJSON)
+	if err := pbtypes.EncryptJSONAndSet(record, "signing_keys_private", privJSON, sm.options.EncryptionKey); err != nil {
+		return utils.WrapError(err, "failed to encrypt signing keys")
+	}
 
 	if err := sm.generateAccountJWT(record); err != nil {
 		return utils.WrapError(err, "failed to regenerate account JWT")
@@ -323,7 +329,7 @@ func (sm *Manager) addAccountSigningKey(record *core.Record) error {
 // removeAccountSigningKey removes a specific signing key from the account's key array.
 // Fails if the key is the only one remaining.
 func (sm *Manager) removeAccountSigningKey(record *core.Record, publicKeyToRemove string) error {
-	account := pbtypes.RecordToAccountModel(record)
+	account := pbtypes.RecordToAccountModel(record, sm.options.EncryptionKey)
 
 	if len(account.SigningKeysPrivate) <= 1 {
 		return fmt.Errorf("cannot remove the only signing key — use rotate_keys for emergency replacement")
@@ -357,7 +363,9 @@ func (sm *Manager) removeAccountSigningKey(record *core.Record, publicKeyToRemov
 	}
 
 	record.Set("signing_keys", pubJSON)
-	record.Set("signing_keys_private", privJSON)
+	if err := pbtypes.EncryptJSONAndSet(record, "signing_keys_private", privJSON, sm.options.EncryptionKey); err != nil {
+		return utils.WrapError(err, "failed to encrypt signing keys")
+	}
 
 	if err := sm.generateAccountJWT(record); err != nil {
 		return utils.WrapError(err, "failed to regenerate account JWT")
@@ -419,8 +427,12 @@ func (sm *Manager) generateAccountKeys(record *core.Record) error {
 	}
 
 	record.Set("public_key", public)
-	record.Set("private_key", privateKey)
-	record.Set("seed", seed)
+	if err := pbtypes.EncryptAndSet(record, "private_key", privateKey, sm.options.EncryptionKey); err != nil {
+		return utils.WrapError(err, "failed to encrypt account private key")
+	}
+	if err := pbtypes.EncryptAndSet(record, "seed", seed, sm.options.EncryptionKey); err != nil {
+		return utils.WrapError(err, "failed to encrypt account seed")
+	}
 
 	pub, priv := pbtypes.NewSigningKeyPair(signingPublic, signingPrivateKey, signingKey)
 	pubJSON, privJSON, err := pbtypes.MarshalSigningKeys(
@@ -431,7 +443,9 @@ func (sm *Manager) generateAccountKeys(record *core.Record) error {
 		return utils.WrapError(err, "failed to marshal signing keys")
 	}
 	record.Set("signing_keys", pubJSON)
-	record.Set("signing_keys_private", privJSON)
+	if err := pbtypes.EncryptJSONAndSet(record, "signing_keys_private", privJSON, sm.options.EncryptionKey); err != nil {
+		return utils.WrapError(err, "failed to encrypt account signing keys")
+	}
 
 	return sm.generateAccountJWT(record)
 }
@@ -443,7 +457,7 @@ func (sm *Manager) generateAccountJWT(record *core.Record) error {
 		return utils.WrapError(err, "failed to get system operator")
 	}
 
-	account := pbtypes.RecordToAccountModel(record)
+	account := pbtypes.RecordToAccountModel(record, sm.options.EncryptionKey)
 
 	latestKey := operator.LatestSigningKey()
 	if latestKey == nil {
@@ -476,8 +490,12 @@ func (sm *Manager) generateUserKeys(record *core.Record) error {
 	}
 
 	record.Set("public_key", public)
-	record.Set("private_key", privateKey)
-	record.Set("seed", seed)
+	if err := pbtypes.EncryptAndSet(record, "private_key", privateKey, sm.options.EncryptionKey); err != nil {
+		return utils.WrapError(err, "failed to encrypt user private key")
+	}
+	if err := pbtypes.EncryptAndSet(record, "seed", seed, sm.options.EncryptionKey); err != nil {
+		return utils.WrapError(err, "failed to encrypt user seed")
+	}
 
 	return sm.generateUserJWT(record)
 }
@@ -494,8 +512,8 @@ func (sm *Manager) generateUserJWT(record *core.Record) error {
 		return utils.WrapErrorf(err, "failed to find role %s", record.GetString("role_id"))
 	}
 
-	user := pbtypes.RecordToUserModel(record)
-	accountModel := pbtypes.RecordToAccountModel(account)
+	user := pbtypes.RecordToUserModel(record, sm.options.EncryptionKey)
+	accountModel := pbtypes.RecordToAccountModel(account, sm.options.EncryptionKey)
 	roleModel := pbtypes.RecordToRoleModel(role)
 
 	jwtValue, err := sm.jwtGen.GenerateUserJWT(user, accountModel, roleModel)
@@ -534,7 +552,7 @@ func (sm *Manager) getSystemOperator() (*pbtypes.SystemOperatorRecord, error) {
 	}
 
 	record := records[0]
-	operator := pbtypes.RecordToOperatorModel(record)
+	operator := pbtypes.RecordToOperatorModel(record, sm.options.EncryptionKey)
 
 	if err := utils.ValidateRequired(operator.PublicKey, "operator public key"); err != nil {
 		return nil, utils.WrapError(err, "invalid system operator")

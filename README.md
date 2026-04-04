@@ -1,30 +1,28 @@
 # PocketBase NATS JWT Authentication
 
-A high-performance library for seamless integration between [PocketBase](https://pocketbase.io/) and [NATS Server](https://nats.io/) using JWT-based authentication. This library automatically generates and manages NATS JWTs in real-time, eliminating traditional configuration file management.
+A Go library for extending [PocketBase](https://pocketbase.io/) for managing [NATS Server](https://nats.io/) using JWT-based authentication. Automatically generates and manages NATS operator, account, and user nKeys and JWTs in real-time through PocketBase hooks, eliminating traditional configuration file management.
 
-## 🚀 Key Features
+## Key Features
 
-- **⚡ High-Performance JWT Generation**: Sub-millisecond operations using pure Go libraries
-- **🔄 Real-time Synchronization**: Direct JWT publishing to NATS via `$SYS.REQ.CLAIMS.UPDATE`
-- **🏢 Account-Based Architecture**: Natural isolation boundaries without subject scoping
-- **🥾 Graceful Bootstrap**: Starts without NATS, connects when available (solves chicken-and-egg problem)
-- **🔗 Persistent Connections**: Single connection with automatic failover and intelligent failback
-- **🔒 Security Features**: Multiple signing keys per account with graceful and emergency rotation
-- **⚡ Queue-Based Publishing**: Reliable operations with retry logic and automatic cleanup
-- **🔑 Simple Regeneration**: JWT refresh via boolean field triggers
-- **📊 Account Limits**: Configurable resource limits at both account and user levels
-- **⚙️ Hierarchical Limits**: Account-level limits control overall resources, role-based limits control per-user resources
-- **🚫 Deny Permissions**: Fine-grained access control with allow/deny subject patterns
-- **👤 Per-User Permissions**: Optional user-level permission overrides merged with role permissions
-- **📨 Response Permissions**: Request-reply pattern support with configurable limits
+- **Real-time JWT Sync**: PocketBase CRUD hooks trigger JWT generation and publish to NATS via `$SYS.REQ.CLAIMS.UPDATE`
+- **Account-Based Multi-Tenancy**: NATS accounts provide hard isolation boundaries without subject scoping
+- **Graceful Bootstrap**: Starts without NATS running, operator JWT generated in-memory for initial NATS config
+- **Persistent Connections**: Single NATS connection with automatic failover to backup servers and exponential backoff
+- **Multiple Signing Keys**: Graceful and emergency key rotation per account
+- **Two-Tier Permissions**: Role baseline + optional per-user overrides (union merge), with allow/deny semantics
+- **Two-Tier Limits**: Account-level (shared) and role-level (per-user) resource limits
+- **Queue-Based Publishing**: Reliable JWT publishing with retry, deduplication, and automatic cleanup
+- **Optional At-Rest Encryption**: AES-256-GCM encryption of sensitive fields using PocketBase's built-in security helpers
+- **Response Permissions**: Request-reply pattern support with configurable limits
+- **Locked-Down Defaults**: All collection API rules default to `nil` — consuming apps explicitly grant access
 
-## 📦 Installation
+## Installation
 
 ```bash
 go get github.com/skeeeon/pb-nats
 ```
 
-## 🚀 Quick Start
+## Quick Start
 
 ```go
 package main
@@ -32,50 +30,49 @@ package main
 import (
     "log"
     "github.com/pocketbase/pocketbase"
-    "github.com/skeeeon/pb-nats"
+    pbnats "github.com/skeeeon/pb-nats"
 )
 
 func main() {
     app := pocketbase.New()
-    
-    // Setup with defaults - starts even without NATS running
-    if err := pbnats.Setup(app, pbnats.DefaultOptions()); err != nil {
+
+    options := pbnats.DefaultOptions()
+    options.NATSServerURL = "nats://localhost:4222"
+    options.OperatorName = "my-operator"
+
+    if err := pbnats.Setup(app, options); err != nil {
         log.Fatalf("Failed to setup NATS sync: %v", err)
     }
-    
-    // Register CLI commands for NATS configuration export
+
     pbnats.RegisterCommands(app)
-    
+
     if err := app.Start(); err != nil {
         log.Fatal(err)
     }
 }
 ```
 
-## 🥾 Bootstrap Process
+## Bootstrap Process
 
 **Problem**: Need operator JWT to configure NATS, but pb-nats needs NATS running.
 
-**Solution**: Graceful bootstrap mode with CLI export command:
+**Solution**: Graceful bootstrap — JWT generated in-memory first, then exported via CLI.
 
 ### Step 1: Initialize PocketBase
 ```bash
-# Build and run to initialize the database
 ./myapp serve
-
 # Create a superuser when prompted, then stop the server (Ctrl+C)
 ```
 
 ### Step 2: Export NATS Configuration
 ```bash
-# Export all configuration files to a directory
 ./myapp nats export --output ./nats-config/
 
-# This creates:
-#   ./nats-config/operator.jwt
-#   ./nats-config/operator.conf
-#   ./nats-config/nats.conf
-#   ./nats-config/README.txt
+# Creates:
+#   operator.jwt      - Operator JWT for NATS resolver
+#   operator.conf     - Operator config with system account
+#   nats.conf         - Ready-to-use NATS server config
+#   README.txt        - Setup instructions
 ```
 
 ### Step 3: Start NATS Server
@@ -88,123 +85,242 @@ nats-server -c nats.conf
 ### Step 4: Start PocketBase
 ```bash
 ./myapp serve
-# pb-nats automatically connects and syncs
+# pb-nats connects and begins syncing JWTs
 ```
 
 ### CLI Export Options
 ```bash
-# Export all files to directory
-./myapp nats export --output ./nats-config/
+./myapp nats export --output ./nats-config/     # All files to directory
+./myapp nats export --operator-jwt              # Operator JWT to stdout
+./myapp nats export --config                    # nats.conf to stdout
+./myapp nats export --operator-conf             # operator.conf to stdout
 
-# Export only operator JWT to stdout (for scripting)
-./myapp nats export --operator-jwt
-
-# Export only nats.conf to stdout
-./myapp nats export --config
-
-# Export only operator.conf to stdout
-./myapp nats export --operator-conf
-
-# Customize server settings
+# Custom server settings
 ./myapp nats export --output ./nats-config/ \
-  --server-name my-production-nats \
+  --server-name my-nats \
   --port 4222 \
   --jetstream-store /var/lib/nats/jetstream
 ```
 
-## 📋 Collections Schema
+## Architecture
+
+### Data Flow
+
+```
+PocketBase CRUD (REST API)
+    |
+    v
+Hooks (sync/) -> Generate keys/JWTs (nkey/, jwt/)
+    |
+    v
+Queue for publish (publisher/)
+    |
+    v
+NATS connection with failover (connection/)
+    |
+    v
+NATS Server ($SYS.REQ.CLAIMS.UPDATE)
+```
+
+### Initialization Order
+
+1. **Collections** — Creates 5 PocketBase collections (all API rules locked by default)
+2. **NKey Manager** — Generates NATS NKey pairs (operator, account, user)
+3. **JWT Generator** — Generates NATS JWTs with permissions and limits
+4. **System Components** — Creates operator, system account, system role, system user
+5. **Publisher** — Starts persistent NATS connection with failover
+6. **Sync Manager** — Registers PocketBase hooks for real-time sync
+
+### Key Design Decisions
+
+- **Account isolation** for multi-tenancy (not subject scoping)
+- **Graceful bootstrap**: operator JWT generated before NATS is running
+- **Two-tier permissions**: role provides baseline, per-user permissions merged via union
+- **Two-tier limits**: account-level and role-based per-user limits
+- **Multiple signing keys**: most recent key signs new JWTs, older keys remain valid
+- **Locked collections by default**: consuming app sets API rules appropriate to its deployment model
+- **NKeys stored in PocketBase** (PocketBase is the authority, optional encryption at rest)
+
+## Collections
+
+pb-nats creates 5 collections. All have `nil` API rules by default — the consuming app must explicitly configure access rules appropriate for its deployment.
 
 ### System Operator (`nats_system_operator`)
-*Contains operator JWT for NATS server configuration*
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `name` | Text | Operator name |
-| `public_key` | Text | Operator public key |
-| `private_key` | Text | Operator private key |
-| `seed` | Text | Operator seed |
-| `signing_keys` | JSON | Array of signing public keys and metadata (API-visible) |
-| `signing_keys_private` | JSON | Array of full signing key material (hidden from API) |
-| `jwt` | Text | **Operator JWT for NATS configuration** |
+Internal collection — should remain locked. Contains the operator identity, signing keys, and JWT used for NATS server configuration.
+
+| Field | Type | Hidden | Description |
+|-------|------|--------|-------------|
+| `name` | Text | | Operator name |
+| `public_key` | Text | | Operator identity public key |
+| `private_key` | Text | Yes | Operator private key |
+| `seed` | Text | Yes | Operator seed |
+| `signing_keys` | JSON | | Array of signing public keys |
+| `signing_keys_private` | JSON | Yes | Array of signing key material |
+| `jwt` | Text | | Operator JWT |
+| `system_account_id` | Text | | Reference to system account record |
 
 ### Accounts (`nats_accounts`)
-*NATS accounts providing isolation boundaries with configurable limits*
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `name` | Text | Account display name |
-| `description` | Text | Account description |
-| `public_key` | Text | Account public key |
-| `private_key` | Text | Account private key |
-| `seed` | Text | Account seed |
-| `signing_keys` | JSON | Array of signing public keys and metadata (API-visible) |
-| `signing_keys_private` | JSON | Array of full signing key material (hidden from API) |
-| `jwt` | Text | Account JWT |
-| `active` | Boolean | Account status |
-| `add_signing_key` | Boolean | **Triggers new signing key generation (graceful rotation)** |
-| `remove_signing_key` | Text | **Public key to remove from signing keys** |
-| `rotate_keys` | Boolean | **Emergency rotation — purges all keys, generates new one** |
-| `max_connections` | Number | Max concurrent connections (-1 = unlimited, 0 = disabled) |
-| `max_subscriptions` | Number | Max subscriptions across account (-1 = unlimited, 0 = disabled) |
-| `max_data` | Number | Max bytes in-flight across account (-1 = unlimited, 0 = disabled) |
-| `max_payload` | Number | Max message size for account (-1 = unlimited, 0 = disabled) |
-| `max_jetstream_disk_storage` | Number | Max JetStream disk storage (-1 = unlimited, 0 = disabled) |
-| `max_jetstream_memory_storage` | Number | Max JetStream memory storage (-1 = unlimited, 0 = disabled) |
+Each account is an isolation boundary in NATS. Users within an account cannot see traffic from other accounts.
 
-### Users (`nats_users`) 
-*PocketBase auth collection with NATS integration*
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `email` | Email | PocketBase email |
-| `password` | Password | PocketBase password |
-| `verified` | Boolean | Email verification status |
-| `nats_username` | Text | NATS username |
-| `description` | Text | User description |
-| `account_id` | Relation | Link to account |
-| `role_id` | Relation | Link to role |
-| `public_key` | Text | User public key |
-| `private_key` | Text | User private key |
-| `seed` | Text | User seed |
-| `jwt` | Text | User JWT |
-| `creds_file` | Text | Complete .creds file |
-| `regenerate` | Boolean | **Triggers JWT regeneration** |
-| `active` | Boolean | User status |
-| `publish_permissions` | JSON | Per-user allowed publish subjects (merged with role) |
-| `subscribe_permissions` | JSON | Per-user allowed subscribe subjects (merged with role) |
-| `publish_deny_permissions` | JSON | Per-user denied publish subjects (merged with role) |
-| `subscribe_deny_permissions` | JSON | Per-user denied subscribe subjects (merged with role) |
+| Field | Type | Hidden | Description |
+|-------|------|--------|-------------|
+| `name` | Text | | Account display name |
+| `description` | Text | | Account description |
+| `public_key` | Text | | Account public key |
+| `private_key` | Text | Yes | Account private key |
+| `seed` | Text | Yes | Account seed |
+| `signing_keys` | JSON | | Array of signing public keys |
+| `signing_keys_private` | JSON | Yes | Array of signing key material |
+| `jwt` | Text | | Account JWT |
+| `active` | Bool | | Account enabled/disabled |
+| `add_signing_key` | Bool | | Trigger: append new signing key |
+| `remove_signing_key` | Text | | Trigger: remove key by public key string |
+| `rotate_keys` | Bool | | Trigger: emergency rotation (purge all, generate new) |
+| `max_connections` | Number | | Max concurrent connections (-1=unlimited, 0=disabled) |
+| `max_subscriptions` | Number | | Max subscriptions (-1=unlimited, 0=disabled) |
+| `max_data` | Number | | Max bytes in-flight (-1=unlimited, 0=disabled) |
+| `max_payload` | Number | | Max message size (-1=unlimited, 0=disabled) |
+| `max_jetstream_disk_storage` | Number | | JetStream disk limit (-1=unlimited, 0=disabled) |
+| `max_jetstream_memory_storage` | Number | | JetStream memory limit (-1=unlimited, 0=disabled) |
 
 ### Roles (`nats_roles`)
-*Permission templates with per-user limits and deny permissions*
+
+Permission templates assigned to users. Defines allowed/denied subjects and per-user resource limits.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `name` | Text | Role name |
 | `description` | Text | Role description |
-| `publish_permissions` | Text | JSON array of allowed publish subjects |
-| `subscribe_permissions` | Text | JSON array of allowed subscribe subjects |
-| `publish_deny_permissions` | Text | JSON array of denied publish subjects |
-| `subscribe_deny_permissions` | Text | JSON array of denied subscribe subjects |
-| `allow_response` | Boolean | **Enable response permissions for request-reply** |
-| `allow_response_max` | Number | Max responses per request (-1 = unlimited, 0 = default/1) |
-| `allow_response_ttl` | Number | Response TTL in seconds (0 = no limit) |
-| `max_subscriptions` | Number | Max subscriptions per user (-1 = unlimited, 0 = disabled) |
-| `max_data` | Number | Data limit per user (-1 = unlimited, 0 = disabled) |
-| `max_payload` | Number | Message size limit per user (-1 = unlimited, 0 = disabled) |
+| `is_default` | Bool | Default role flag |
+| `publish_permissions` | JSON | Allowed publish subjects |
+| `subscribe_permissions` | JSON | Allowed subscribe subjects |
+| `publish_deny_permissions` | JSON | Denied publish subjects (takes precedence) |
+| `subscribe_deny_permissions` | JSON | Denied subscribe subjects (takes precedence) |
+| `allow_response` | Bool | Enable request-reply response permissions |
+| `allow_response_max` | Number | Max responses per request (-1=unlimited, 0=default/1) |
+| `allow_response_ttl` | Number | Response TTL in seconds (0=no limit) |
+| `max_subscriptions` | Number | Per-user subscription limit |
+| `max_data` | Number | Per-user data limit |
+| `max_payload` | Number | Per-user message size limit |
 
-## 🔐 Permission System
+### Users (`nats_users`)
 
-### Allow/Deny Permissions
+PocketBase auth collection with NATS integration. Each user belongs to one account and one role.
 
-pb-nats supports both allow and deny permission patterns. Deny permissions take precedence over allow permissions.
+| Field | Type | Hidden | Description |
+|-------|------|--------|-------------|
+| `nats_username` | Text | | NATS username |
+| `description` | Text | | User description |
+| `account_id` | Relation | | Link to account |
+| `role_id` | Relation | | Link to role |
+| `public_key` | Text | | User public key |
+| `private_key` | Text | Yes | User private key |
+| `seed` | Text | Yes | User seed |
+| `jwt` | Text | | User JWT |
+| `creds_file` | Text | | Complete NATS .creds file for client connection |
+| `bearer_token` | Bool | | Enable bearer token auth |
+| `jwt_expires_at` | Date | | JWT expiration timestamp |
+| `regenerate` | Bool | | Trigger: regenerate JWT |
+| `active` | Bool | | User status |
+| `publish_permissions` | JSON | | Per-user publish overrides (merged with role) |
+| `subscribe_permissions` | JSON | | Per-user subscribe overrides (merged with role) |
+| `publish_deny_permissions` | JSON | | Per-user publish deny overrides |
+| `subscribe_deny_permissions` | JSON | | Per-user subscribe deny overrides |
 
-**Permission Evaluation Order (NATS semantics):**
+### Publish Queue (`nats_publish_queue`)
+
+Internal queue for reliable JWT publishing. Should remain locked.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `account_id` | Relation | Account being published |
+| `action` | Select | `upsert` or `delete` |
+| `message` | Text | Error message on failure |
+| `attempts` | Number | Retry count (0-10) |
+| `failed_at` | Date | Set on permanent failure |
+
+## Security
+
+### Collection Access Rules
+
+All collections default to `nil` (no API access). This is intentional — pb-nats is a library, and the consuming app is responsible for setting API rules appropriate to its deployment model.
+
+**Recommended approach:**
+- Keep `nats_system_operator` and `nats_publish_queue` locked (system-only)
+- Set accounts and roles rules to allow trusted admin/service access
+- Set user rules to allow self-service credential retrieval
+
+Example (consuming app's migration or setup code):
+```go
+accounts, _ := app.FindCollectionByNameOrId("nats_accounts")
+accounts.ListRule = types.Pointer("@request.auth.id != '' && active = true")
+accounts.ViewRule = types.Pointer("@request.auth.id != '' && active = true")
+app.Save(accounts)
+```
+
+### Hidden Fields
+
+Sensitive cryptographic material (`private_key`, `seed`, `signing_keys_private`) is marked `Hidden: true` on all collections. These fields are never included in API responses, regardless of access rules.
+
+### At-Rest Encryption
+
+Optional AES-256-GCM encryption of sensitive fields stored in the database, using PocketBase's built-in security helpers.
+
+```go
+options := pbnats.DefaultOptions()
+options.EncryptionKey = "your-random-32-character-string!" // exactly 32 characters
+```
+
+**Encrypted fields**: `private_key`, `seed`, and `signing_keys_private` on operator, account, and user records.
+
+**Not encrypted** (by design):
+- `jwt` — public claims, needed for NATS resolver config
+- `creds_file` — contains seed but left unencrypted for self-service download
+- `public_key` — not sensitive
+
+**Backward compatibility**: Encrypted values are stored with an `enc::` prefix. Values without the prefix are treated as plaintext. Existing unencrypted data works without migration — fields are encrypted on the next write.
+
+**Key requirements**: Must be exactly 32 characters (AES-256). Validated at startup. Changing the key requires manual re-encryption of existing data.
+
+### Multiple Signing Keys
+
+Accounts and the operator support multiple signing keys. The most recently added key signs new JWTs, while older keys remain valid for existing JWTs.
+
+**Add key (graceful rotation):**
+```http
+PATCH /api/collections/nats_accounts/records/{id}
+{"add_signing_key": true}
+```
+
+**Remove key:**
+```http
+PATCH /api/collections/nats_accounts/records/{id}
+{"remove_signing_key": "AABC...public_key_to_remove"}
+```
+
+**Emergency rotation (purge all, generate new):**
+```http
+PATCH /api/collections/nats_accounts/records/{id}
+{"rotate_keys": true}
+```
+
+**Graceful rotation workflow:**
+1. `{"add_signing_key": true}` — new key added, old JWTs still valid
+2. Regenerate user JWTs at your own pace via `{"regenerate": true}` on each user
+3. `{"remove_signing_key": "OLD_KEY"}` — revoke the old key
+
+## Permission System
+
+### Allow/Deny Semantics
+
+Permissions follow NATS semantics: deny takes precedence over allow.
+
 1. Check if subject matches any Allow pattern
 2. If allowed, check if subject matches any Deny pattern
-3. Deny takes precedence over Allow for matching subjects
+3. Deny wins on match
 
-**Example Role Configuration:**
 ```json
 {
   "name": "sensor_reader",
@@ -215,23 +331,10 @@ pb-nats supports both allow and deny permission patterns. Deny permissions take 
 }
 ```
 
-This role:
-- ✅ Can publish to `sensors.temperature`
-- ❌ Cannot publish to `sensors.internal.config` (denied)
-- ✅ Can subscribe to `alerts.critical`
-- ❌ Cannot subscribe to `alerts.admin.notifications` (denied)
-
 ### Per-User Permission Overrides
 
-In addition to role-based permissions, you can set permissions directly on individual users. User-level permissions are **merged (union)** with role permissions — they extend the role's baseline rather than replacing it.
+User-level permissions are **merged (union)** with role permissions — they extend the role's baseline, not replace it.
 
-This is useful for:
-- Granting a specific user access to additional subjects beyond their role
-- Adding user-level deny rules to restrict a specific user below their role's access
-
-**Example: User with additional permissions beyond their role**
-
-Role grants `sensors.>`, user also needs `admin.reports.>`:
 ```json
 {
   "publish_permissions": ["admin.reports.>"],
@@ -239,122 +342,99 @@ Role grants `sensors.>`, user also needs `admin.reports.>`:
 }
 ```
 
-The resulting JWT contains the union: `sensors.>` + `admin.reports.>` for both pub/sub.
+If the role grants `sensors.>`, the user's resulting JWT contains both `sensors.>` and `admin.reports.>`.
 
-**Example: User with additional restrictions**
+Per-user deny permissions also merge with role deny permissions. When all permission fields are empty, the user inherits the role's permissions unchanged.
 
-Role grants `events.>`, but this user should not access internal events:
+### Response Permissions
+
+For request-reply patterns, configure on the role:
+
 ```json
 {
-  "publish_deny_permissions": ["events.internal.>"],
-  "subscribe_deny_permissions": ["events.internal.>"]
-}
-```
-
-**Note:** User-level permissions are optional. When empty, the user inherits only their role's permissions (unchanged behavior). Response permissions and per-user resource limits remain role-only.
-
-### Response Permissions (Request-Reply)
-
-Response permissions control the ability to reply to requests in request-reply patterns.
-
-**Fields:**
-- `allow_response`: Boolean to enable/disable response permissions
-- `allow_response_max`: Maximum number of responses per request
-  - `-1` = Unlimited responses
-  - `0` = Default (1 response)
-  - `positive` = Specific limit
-- `allow_response_ttl`: Time-to-live for responses in seconds
-  - `0` = No expiration
-  - `positive` = Expires after N seconds
-
-**Example: Service Role with Request-Reply**
-```json
-{
-  "name": "api_service",
-  "publish_permissions": ["api.>"],
-  "subscribe_permissions": ["api.requests.>"],
   "allow_response": true,
   "allow_response_max": 1,
   "allow_response_ttl": 30
 }
 ```
 
-**Note:** The system admin role has response permissions enabled by default with unlimited responses. For user-created roles, you must explicitly enable `allow_response`.
+- `allow_response_max`: -1=unlimited, 0=default (1 response), positive=specific limit
+- `allow_response_ttl`: 0=no expiration, positive=seconds
 
-## 📊 Resource Limits Hierarchy
+## Resource Limits
 
-pb-nats implements a two-tier resource limit system:
+### Account-Level (Shared)
 
-### Account-Level Limits (Shared Resources)
-Set on the **account** record, these limits control total resources across the entire account:
-- `max_connections`: Total concurrent connections to the account
-- `max_subscriptions`: Total subscriptions across all users in account
-- `max_data`: Total bytes in-flight across all users in account
-- `max_payload`: Maximum message size for the account
-- `max_jetstream_disk_storage`: Total JetStream disk usage for account
-- `max_jetstream_memory_storage`: Total JetStream memory usage for account
+Set on the account record. Controls total resources across all users in the account:
+- `max_connections`, `max_subscriptions`, `max_data`, `max_payload`
+- `max_jetstream_disk_storage`, `max_jetstream_memory_storage`
 
-### User-Level Limits (Per-User Resources)
-Set on the **role** record, these limits control individual user resource usage:
-- `max_subscriptions`: Maximum concurrent subscriptions per user
-- `max_data`: Maximum bytes a single user can have in-flight
-- `max_payload`: Maximum message size a single user can send
+### User-Level (Per-User)
 
-### Limit Values ⚠️ IMPORTANT
+Set on the role record. Controls individual user resource usage:
+- `max_subscriptions`, `max_data`, `max_payload`
 
-- **`-1`**: **Unlimited** (no restrictions)
-- **`0`**: **Disabled** (no access allowed - **use with caution**)
-- **`positive`**: **Specific limits** in appropriate units (bytes, count, etc.)
+### Limit Values
 
-⚠️ **Critical Warning**: Setting limits to `0` **completely disables** access for that resource.
+| Value | Meaning |
+|-------|---------|
+| `-1` | Unlimited |
+| `0` | **Disabled** (blocks access entirely) |
+| positive | Specific limit (bytes, count, etc.) |
 
-## ⚙️ Configuration Options
+Setting a limit to `0` completely disables access for that resource.
+
+## Configuration
 
 ```go
 options := pbnats.DefaultOptions()
 
-// Collection Names
-options.UserCollectionName = "nats_users"
-options.RoleCollectionName = "nats_roles"  
-options.AccountCollectionName = "nats_accounts"
-
-// NATS Configuration
+// NATS server
 options.NATSServerURL = "nats://localhost:4222"
-options.BackupNATSServerURLs = []string{
-    "nats://backup1:4222",
-    "nats://backup2:4222", 
-}
-options.OperatorName = "stone-age.io"
+options.BackupNATSServerURLs = []string{"nats://backup1:4222", "nats://backup2:4222"}
+options.OperatorName = "my-operator"
 
-// Connection Management
-options.ConnectionRetryConfig = &pbtypes.RetryConfig{
-    MaxPrimaryRetries: 4,
+// Connection retry
+options.ConnectionRetryConfig = &pbnats.RetryConfig{
+    MaxPrimaryRetries: 4,           // attempts before trying backup
     InitialBackoff:    1 * time.Second,
     MaxBackoff:        8 * time.Second,
     BackoffMultiplier: 2.0,
-    FailbackInterval:  30 * time.Second,
+    FailbackInterval:  30 * time.Second, // how often to try primary again
 }
 
-// Performance & Cleanup
-options.PublishQueueInterval = 30 * time.Second
-options.DebounceInterval = 3 * time.Second
+// Timeouts
+options.ConnectionTimeouts = &pbnats.TimeoutConfig{
+    ConnectTimeout: 5 * time.Second,
+    PublishTimeout: 10 * time.Second,
+    RequestTimeout: 10 * time.Second,
+}
+
+// Performance
+options.PublishQueueInterval = 30 * time.Second  // queue processing interval
+options.DebounceInterval = 3 * time.Second       // batch rapid changes
+
+// Cleanup
 options.FailedRecordCleanupInterval = 6 * time.Hour
 options.FailedRecordRetentionTime = 24 * time.Hour
 
-// Default Permissions (when role permissions are empty)
+// Default permissions (when role permissions are empty)
 options.DefaultPublishPermissions = []string{">"}
 options.DefaultSubscribePermissions = []string{">", "_INBOX.>"}
 
-// JWT Settings
-options.DefaultJWTExpiry = 0 // Never expires (default)
+// JWT
+options.DefaultJWTExpiry = 0 // never expires
 
-// Logging
-options.LogToConsole = true
+// Security
+options.EncryptionKey = "" // empty = disabled, 32 chars = enabled
+
+// Event filtering
+options.EventFilter = func(collection, event string) bool {
+    return true // process all events
+}
 ```
 
 ### CLI Command Options
-
-You can customize CLI command defaults:
 
 ```go
 pbnats.RegisterCommandsWithOptions(app, pbnats.CommandOptions{
@@ -365,103 +445,13 @@ pbnats.RegisterCommandsWithOptions(app, pbnats.CommandOptions{
 })
 ```
 
-## 🔒 Security Features
+## Client Connection
 
-### Multiple Signing Keys
-
-Accounts support multiple signing keys simultaneously. All signing public keys are embedded in the account JWT, so NATS validates user JWTs signed by any of them. The most recently added key is used to sign new user JWTs.
-
-This enables **graceful key rotation** — add a new key, let existing JWTs remain valid, then remove the old key when ready.
-
-### Signing Key Management
-
-**Add a new signing key (graceful rotation):**
-```http
-PATCH /api/collections/nats_accounts/records/{account_id}
-{"add_signing_key": true}
-```
-Generates a new signing key and appends it. Existing user JWTs remain valid. New user JWTs will be signed with the new key.
-
-**Remove an old signing key:**
-```http
-PATCH /api/collections/nats_accounts/records/{account_id}
-{"remove_signing_key": "AABC...the_public_key_to_remove"}
-```
-Removes the specified key. User JWTs signed by the removed key become invalid. Cannot remove the only remaining key.
-
-**Emergency rotation (hard cutover):**
-```http
-PATCH /api/collections/nats_accounts/records/{account_id}
-{"rotate_keys": true}
-```
-Purges all existing signing keys and generates a single new one. All user JWTs in the account are immediately invalidated. User JWT regeneration is a separate, explicit action.
-
-### Graceful Rotation Workflow
-
-1. Add a new signing key: `{"add_signing_key": true}`
-2. New user JWTs are signed with the new key; old JWTs still work
-3. Regenerate user JWTs at your own pace (via `regenerate` flag on each user)
-4. Remove the old key when ready: `{"remove_signing_key": "OLD_PUBLIC_KEY"}`
-
-## 🌐 API Usage
-
-### Creating Roles with Deny Permissions
-```bash
-POST /api/collections/nats_roles/records
-{
-    "name": "restricted_publisher",
-    "publish_permissions": "[\"events.>\"]",
-    "subscribe_permissions": "[\"events.>\"]",
-    "publish_deny_permissions": "[\"events.admin.>\", \"events.internal.>\"]",
-    "subscribe_deny_permissions": "[\"events.private.>\"]",
-    "allow_response": false,
-    "max_subscriptions": 100,
-    "max_data": 1048576,
-    "max_payload": 65536
-}
-```
-
-### Creating Roles with Response Permissions
-```bash
-POST /api/collections/nats_roles/records
-{
-    "name": "api_responder",
-    "publish_permissions": "[\"api.responses.>\"]",
-    "subscribe_permissions": "[\"api.requests.>\"]",
-    "allow_response": true,
-    "allow_response_max": 5,
-    "allow_response_ttl": 60
-}
-```
-
-### Creating Users with Per-User Permissions
-```bash
-POST /api/collections/nats_users/records
-{
-    "email": "alice@example.com",
-    "password": "securepassword",
-    "passwordConfirm": "securepassword",
-    "nats_username": "alice",
-    "account_id": "ACCOUNT_ID",
-    "role_id": "ROLE_ID",
-    "active": true,
-    "publish_permissions": "[\"admin.reports.>\"]",
-    "subscribe_permissions": "[\"admin.reports.>\"]",
-    "publish_deny_permissions": "[]",
-    "subscribe_deny_permissions": "[\"events.internal.>\"]"
-}
-```
-
-Per-user permissions are merged with the role's permissions. Leave permission fields empty to inherit only from the role.
-
-### Client Connection
 ```javascript
 const pb = new PocketBase('http://localhost:8090');
-await pb.collection('users').authWithPassword('user@example.com', 'password');
+await pb.collection('nats_users').authWithPassword('user@example.com', 'password');
 
-const user = await pb.collection('nats_users').getOne(pb.authStore.model.id, {
-    fields: 'creds_file'
-});
+const user = await pb.collection('nats_users').getOne(pb.authStore.record.id);
 
 import { connect, credsAuthenticator } from 'nats';
 const nc = await connect({
@@ -470,44 +460,34 @@ const nc = await connect({
 });
 ```
 
-## 📊 Account Isolation
+## Error Handling
 
-Accounts provide natural boundaries - no subject scoping needed:
+pb-nats exports typed errors with classification helpers:
 
 ```go
-// Account: "company-a" 
-// Users can use: "sensors.temperature", "alerts.critical"
-
-// Account: "company-b"
-// Users can use: "sensors.temperature", "alerts.critical" 
-// Completely isolated from company-a
+if pbnats.IsTemporaryError(err) {
+    // Network/timeout - retry
+}
+if pbnats.IsPermanentError(err) {
+    // Invalid config/auth - don't retry
+}
+if pbnats.IsConfigurationError(err) {
+    // Setup issue - fail fast
+}
 ```
 
-## 🐛 Troubleshooting
+## Troubleshooting
 
-**Permission Issues:**
-- Check if deny permissions are blocking expected access (both role-level and user-level)
-- Verify allow permissions include required subjects
-- Remember that per-user permissions are merged with role permissions (union), not replaced
-- User-level deny rules take effect even if the role allows the subject
-- Check response permissions for request-reply patterns
+**Bootstrap**: If NATS isn't running, pb-nats operates in bootstrap mode. Export config with `nats export`, start NATS, then restart PocketBase.
 
-**Response Permission Issues:**
-- Ensure `allow_response` is set to `true` on the role
-- Check `allow_response_max` isn't set to `0` (which uses default of 1)
-- Verify `allow_response_ttl` isn't expiring before response is sent
+**Permission issues**: Check deny permissions (both role and user level). Deny takes precedence. Per-user permissions are additive (union), not replacements.
 
-**Signing Key Issues:**
-- After emergency rotation (`rotate_keys`), all user JWTs are invalid — regenerate them explicitly
-- After removing a signing key, only JWTs signed by that specific key are invalidated
-- The `signing_keys` field (API-visible) shows public keys only; private material is in the hidden `signing_keys_private` field
-- Existing deployments are automatically migrated from old scalar signing key fields on startup
+**Signing key issues**: After `rotate_keys`, all user JWTs are invalid — regenerate explicitly. After `remove_signing_key`, only JWTs signed by that key are invalidated.
 
-**Resource Limits:**
-- Use `-1` for unlimited resources
-- Use `0` with caution (completely blocks access)
-- Use positive values for specific limits
+**Resource limits**: `-1` = unlimited, `0` = **disabled** (blocks access), positive = specific limit.
 
-## 📄 License
+**Encryption**: If you enable encryption on an existing deployment, data encrypts on next write. Changing the key without re-encryption breaks reads of previously encrypted data.
+
+## License
 
 MIT License - see LICENSE file for details.

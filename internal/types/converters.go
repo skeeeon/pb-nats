@@ -9,14 +9,16 @@ import (
 )
 
 // RecordToUserModel converts a PocketBase user record to a NatsUserRecord.
-func RecordToUserModel(record *core.Record) *NatsUserRecord {
+// Optional encryptionKey decrypts sensitive fields (private_key, seed).
+func RecordToUserModel(record *core.Record, encryptionKey ...string) *NatsUserRecord {
+	key := getEncryptionKey(encryptionKey)
 	user := &NatsUserRecord{
 		ID:           record.Id,
 		NatsUsername: record.GetString("nats_username"),
 		Description:  record.GetString("description"),
 		PublicKey:    record.GetString("public_key"),
-		PrivateKey:   record.GetString("private_key"),
-		Seed:         record.GetString("seed"),
+		PrivateKey:   decryptString(record, "private_key", key),
+		Seed:         decryptString(record, "seed", key),
 		AccountID:    record.GetString("account_id"),
 		RoleID:       record.GetString("role_id"),
 		JWT:          record.GetString("jwt"),
@@ -36,14 +38,16 @@ func RecordToUserModel(record *core.Record) *NatsUserRecord {
 }
 
 // RecordToAccountModel converts a PocketBase account record to an AccountRecord.
-func RecordToAccountModel(record *core.Record) *AccountRecord {
+// Optional encryptionKey decrypts sensitive fields (private_key, seed, signing_keys_private).
+func RecordToAccountModel(record *core.Record, encryptionKey ...string) *AccountRecord {
+	key := getEncryptionKey(encryptionKey)
 	account := &AccountRecord{
 		ID:                        record.Id,
 		Name:                      record.GetString("name"),
 		Description:               record.GetString("description"),
 		PublicKey:                 record.GetString("public_key"),
-		PrivateKey:                record.GetString("private_key"),
-		Seed:                      record.GetString("seed"),
+		PrivateKey:                decryptString(record, "private_key", key),
+		Seed:                      decryptString(record, "seed", key),
 		JWT:                       record.GetString("jwt"),
 		Active:                    record.GetBool("active"),
 		MaxConnections:            int64(record.GetInt("max_connections")),
@@ -54,8 +58,8 @@ func RecordToAccountModel(record *core.Record) *AccountRecord {
 		MaxJetStreamMemoryStorage: int64(record.GetInt("max_jetstream_memory_storage")),
 	}
 
-	// Parse signing keys from JSON fields
-	account.SigningKeys, account.SigningKeysPrivate = parseSigningKeysFromRecord(record)
+	// Parse signing keys from JSON fields (with decryption)
+	account.SigningKeys, account.SigningKeysPrivate = decryptSigningKeys(record, key)
 
 	// Fallback: if no signing_keys_private, try old scalar fields (pre-migration)
 	if len(account.SigningKeysPrivate) == 0 {
@@ -69,20 +73,23 @@ func RecordToAccountModel(record *core.Record) *AccountRecord {
 }
 
 // RecordToOperatorModel converts a PocketBase operator record to a SystemOperatorRecord.
-func RecordToOperatorModel(record *core.Record) *SystemOperatorRecord {
+// Optional encryptionKey decrypts sensitive fields (private_key, seed, signing_keys_private).
+func RecordToOperatorModel(record *core.Record, encryptionKey ...string) *SystemOperatorRecord {
+	key := getEncryptionKey(encryptionKey)
 	operator := &SystemOperatorRecord{
-		ID:         record.Id,
-		Name:       record.GetString("name"),
-		PublicKey:  record.GetString("public_key"),
-		PrivateKey: record.GetString("private_key"),
-		Seed:       record.GetString("seed"),
-		JWT:        record.GetString("jwt"),
-		Created:    record.GetDateTime("created").Time(),
-		Updated:    record.GetDateTime("updated").Time(),
+		ID:              record.Id,
+		Name:            record.GetString("name"),
+		PublicKey:       record.GetString("public_key"),
+		PrivateKey:      decryptString(record, "private_key", key),
+		Seed:            decryptString(record, "seed", key),
+		JWT:             record.GetString("jwt"),
+		SystemAccountID: record.GetString("system_account_id"),
+		Created:         record.GetDateTime("created").Time(),
+		Updated:         record.GetDateTime("updated").Time(),
 	}
 
-	// Parse signing keys from JSON fields
-	operator.SigningKeys, operator.SigningKeysPrivate = parseSigningKeysFromRecord(record)
+	// Parse signing keys from JSON fields (with decryption)
+	operator.SigningKeys, operator.SigningKeysPrivate = decryptSigningKeys(record, key)
 
 	// Fallback: if no signing_keys_private, try old scalar fields (pre-migration)
 	if len(operator.SigningKeysPrivate) == 0 {
@@ -96,6 +103,7 @@ func RecordToOperatorModel(record *core.Record) *SystemOperatorRecord {
 }
 
 // RecordToRoleModel converts a PocketBase role record to a RoleRecord.
+// Roles contain no sensitive fields, so no encryption handling is needed.
 func RecordToRoleModel(record *core.Record) *RoleRecord {
 	role := &RoleRecord{
 		ID:               record.Id,
@@ -119,25 +127,6 @@ func RecordToRoleModel(record *core.Record) *RoleRecord {
 	marshalJSONField(record, "subscribe_deny_permissions", &role.SubscribeDenyPermissions)
 
 	return role
-}
-
-// parseSigningKeysFromRecord extracts signing key arrays from a PocketBase record's JSON fields.
-func parseSigningKeysFromRecord(record *core.Record) ([]SigningKeyPublic, []SigningKeyPrivate) {
-	var pub []SigningKeyPublic
-	var priv []SigningKeyPrivate
-
-	if val := record.Get("signing_keys"); val != nil {
-		if bytes, err := json.Marshal(val); err == nil {
-			_ = json.Unmarshal(bytes, &pub)
-		}
-	}
-	if val := record.Get("signing_keys_private"); val != nil {
-		if bytes, err := json.Marshal(val); err == nil {
-			_ = json.Unmarshal(bytes, &priv)
-		}
-	}
-
-	return pub, priv
 }
 
 // signingKeyFromScalarFields builds signing key entries from old scalar fields (pre-migration fallback).

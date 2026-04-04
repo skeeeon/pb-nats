@@ -235,6 +235,7 @@ type SystemOperatorRecord struct {
 	SigningKeys        []SigningKeyPublic  `json:"signing_keys"`
 	SigningKeysPrivate []SigningKeyPrivate `json:"signing_keys_private"`
 	JWT                string              `json:"jwt"`
+	SystemAccountID    string              `json:"system_account_id"`
 	Created            time.Time           `json:"created"`
 	Updated            time.Time           `json:"updated"`
 }
@@ -415,6 +416,11 @@ type Options struct {
 	
 	// Event filtering (optional custom logic)
 	EventFilter func(collectionName, eventType string) bool
+
+	// EncryptionKey enables AES-256-GCM at-rest encryption of sensitive fields
+	// (private keys, seeds, signing keys) when set. Must be exactly 32 characters.
+	// Empty string disables encryption.
+	EncryptionKey string
 }
 
 // Collection names with nats_ prefix for clear identification

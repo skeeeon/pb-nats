@@ -10,10 +10,10 @@ import (
 // with consistent error handling and key format management.
 //
 // KEY STORAGE PHILOSOPHY:
-// Keys are stored as plaintext in the database by design for simplicity.
-// This follows the architecture principle of keeping the system focused
-// and avoiding complex encryption key management that would complicate
-// the bootstrap process and operational procedures.
+// Keys are stored in the database with optional AES-256-GCM encryption
+// at rest (enabled via Options.EncryptionKey). When encryption is disabled,
+// keys are stored as plaintext for simplicity. Encryption/decryption is
+// handled transparently by the types package converters.
 //
 // NATS KEY HIERARCHY:
 // - Operator Keys: Root of trust, signs account JWTs

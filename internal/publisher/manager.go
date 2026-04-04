@@ -294,7 +294,7 @@ func (p *Manager) processQueueRecord(record *core.Record) error {
 		return p.app.Delete(record)
 	}
 
-	accountRecord := pbtypes.RecordToAccountModel(account)
+	accountRecord := pbtypes.RecordToAccountModel(account, p.options.EncryptionKey)
 
 	var processErr error
 	switch action {
@@ -442,7 +442,7 @@ func (p *Manager) getSystemOperator() (*pbtypes.SystemOperatorRecord, error) {
 	}
 
 	record := records[0]
-	operator := pbtypes.RecordToOperatorModel(record)
+	operator := pbtypes.RecordToOperatorModel(record, p.options.EncryptionKey)
 
 	if err := utils.ValidateRequired(operator.PublicKey, "operator public key"); err != nil {
 		return nil, utils.WrapError(err, "invalid system operator")
@@ -459,15 +459,15 @@ func (p *Manager) getSystemOperator() (*pbtypes.SystemOperatorRecord, error) {
 
 // getSystemUser retrieves system user record for NATS authentication.
 func (p *Manager) getSystemUser() (*pbtypes.NatsUserRecord, error) {
-	sysAccountRecords, err := p.app.FindAllRecords(p.options.AccountCollectionName, dbx.HashExp{"name": "System Account"})
+	operator, err := p.getSystemOperator()
 	if err != nil {
-		return nil, utils.WrapError(err, "failed to find system account")
+		return nil, utils.WrapError(err, "failed to get system operator for account lookup")
 	}
-	if len(sysAccountRecords) == 0 {
-		return nil, utils.WrapError(fmt.Errorf("system account not found"), "system account lookup failed")
+
+	sysAccountID := operator.SystemAccountID
+	if sysAccountID == "" {
+		return nil, utils.WrapError(fmt.Errorf("system account ID not set on operator"), "system account lookup failed")
 	}
-	
-	sysAccountID := sysAccountRecords[0].Id
 
 	sysUserRecords, err := p.app.FindAllRecords(p.options.UserCollectionName, dbx.HashExp{"nats_username": "sys", "account_id": sysAccountID})
 	if err != nil {
