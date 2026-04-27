@@ -477,20 +477,7 @@ func (p *Manager) getSystemUser() (*pbtypes.NatsUserRecord, error) {
 		return nil, utils.WrapError(fmt.Errorf("system user not found"), "system user lookup failed")
 	}
 
-	record := sysUserRecords[0]
-	user := &pbtypes.NatsUserRecord{
-		ID:           record.Id,
-		NatsUsername: record.GetString("nats_username"),
-		PublicKey:    record.GetString("public_key"),
-		PrivateKey:   record.GetString("private_key"),
-		Seed:         record.GetString("seed"),
-		AccountID:    record.GetString("account_id"),
-		RoleID:       record.GetString("role_id"),
-		JWT:          record.GetString("jwt"),
-		CredsFile:    record.GetString("creds_file"),
-		BearerToken:  record.GetBool("bearer_token"),
-		Active:       record.GetBool("active"),
-	}
+	user := pbtypes.RecordToUserModel(sysUserRecords[0], p.options.EncryptionKey)
 
 	if err := utils.ValidateRequired(user.JWT, "system user JWT"); err != nil {
 		return nil, utils.WrapError(err, "invalid system user")

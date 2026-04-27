@@ -84,7 +84,7 @@ Examples:
 			}
 
 			// Get operator and system account data
-			operator, sysAccount, err := getOperatorAndSystemAccount(app)
+			operator, sysAccount, err := getOperatorAndSystemAccount(app, "")
 			if err != nil {
 				return err
 			}
@@ -129,7 +129,8 @@ Examples:
 }
 
 // getOperatorAndSystemAccount retrieves the operator and system account from the database.
-func getOperatorAndSystemAccount(app *pocketbase.PocketBase) (*pbtypes.SystemOperatorRecord, *systemAccountInfo, error) {
+// encryptionKey decrypts sensitive operator fields when at-rest encryption is enabled.
+func getOperatorAndSystemAccount(app *pocketbase.PocketBase, encryptionKey string) (*pbtypes.SystemOperatorRecord, *systemAccountInfo, error) {
 	// Get operator
 	operatorRecords, err := app.FindAllRecords(pbtypes.SystemOperatorCollectionName)
 	if err != nil {
@@ -140,7 +141,7 @@ func getOperatorAndSystemAccount(app *pocketbase.PocketBase) (*pbtypes.SystemOpe
 	}
 
 	record := operatorRecords[0]
-	operator := pbtypes.RecordToOperatorModel(record)
+	operator := pbtypes.RecordToOperatorModel(record, encryptionKey)
 
 	if operator.JWT == "" {
 		return nil, nil, fmt.Errorf("operator JWT is empty - please run the server first to complete initialization")
@@ -397,6 +398,9 @@ type CommandOptions struct {
 	DefaultPort            int
 	DefaultJetstreamStore  string
 	DefaultOutputDir       string
+	// EncryptionKey must match Options.EncryptionKey when at-rest encryption is enabled,
+	// otherwise operator records cannot be decrypted for export.
+	EncryptionKey          string
 }
 
 // DefaultCommandOptions returns sensible defaults for command options.
@@ -439,7 +443,7 @@ Examples:
 				return fmt.Errorf("failed to bootstrap app: %w", err)
 			}
 
-			operator, sysAccount, err := getOperatorAndSystemAccount(app)
+			operator, sysAccount, err := getOperatorAndSystemAccount(app, opts.EncryptionKey)
 			if err != nil {
 				return err
 			}

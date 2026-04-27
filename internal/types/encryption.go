@@ -58,6 +58,9 @@ func EncryptAndSet(record *core.Record, field, value, key string) error {
 
 // EncryptJSONAndSet encrypts a JSON blob as a single string and sets it on the record.
 // If key is empty, sets the raw JSON directly.
+//
+// Note: when encryption is enabled, the JSON field stores an "enc::"-prefixed string
+// instead of a JSON array. Readers must handle both shapes (see decryptSigningKeys).
 func EncryptJSONAndSet(record *core.Record, field string, jsonData json.RawMessage, key string) error {
 	if key == "" {
 		record.Set(field, jsonData)
