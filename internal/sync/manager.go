@@ -12,27 +12,23 @@ import (
 	"github.com/skeeeon/pb-nats/internal/jwt"
 	"github.com/skeeeon/pb-nats/internal/nkey"
 	"github.com/skeeeon/pb-nats/internal/publisher"
-	"github.com/skeeeon/pb-nats/internal/utils"
 	pbtypes "github.com/skeeeon/pb-nats/internal/types"
+	"github.com/skeeeon/pb-nats/internal/utils"
 )
 
 // Manager orchestrates real-time synchronization between PocketBase record changes and NATS.
 type Manager struct {
-	app              *pocketbase.PocketBase
-	jwtGen           *jwt.Generator
-	nkeyManager      *nkey.Manager
-	publisher        *publisher.Manager
-	options          pbtypes.Options
-	logger           *utils.Logger
-	systemAccountID  string
+	app             *pocketbase.PocketBase
+	jwtGen          *jwt.Generator
+	nkeyManager     *nkey.Manager
+	publisher       *publisher.Manager
+	options         pbtypes.Options
+	logger          *utils.Logger
+	systemAccountID string
 
 	// Debouncing state
 	timer      *time.Timer
 	timerMutex sync.Mutex
-
-	// Processing state
-	isProcessing    bool
-	processingMutex sync.Mutex
 }
 
 // NewManager creates a new sync manager with all required dependencies.
@@ -138,7 +134,9 @@ func (sm *Manager) setupAccountHooks() {
 		return e.Next()
 	})
 
-	// Account deletion
+	// Account deletion - validation happens on the request, NATS removal is
+	// scheduled after the delete succeeds using snapshot data from the record
+	// (the account row no longer exists when the queue is processed).
 	sm.app.OnRecordDeleteRequest().BindFunc(func(e *core.RecordRequestEvent) error {
 		if e.Collection.Name != sm.options.AccountCollectionName {
 			return e.Next()
@@ -146,8 +144,18 @@ func (sm *Manager) setupAccountHooks() {
 		if e.Record.Id == sm.systemAccountID {
 			return utils.WrapError(fmt.Errorf("cannot delete system account"), "account deletion validation failed")
 		}
+		return e.Next()
+	})
+
+	sm.app.OnRecordAfterDeleteSuccess().BindFunc(func(e *core.RecordEvent) error {
+		if e.Record.Collection().Name != sm.options.AccountCollectionName {
+			return e.Next()
+		}
+		if e.Record.Id == sm.systemAccountID {
+			return e.Next()
+		}
 		if sm.shouldHandleEvent(sm.options.AccountCollectionName, pbtypes.EventTypeAccountDelete) {
-			sm.scheduleSync(e.Record.Id, pbtypes.PublishActionDelete)
+			sm.scheduleDelete(e.Record)
 		}
 		return e.Next()
 	})
@@ -182,21 +190,24 @@ func (sm *Manager) setupUserHooks() {
 		return e.Next()
 	})
 
-	// User updates
+	// User updates - only regenerate the JWT when a field embedded in it changed
+	// (or the regenerate flag is set), so unrelated edits don't rotate credentials.
 	sm.app.OnRecordUpdateRequest().BindFunc(func(e *core.RecordRequestEvent) error {
 		if e.Collection.Name != sm.options.UserCollectionName {
 			return e.Next()
 		}
 
-		if e.Record.GetBool("regenerate") {
+		regenerate := e.Record.GetBool("regenerate")
+		if regenerate {
 			e.Record.Set("regenerate", false)
+		}
+
+		if regenerate || e.Record.GetString("jwt") == "" || userJWTFieldsChanged(e.Record) {
 			if err := sm.regenerateUserJWT(e.Record); err != nil {
 				return utils.WrapError(err, "failed to regenerate user JWT")
 			}
-			sm.logger.Info("JWT regenerated for user %s due to regenerate flag", e.Record.GetString("nats_username"))
-		} else {
-			if err := sm.regenerateUserJWT(e.Record); err != nil {
-				return utils.WrapError(err, "failed to regenerate user JWT")
+			if regenerate {
+				sm.logger.Info("JWT regenerated for user %s due to regenerate flag", e.Record.GetString("nats_username"))
 			}
 		}
 		return e.Next()
@@ -206,6 +217,11 @@ func (sm *Manager) setupUserHooks() {
 		if e.Record.Collection().Name != sm.options.UserCollectionName {
 			return e.Next()
 		}
+
+		// Keep the persistent NATS connection authenticated when the system
+		// user's credentials change.
+		sm.refreshSystemUserCredentials(e.Record)
+
 		if sm.shouldHandleEvent(sm.options.UserCollectionName, pbtypes.EventTypeUserUpdate) {
 			accountID := e.Record.GetString("account_id")
 			if accountID != "" {
@@ -475,6 +491,17 @@ func (sm *Manager) shouldHandleEvent(collectionName, eventType string) bool {
 
 // scheduleSync schedules a NATS publishing operation with debouncing.
 func (sm *Manager) scheduleSync(accountID, action string) {
+	sm.enqueue(accountID, action, "", "")
+}
+
+// scheduleDelete schedules NATS account removal, snapshotting the public key and
+// name from the (already deleted) record so the operation can be published later.
+func (sm *Manager) scheduleDelete(record *core.Record) {
+	sm.enqueue(record.Id, pbtypes.PublishActionDelete, record.GetString("public_key"), record.GetString("name"))
+}
+
+// enqueue queues an account operation and (re)arms the debounce timer.
+func (sm *Manager) enqueue(accountID, action, publicKey, accountName string) {
 	sm.timerMutex.Lock()
 	defer sm.timerMutex.Unlock()
 
@@ -482,7 +509,7 @@ func (sm *Manager) scheduleSync(accountID, action string) {
 		sm.timer.Stop()
 	}
 
-	if err := sm.publisher.QueueAccountUpdate(accountID, action); err != nil {
+	if err := sm.publisher.QueueAccountUpdate(accountID, action, publicKey, accountName); err != nil {
 		sm.logger.Warning("Failed to queue account update for account %s: %v", accountID, err)
 	}
 
@@ -658,6 +685,41 @@ func (sm *Manager) regenerateUserJWT(record *core.Record) error {
 	return sm.generateUserJWT(record)
 }
 
+// userJWTFieldsChanged reports whether any field that is embedded in the user JWT
+// differs from the previously saved version of the record.
+func userJWTFieldsChanged(record *core.Record) bool {
+	original := record.Original()
+	jwtFields := []string{
+		"nats_username", "account_id", "role_id", "bearer_token", "jwt_expires_at",
+		"publish_permissions", "subscribe_permissions",
+		"publish_deny_permissions", "subscribe_deny_permissions",
+	}
+	for _, field := range jwtFields {
+		if fmt.Sprintf("%v", record.Get(field)) != fmt.Sprintf("%v", original.Get(field)) {
+			return true
+		}
+	}
+	return false
+}
+
+// refreshSystemUserCredentials pushes updated credentials to the NATS connection
+// manager when the system user's JWT has been regenerated, so the persistent
+// connection doesn't keep authenticating with a stale JWT.
+func (sm *Manager) refreshSystemUserCredentials(record *core.Record) {
+	if record.GetString("nats_username") != "sys" || record.GetString("account_id") != sm.systemAccountID {
+		return
+	}
+
+	user := pbtypes.RecordToUserModel(record, sm.options.EncryptionKey)
+	if user.JWT == "" || user.Seed == "" {
+		return
+	}
+
+	if err := sm.publisher.UpdateCredentials(user.JWT, user.Seed); err != nil {
+		sm.logger.Warning("Failed to refresh system user NATS credentials: %v", err)
+	}
+}
+
 // getSystemOperator retrieves the system operator record for JWT signing operations.
 func (sm *Manager) getSystemOperator() (*pbtypes.SystemOperatorRecord, error) {
 	records, err := sm.app.FindAllRecords(pbtypes.SystemOperatorCollectionName)
@@ -665,7 +727,7 @@ func (sm *Manager) getSystemOperator() (*pbtypes.SystemOperatorRecord, error) {
 		return nil, utils.WrapError(err, "failed to find system operator records")
 	}
 	if len(records) == 0 {
-		return nil, utils.WrapError(fmt.Errorf("system operator not found - ensure Setup() completed successfully"), 
+		return nil, utils.WrapError(fmt.Errorf("system operator not found - ensure Setup() completed successfully"),
 			"system operator lookup failed")
 	}
 

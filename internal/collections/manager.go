@@ -58,6 +58,9 @@ func (cm *Manager) InitializeCollections() error {
 	if err := cm.createPublishQueueCollection(); err != nil {
 		return fmt.Errorf("failed to create publish queue collection: %w", err)
 	}
+	if err := cm.ensurePublishQueueFields(); err != nil {
+		return fmt.Errorf("failed to ensure publish queue fields: %w", err)
+	}
 	return nil
 }
 
@@ -69,7 +72,7 @@ func (cm *Manager) createSystemOperatorCollection() error {
 	}
 
 	collection := core.NewBaseCollection(pbtypes.SystemOperatorCollectionName)
-	
+
 	// Hidden collection - only system can access
 	collection.ListRule = nil
 	collection.ViewRule = nil
@@ -99,7 +102,7 @@ func (cm *Manager) createAccountsCollection() error {
 	}
 
 	collection := core.NewBaseCollection(cm.options.AccountCollectionName)
-	
+
 	// Locked by default - consuming app should set appropriate API rules
 	collection.ListRule = nil
 	collection.ViewRule = nil
@@ -110,7 +113,7 @@ func (cm *Manager) createAccountsCollection() error {
 	// Identity fields
 	collection.Fields.Add(&core.TextField{Name: "name", Required: true, Max: 100})
 	collection.Fields.Add(&core.TextField{Name: "description", Max: 500})
-	
+
 	// Key fields
 	collection.Fields.Add(&core.TextField{Name: "public_key", Max: 200})
 	collection.Fields.Add(&core.TextField{Name: "private_key", Max: 200, Hidden: true})
@@ -124,7 +127,7 @@ func (cm *Manager) createAccountsCollection() error {
 	collection.Fields.Add(&core.BoolField{Name: "rotate_keys"})
 	collection.Fields.Add(&core.BoolField{Name: "add_signing_key"})
 	collection.Fields.Add(&core.TextField{Name: "remove_signing_key", Max: 200})
-	
+
 	// Account-level limits (-1 = unlimited, 0 = disabled, positive = limit)
 	collection.Fields.Add(&core.NumberField{Name: "max_connections", OnlyInt: true, Min: types.Pointer(-1.0)})
 	collection.Fields.Add(&core.NumberField{Name: "max_subscriptions", OnlyInt: true, Min: types.Pointer(-1.0)})
@@ -132,7 +135,7 @@ func (cm *Manager) createAccountsCollection() error {
 	collection.Fields.Add(&core.NumberField{Name: "max_payload", OnlyInt: true, Min: types.Pointer(-1.0)})
 	collection.Fields.Add(&core.NumberField{Name: "max_jetstream_disk_storage", OnlyInt: true, Min: types.Pointer(-1.0)})
 	collection.Fields.Add(&core.NumberField{Name: "max_jetstream_memory_storage", OnlyInt: true, Min: types.Pointer(-1.0)})
-	
+
 	// Timestamps
 	collection.Fields.Add(&core.AutodateField{Name: "created", OnCreate: true})
 	collection.Fields.Add(&core.AutodateField{Name: "updated", OnCreate: true, OnUpdate: true})
@@ -150,7 +153,7 @@ func (cm *Manager) createRolesCollection() error {
 	}
 
 	collection := core.NewBaseCollection(cm.options.RoleCollectionName)
-	
+
 	// Locked by default - consuming app should set appropriate API rules
 	collection.ListRule = nil
 	collection.ViewRule = nil
@@ -162,15 +165,15 @@ func (cm *Manager) createRolesCollection() error {
 	collection.Fields.Add(&core.TextField{Name: "name", Required: true, Max: 100})
 	collection.Fields.Add(&core.TextField{Name: "description", Max: 500})
 	collection.Fields.Add(&core.BoolField{Name: "is_default"})
-	
+
 	// Allow permission fields (JSON arrays of subjects)
 	collection.Fields.Add(&core.JSONField{Name: "publish_permissions", Required: false, MaxSize: 5000})
 	collection.Fields.Add(&core.JSONField{Name: "subscribe_permissions", Required: false, MaxSize: 5000})
-	
+
 	// Deny permission fields (JSON arrays of subjects - takes precedence over allow)
 	collection.Fields.Add(&core.JSONField{Name: "publish_deny_permissions", Required: false, MaxSize: 5000})
 	collection.Fields.Add(&core.JSONField{Name: "subscribe_deny_permissions", Required: false, MaxSize: 5000})
-	
+
 	// Response permission fields for request-reply patterns
 	// allow_response: When true, enables response permissions for the user
 	collection.Fields.Add(&core.BoolField{Name: "allow_response"})
@@ -178,7 +181,7 @@ func (cm *Manager) createRolesCollection() error {
 	collection.Fields.Add(&core.NumberField{Name: "allow_response_max", OnlyInt: true, Min: types.Pointer(-1.0)})
 	// allow_response_ttl: Response TTL in seconds (0 = no limit/default)
 	collection.Fields.Add(&core.NumberField{Name: "allow_response_ttl", OnlyInt: true, Min: types.Pointer(0.0)})
-	
+
 	// Per-user limits (-1 = unlimited, 0 = disabled, positive = limit)
 	collection.Fields.Add(&core.NumberField{Name: "max_subscriptions", OnlyInt: true, Min: types.Pointer(-1.0)})
 	collection.Fields.Add(&core.NumberField{Name: "max_data", OnlyInt: true, Min: types.Pointer(-1.0)})
@@ -199,7 +202,7 @@ func (cm *Manager) createUsersCollection() error {
 	}
 
 	collection := core.NewAuthCollection(cm.options.UserCollectionName)
-	
+
 	// Locked by default - consuming app should set appropriate API rules
 	collection.ListRule = nil
 	collection.ViewRule = nil
@@ -239,6 +242,9 @@ func (cm *Manager) createUsersCollection() error {
 		CollectionId: rolesCollection.Id, CascadeDelete: false,
 	})
 	collection.Fields.Add(&core.TextField{Name: "jwt", Max: 5000})
+	// creds_file is intentionally visible and stored unencrypted (even when at-rest
+	// encryption is enabled): it is the API-downloadable credential for NATS clients
+	// and is the only secret deliberately exposed through the API.
 	collection.Fields.Add(&core.TextField{Name: "creds_file", Max: 10000})
 	collection.Fields.Add(&core.BoolField{Name: "bearer_token"})
 	collection.Fields.Add(&core.DateField{Name: "jwt_expires_at"})
@@ -355,6 +361,12 @@ func (cm *Manager) createImportsCollection() error {
 }
 
 // createPublishQueueCollection creates the publish queue collection for reliable NATS operations.
+//
+// account_id is intentionally a plain text field, NOT a relation. Queue records must
+// outlive their account so that "delete" operations can still be published to NATS
+// after the account record is removed (a cascade-deleting relation would destroy the
+// pending delete operation together with the account). account_public_key and
+// account_name are snapshots taken at enqueue time for the same reason.
 func (cm *Manager) createPublishQueueCollection() error {
 	_, err := cm.app.FindCollectionByNameOrId(pbtypes.PublishQueueCollectionName)
 	if err == nil {
@@ -362,7 +374,7 @@ func (cm *Manager) createPublishQueueCollection() error {
 	}
 
 	collection := core.NewBaseCollection(pbtypes.PublishQueueCollectionName)
-	
+
 	// Hidden collection - only system can access
 	collection.ListRule = nil
 	collection.ViewRule = nil
@@ -370,20 +382,9 @@ func (cm *Manager) createPublishQueueCollection() error {
 	collection.UpdateRule = nil
 	collection.DeleteRule = nil
 
-	if err := cm.app.Save(collection); err != nil {
-		return fmt.Errorf("failed to save publish queue collection: %w", err)
-	}
-
-	// Get accounts collection for relation
-	accountsCollection, err := cm.app.FindCollectionByNameOrId(cm.options.AccountCollectionName)
-	if err != nil {
-		return fmt.Errorf("accounts collection not found: %w", err)
-	}
-
-	collection.Fields.Add(&core.RelationField{
-		Name: "account_id", Required: true, MaxSelect: 1,
-		CollectionId: accountsCollection.Id, CascadeDelete: true,
-	})
+	collection.Fields.Add(&core.TextField{Name: "account_id", Required: true, Max: 200})
+	collection.Fields.Add(&core.TextField{Name: "account_public_key", Max: 200})
+	collection.Fields.Add(&core.TextField{Name: "account_name", Max: 200})
 	collection.Fields.Add(&core.SelectField{
 		Name: "action", Required: true, MaxSelect: 1,
 		Values: []string{pbtypes.PublishActionUpsert, pbtypes.PublishActionDelete},
@@ -397,6 +398,40 @@ func (cm *Manager) createPublishQueueCollection() error {
 	collection.Fields.Add(&core.AutodateField{Name: "created", OnCreate: true})
 	collection.Fields.Add(&core.AutodateField{Name: "updated", OnCreate: true, OnUpdate: true})
 
+	return cm.app.Save(collection)
+}
+
+// ensurePublishQueueFields migrates existing publish queue collections to the
+// account-snapshot schema: converts account_id from a cascade-deleting relation
+// to a plain text field and adds the account_public_key/account_name fields.
+func (cm *Manager) ensurePublishQueueFields() error {
+	collection, err := cm.app.FindCollectionByNameOrId(pbtypes.PublishQueueCollectionName)
+	if err != nil {
+		return nil // Collection doesn't exist yet
+	}
+
+	changed := false
+
+	if old, ok := collection.Fields.GetByName("account_id").(*core.RelationField); ok {
+		// Re-add with the same field id so PocketBase treats this as a field
+		// modification (preserving stored values) rather than a drop + add.
+		collection.Fields.RemoveByName("account_id")
+		collection.Fields.Add(&core.TextField{Id: old.GetId(), Name: "account_id", Required: true, Max: 200})
+		changed = true
+	}
+
+	if collection.Fields.GetByName("account_public_key") == nil {
+		collection.Fields.Add(&core.TextField{Name: "account_public_key", Max: 200})
+		changed = true
+	}
+	if collection.Fields.GetByName("account_name") == nil {
+		collection.Fields.Add(&core.TextField{Name: "account_name", Max: 200})
+		changed = true
+	}
+
+	if !changed {
+		return nil
+	}
 	return cm.app.Save(collection)
 }
 

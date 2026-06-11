@@ -15,8 +15,8 @@ import (
 	"github.com/skeeeon/pb-nats/internal/nkey"
 	"github.com/skeeeon/pb-nats/internal/publisher"
 	"github.com/skeeeon/pb-nats/internal/sync"
-	"github.com/skeeeon/pb-nats/internal/utils"
 	pbtypes "github.com/skeeeon/pb-nats/internal/types"
+	"github.com/skeeeon/pb-nats/internal/utils"
 )
 
 // Re-export types for external use
@@ -31,7 +31,7 @@ type AccountImportRecord = pbtypes.AccountImportRecord
 type RetryConfig = pbtypes.RetryConfig
 type TimeoutConfig = pbtypes.TimeoutConfig
 
-// Re-export constants for external use  
+// Re-export constants for external use
 const (
 	DefaultAccountCollectionName = pbtypes.DefaultAccountCollectionName
 	DefaultUserCollectionName    = pbtypes.DefaultUserCollectionName
@@ -40,12 +40,12 @@ const (
 	DefaultImportCollectionName  = pbtypes.DefaultImportCollectionName
 	SystemOperatorCollectionName = pbtypes.SystemOperatorCollectionName
 	PublishQueueCollectionName   = pbtypes.PublishQueueCollectionName
-	
+
 	DefaultOperatorName = pbtypes.DefaultOperatorName
-	
+
 	PublishActionUpsert = pbtypes.PublishActionUpsert
 	PublishActionDelete = pbtypes.PublishActionDelete
-	
+
 	EventTypeAccountCreate = pbtypes.EventTypeAccountCreate
 	EventTypeAccountUpdate = pbtypes.EventTypeAccountUpdate
 	EventTypeAccountDelete = pbtypes.EventTypeAccountDelete
@@ -55,7 +55,7 @@ const (
 	EventTypeRoleCreate    = pbtypes.EventTypeRoleCreate
 	EventTypeRoleUpdate    = pbtypes.EventTypeRoleUpdate
 	EventTypeRoleDelete    = pbtypes.EventTypeRoleDelete
-	
+
 	DefaultInboxSubscribe = pbtypes.DefaultInboxSubscribe
 )
 
@@ -118,7 +118,7 @@ func initializeComponents(app *pocketbase.PocketBase, options Options, logger *u
 	logger.Success("   NKey manager initialized")
 
 	// Step 3: Initialize JWT generator
-	jwtGenerator := jwt.NewGenerator(app, nkeyManager, options)
+	jwtGenerator := jwt.NewGenerator(nkeyManager, options)
 	logger.Success("   JWT generator initialized")
 
 	// Step 4: Initialize system components
@@ -136,6 +136,12 @@ func initializeComponents(app *pocketbase.PocketBase, options Options, logger *u
 		return utils.WrapError(err, "failed to start account publisher")
 	}
 	logger.Success("   Account publisher started with persistent connections")
+
+	// Stop the publisher (background goroutines + NATS connection) on app shutdown
+	app.OnTerminate().BindFunc(func(e *core.TerminateEvent) error {
+		accountPublisher.Stop()
+		return e.Next()
+	})
 
 	// Step 6: Initialize sync manager
 	logger.Info("   Setting up sync hooks...")
@@ -223,6 +229,10 @@ func initializeSystemComponents(app *pocketbase.PocketBase, jwtGen *jwt.Generato
 			}
 		}
 	}
+
+	// Make the system account known to the JWT generator before any user JWTs
+	// are generated, so system user detection works.
+	jwtGen.SetSystemAccountID(sysAccountID)
 
 	// Check if system role exists
 	sysRoleRecords, err := app.FindAllRecords(options.RoleCollectionName, dbx.HashExp{"name": "system_admin"})
@@ -444,20 +454,20 @@ func createSystemRole(app *pocketbase.PocketBase, options Options, logger *utils
 	record := core.NewRecord(collection)
 	record.Set("name", "system_admin")
 	record.Set("description", "System administrator role with full NATS access")
-	
+
 	// Set permissions as actual arrays for JSON fields
 	record.Set("publish_permissions", []string{"$SYS.>", ">"})
 	record.Set("subscribe_permissions", []string{"$SYS.>", ">"})
 	record.Set("publish_deny_permissions", []string{})
 	record.Set("subscribe_deny_permissions", []string{})
-	
+
 	record.Set("is_default", false)
-	
+
 	// System role has response permissions enabled by default
 	record.Set("allow_response", true)
 	record.Set("allow_response_max", -1) // Unlimited responses
 	record.Set("allow_response_ttl", 0)  // No TTL limit
-	
+
 	// Unlimited limits for system operations
 	record.Set("max_subscriptions", -1)
 	record.Set("max_data", -1)
@@ -579,19 +589,25 @@ func validateOptions(options Options) error {
 	if err := utils.ValidateRequired(options.AccountCollectionName, "account collection name"); err != nil {
 		return err
 	}
+	if err := utils.ValidateRequired(options.ExportCollectionName, "export collection name"); err != nil {
+		return err
+	}
+	if err := utils.ValidateRequired(options.ImportCollectionName, "import collection name"); err != nil {
+		return err
+	}
 	if err := utils.ValidateRequired(options.OperatorName, "operator name"); err != nil {
 		return err
 	}
 	if err := utils.ValidateURL(options.NATSServerURL, "NATS server URL"); err != nil {
 		return err
 	}
-	
+
 	for i, url := range options.BackupNATSServerURLs {
 		if err := utils.ValidateURL(url, fmt.Sprintf("backup NATS server URL[%d]", i)); err != nil {
 			return err
 		}
 	}
-	
+
 	if err := utils.ValidatePositiveDuration(options.PublishQueueInterval, "publish queue interval"); err != nil {
 		return err
 	}
@@ -622,7 +638,7 @@ func validateOptions(options Options) error {
 			return err
 		}
 	}
-	
+
 	if options.ConnectionTimeouts != nil {
 		if err := utils.ValidatePositiveDuration(options.ConnectionTimeouts.ConnectTimeout, "connect timeout"); err != nil {
 			return err
@@ -653,7 +669,7 @@ func GetDefaultCollectionNames() (user, role, account string) {
 }
 
 // Version information
-const Version = "1.2.0"
+const Version = "1.3.0"
 
 // GetVersion returns the library version
 func GetVersion() string {

@@ -63,8 +63,9 @@ func NewLogger(enabled bool) *Logger {
 // This is the core logging method that handles formatting consistency.
 //
 // LOG FORMAT:
-//   [HH:MM:SS] PREFIX MESSAGE
-//   [15:04:05] 🚀 START PocketBase NATS JWT sync initialized
+//
+//	[HH:MM:SS] PREFIX MESSAGE
+//	[15:04:05] 🚀 START PocketBase NATS JWT sync initialized
 //
 // TIMESTAMP FORMAT:
 // Uses HH:MM:SS format for human readability and space efficiency.
@@ -86,7 +87,7 @@ func (l *Logger) logWithPrefix(prefix, format string, args ...interface{}) {
 	if !l.enabled {
 		return
 	}
-	
+
 	timestamp := time.Now().Format("15:04:05")
 	message := fmt.Sprintf(format, args...)
 	log.Printf("[%s] %s %s", timestamp, prefix, message)
@@ -104,9 +105,10 @@ func (l *Logger) logWithPrefix(prefix, format string, args ...interface{}) {
 // VISUAL PREFIX: 🚀 START
 //
 // EXAMPLES:
-//   logger.Start("PocketBase NATS JWT sync initialized")
-//   logger.Start("Starting account publisher with connection manager")
-//   logger.Start("Initializing NATS sync components...")
+//
+//	logger.Start("PocketBase NATS JWT sync initialized")
+//	logger.Start("Starting account publisher with connection manager")
+//	logger.Start("Initializing NATS sync components...")
 //
 // PARAMETERS:
 //   - format: Printf-style format string
@@ -128,9 +130,10 @@ func (l *Logger) Start(format string, args ...interface{}) {
 // VISUAL PREFIX: ✅ SUCCESS
 //
 // EXAMPLES:
-//   logger.Success("Connected to NATS server: %s", url)
-//   logger.Success("Bootstrap successful! Connected to NATS")
-//   logger.Success("Queue processing complete: %d processed", count)
+//
+//	logger.Success("Connected to NATS server: %s", url)
+//	logger.Success("Bootstrap successful! Connected to NATS")
+//	logger.Success("Queue processing complete: %d processed", count)
 //
 // PARAMETERS:
 //   - format: Printf-style format string
@@ -152,9 +155,10 @@ func (l *Logger) Success(format string, args ...interface{}) {
 // VISUAL PREFIX: ℹ️ INFO
 //
 // EXAMPLES:
-//   logger.Info("Primary NATS server: %s", url)
-//   logger.Info("Bootstrap mode: waiting for NATS connection")
-//   logger.Info("Signing keys rotated for account %s", name)
+//
+//	logger.Info("Primary NATS server: %s", url)
+//	logger.Info("Bootstrap mode: waiting for NATS connection")
+//	logger.Info("Signing keys rotated for account %s", name)
 //
 // PARAMETERS:
 //   - format: Printf-style format string
@@ -176,9 +180,10 @@ func (l *Logger) Info(format string, args ...interface{}) {
 // VISUAL PREFIX: ⚙️ PROCESS
 //
 // EXAMPLES:
-//   logger.Process("Processing %d queued publish operations...", count)
-//   logger.Process("Initializing NATS sync components...")
-//   logger.Process("Regenerating JWTs for users with role %s", roleID)
+//
+//	logger.Process("Processing %d queued publish operations...", count)
+//	logger.Process("Initializing NATS sync components...")
+//	logger.Process("Regenerating JWTs for users with role %s", roleID)
 //
 // PARAMETERS:
 //   - format: Printf-style format string
@@ -201,9 +206,10 @@ func (l *Logger) Process(format string, args ...interface{}) {
 // VISUAL PREFIX: ⚠️ WARNING
 //
 // EXAMPLES:
-//   logger.Warning("Primary connection failed, attempting failover: %v", err)
-//   logger.Warning("Failed to process queue record %s: %v", recordID, err)
-//   logger.Warning("All servers unavailable, entering bootstrap mode")
+//
+//	logger.Warning("Primary connection failed, attempting failover: %v", err)
+//	logger.Warning("Failed to process queue record %s: %v", recordID, err)
+//	logger.Warning("All servers unavailable, entering bootstrap mode")
 //
 // PARAMETERS:
 //   - format: Printf-style format string
@@ -225,9 +231,10 @@ func (l *Logger) Warning(format string, args ...interface{}) {
 // VISUAL PREFIX: ❌ ERROR
 //
 // EXAMPLES:
-//   logger.Error("NATS sync initialization failed: %v", err)
-//   logger.Error("Failed to save queue record: %v", err)
-//   logger.Error("Invalid system operator configuration")
+//
+//	logger.Error("NATS sync initialization failed: %v", err)
+//	logger.Error("Failed to save queue record: %v", err)
+//	logger.Error("Invalid system operator configuration")
 //
 // PARAMETERS:
 //   - format: Printf-style format string
@@ -249,9 +256,10 @@ func (l *Logger) Error(format string, args ...interface{}) {
 // VISUAL PREFIX: 🛑 STOP
 //
 // EXAMPLES:
-//   logger.Stop("Stopping NATS account publisher...")
-//   logger.Stop("NATS connection manager closed")
-//   logger.Stop("Queue processor shutting down...")
+//
+//	logger.Stop("Stopping NATS account publisher...")
+//	logger.Stop("NATS connection manager closed")
+//	logger.Stop("Queue processor shutting down...")
 //
 // PARAMETERS:
 //   - format: Printf-style format string
@@ -273,9 +281,10 @@ func (l *Logger) Stop(format string, args ...interface{}) {
 // VISUAL PREFIX: 📤 PUBLISH
 //
 // EXAMPLES:
-//   logger.Publish("Published account %s to NATS: %s", name, response)
-//   logger.Publish("Account JWT updated in NATS resolver")
-//   logger.Publish("Queue operation published successfully")
+//
+//	logger.Publish("Published account %s to NATS: %s", name, response)
+//	logger.Publish("Account JWT updated in NATS resolver")
+//	logger.Publish("Queue operation published successfully")
 //
 // PARAMETERS:
 //   - format: Printf-style format string
@@ -297,9 +306,10 @@ func (l *Logger) Publish(format string, args ...interface{}) {
 // VISUAL PREFIX: 🗑️ DELETE
 //
 // EXAMPLES:
-//   logger.Delete("Removed account %s from NATS: %s", name, response)
-//   logger.Delete("Account %s not found, removing queue record", accountID)
-//   logger.Delete("Cleanup completed: %d old failed records removed", count)
+//
+//	logger.Delete("Removed account %s from NATS: %s", name, response)
+//	logger.Delete("Account %s not found, removing queue record", accountID)
+//	logger.Delete("Cleanup completed: %d old failed records removed", count)
 //
 // PARAMETERS:
 //   - format: Printf-style format string

@@ -17,7 +17,7 @@ import (
 //
 // NATS KEY HIERARCHY:
 // - Operator Keys: Root of trust, signs account JWTs
-// - Account Keys: Tenant boundaries, identity + signing keys  
+// - Account Keys: Tenant boundaries, identity + signing keys
 // - User Keys: Individual authentication within accounts
 //
 // KEY FORMATS:
@@ -55,7 +55,7 @@ func NewManager() *Manager {
 //
 // RETURNS:
 // - seed: Main operator private key seed (SUOC...)
-// - public: Main operator public key (OABC...)  
+// - public: Main operator public key (OABC...)
 // - signingKey: Signing private key seed (SUOC...)
 // - signingPublic: Signing public key (OABC...)
 // - error: nil on success, error on key generation failure
@@ -122,7 +122,7 @@ func (m *Manager) GenerateOperatorKeyPair() (seed, public, signingKey, signingPu
 // RETURNS:
 // - seed: Main account private key seed (SUAC...)
 // - public: Main account public key (AABC...)
-// - signingKey: Signing private key seed (SUAC...)  
+// - signingKey: Signing private key seed (SUAC...)
 // - signingPublic: Signing public key (AABC...)
 // - error: nil on success, error on key generation failure
 //
@@ -186,7 +186,7 @@ func (m *Manager) GenerateAccountKeyPair() (seed, public, signingKey, signingPub
 //
 // RETURNS:
 // - seed: User private key seed (SUUC...)
-// - public: User public key (UABC...)  
+// - public: User public key (UABC...)
 // - error: nil on success, error on key generation failure
 //
 // KEY FORMATS:
@@ -225,8 +225,9 @@ func (m *Manager) GenerateUserKeyPair() (seed, public string, err error) {
 //
 // USAGE PATTERN:
 // This method is typically called before JWT signing operations:
-//   kp, err := manager.KeyPairFromSeed(account.LatestSigningKey().Seed)
-//   jwt, err := userClaims.Encode(kp)
+//
+//	kp, err := manager.KeyPairFromSeed(account.LatestSigningKey().Seed)
+//	jwt, err := userClaims.Encode(kp)
 //
 // PARAMETERS:
 //   - seed: NATS seed string (SUOC..., SUAC..., or SUUC...)
@@ -254,7 +255,7 @@ func (m *Manager) KeyPairFromSeed(seed string) (nkeys.KeyPair, error) {
 //
 // STORAGE PATTERN:
 // The system stores both seeds and private keys for compatibility:
-// - Seeds: Used for JWT signing operations  
+// - Seeds: Used for JWT signing operations
 // - Private Keys: Used for legacy systems or external tools
 //
 // PARAMETERS:

@@ -8,129 +8,26 @@ import (
 
 	"github.com/pocketbase/dbx"
 	"github.com/pocketbase/pocketbase"
-	"github.com/spf13/cobra"
 	pbtypes "github.com/skeeeon/pb-nats/internal/types"
+	"github.com/spf13/cobra"
 )
 
-// RegisterCommands adds NATS-related CLI commands to the PocketBase application.
-// This enables users to export NATS configuration files for server setup.
+// RegisterCommands adds NATS-related CLI commands to the PocketBase application
+// using default options. This enables users to export NATS configuration files
+// for server setup.
 //
 // USAGE:
-//   ./myapp nats export --output ./nats-config/
-//   ./myapp nats export --operator-jwt
-//   ./myapp nats export --config
 //
-// PARAMETERS:
-//   - app: PocketBase application instance
-//
-// COMMANDS ADDED:
-//   - nats: Parent command for NATS operations
-//   - nats export: Export NATS server configuration files
+//	./myapp nats export --output ./nats-config/
+//	./myapp nats export --operator-jwt
+//	./myapp nats export --config
 func RegisterCommands(app *pocketbase.PocketBase) {
-	natsCmd := &cobra.Command{
-		Use:   "nats",
-		Short: "NATS server configuration commands",
-		Long:  "Commands for managing NATS server configuration and JWT exports.",
-	}
-
-	exportCmd := createExportCommand(app)
-	natsCmd.AddCommand(exportCmd)
-
-	app.RootCmd.AddCommand(natsCmd)
-}
-
-// createExportCommand creates the 'nats export' subcommand.
-func createExportCommand(app *pocketbase.PocketBase) *cobra.Command {
-	var outputDir string
-	var operatorJWTOnly bool
-	var configOnly bool
-	var operatorConfOnly bool
-	var serverName string
-	var natsPort int
-	var jetstreamStoreDir string
-
-	cmd := &cobra.Command{
-		Use:   "export",
-		Short: "Export NATS server configuration files",
-		Long: `Export NATS server configuration files for deploying a NATS server.
-
-This command exports:
-  - operator.jwt: The operator JWT for NATS server authentication
-  - operator.conf: Operator configuration with system account
-  - nats.conf: Example NATS server configuration
-
-The exported files can be used to bootstrap a NATS server that works
-with the pb-nats JWT authentication system.
-
-Examples:
-  # Export all files to a directory
-  ./myapp nats export --output ./nats-config/
-
-  # Export only the operator JWT to stdout
-  ./myapp nats export --operator-jwt
-
-  # Export only the nats.conf to stdout
-  ./myapp nats export --config
-
-  # Export only the operator.conf to stdout
-  ./myapp nats export --operator-conf
-
-  # Customize server settings
-  ./myapp nats export --output ./nats-config/ --server-name my-nats --port 4222`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			// Bootstrap the app to access the database
-			if err := app.Bootstrap(); err != nil {
-				return fmt.Errorf("failed to bootstrap app: %w", err)
-			}
-
-			// Get operator and system account data
-			operator, sysAccount, err := getOperatorAndSystemAccount(app, "")
-			if err != nil {
-				return err
-			}
-
-			// Handle single-output modes
-			if operatorJWTOnly {
-				fmt.Println(operator.JWT)
-				return nil
-			}
-
-			if operatorConfOnly {
-				conf := generateOperatorConf(operator, sysAccount)
-				fmt.Println(conf)
-				return nil
-			}
-
-			if configOnly {
-				conf := generateNATSConf(serverName, natsPort, jetstreamStoreDir)
-				fmt.Println(conf)
-				return nil
-			}
-
-			// Export all files to directory
-			if outputDir == "" {
-				return fmt.Errorf("--output directory is required when not using --operator-jwt, --config, or --operator-conf")
-			}
-
-			return exportAllFiles(outputDir, operator, sysAccount, serverName, natsPort, jetstreamStoreDir)
-		},
-	}
-
-	// Define flags
-	cmd.Flags().StringVarP(&outputDir, "output", "o", "", "Output directory for configuration files")
-	cmd.Flags().BoolVar(&operatorJWTOnly, "operator-jwt", false, "Output only the operator JWT to stdout")
-	cmd.Flags().BoolVar(&configOnly, "config", false, "Output only the nats.conf to stdout")
-	cmd.Flags().BoolVar(&operatorConfOnly, "operator-conf", false, "Output only the operator.conf to stdout")
-	cmd.Flags().StringVar(&serverName, "server-name", "nats-server", "NATS server name")
-	cmd.Flags().IntVar(&natsPort, "port", 4222, "NATS server port")
-	cmd.Flags().StringVar(&jetstreamStoreDir, "jetstream-store", "./storage/jetstream", "JetStream storage directory")
-
-	return cmd
+	RegisterCommandsWithOptions(app, DefaultCommandOptions())
 }
 
 // getOperatorAndSystemAccount retrieves the operator and system account from the database.
 // encryptionKey decrypts sensitive operator fields when at-rest encryption is enabled.
-func getOperatorAndSystemAccount(app *pocketbase.PocketBase, encryptionKey string) (*pbtypes.SystemOperatorRecord, *systemAccountInfo, error) {
+func getOperatorAndSystemAccount(app *pocketbase.PocketBase, accountCollectionName, encryptionKey string) (*pbtypes.SystemOperatorRecord, *systemAccountInfo, error) {
 	// Get operator
 	operatorRecords, err := app.FindAllRecords(pbtypes.SystemOperatorCollectionName)
 	if err != nil {
@@ -150,7 +47,7 @@ func getOperatorAndSystemAccount(app *pocketbase.PocketBase, encryptionKey strin
 	// Get system account by stored ID, fall back to name for backward compatibility
 	var sysAccount *systemAccountInfo
 	if operator.SystemAccountID != "" {
-		rec, err := app.FindRecordById(DefaultAccountCollectionName, operator.SystemAccountID)
+		rec, err := app.FindRecordById(accountCollectionName, operator.SystemAccountID)
 		if err == nil {
 			sysAccount = &systemAccountInfo{
 				PublicKey: rec.GetString("public_key"),
@@ -160,7 +57,7 @@ func getOperatorAndSystemAccount(app *pocketbase.PocketBase, encryptionKey strin
 	}
 
 	if sysAccount == nil {
-		sysAccountRecords, err := app.FindAllRecords(DefaultAccountCollectionName, dbx.HashExp{"name": "System Account"})
+		sysAccountRecords, err := app.FindAllRecords(accountCollectionName, dbx.HashExp{"name": "System Account"})
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to find account records: %w", err)
 		}
@@ -394,13 +291,16 @@ func RegisterCommandsWithOptions(app *pocketbase.PocketBase, opts CommandOptions
 
 // CommandOptions allows customization of command defaults.
 type CommandOptions struct {
-	DefaultServerName      string
-	DefaultPort            int
-	DefaultJetstreamStore  string
-	DefaultOutputDir       string
+	DefaultServerName     string
+	DefaultPort           int
+	DefaultJetstreamStore string
+	DefaultOutputDir      string
+	// AccountCollectionName must match Options.AccountCollectionName when a
+	// custom account collection name is used.
+	AccountCollectionName string
 	// EncryptionKey must match Options.EncryptionKey when at-rest encryption is enabled,
 	// otherwise operator records cannot be decrypted for export.
-	EncryptionKey          string
+	EncryptionKey string
 }
 
 // DefaultCommandOptions returns sensible defaults for command options.
@@ -410,6 +310,7 @@ func DefaultCommandOptions() CommandOptions {
 		DefaultPort:           4222,
 		DefaultJetstreamStore: "./storage/jetstream",
 		DefaultOutputDir:      "",
+		AccountCollectionName: DefaultAccountCollectionName,
 	}
 }
 
@@ -443,7 +344,12 @@ Examples:
 				return fmt.Errorf("failed to bootstrap app: %w", err)
 			}
 
-			operator, sysAccount, err := getOperatorAndSystemAccount(app, opts.EncryptionKey)
+			accountCollection := opts.AccountCollectionName
+			if accountCollection == "" {
+				accountCollection = DefaultAccountCollectionName
+			}
+
+			operator, sysAccount, err := getOperatorAndSystemAccount(app, accountCollection, opts.EncryptionKey)
 			if err != nil {
 				return err
 			}

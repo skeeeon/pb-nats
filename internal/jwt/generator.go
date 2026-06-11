@@ -6,25 +6,30 @@ import (
 	"time"
 
 	jwt "github.com/nats-io/jwt/v2"
-	"github.com/pocketbase/pocketbase"
 	"github.com/skeeeon/pb-nats/internal/nkey"
 	pbtypes "github.com/skeeeon/pb-nats/internal/types"
 )
 
 // Generator handles generating NATS JWTs for operators, accounts, and users.
 type Generator struct {
-	app         *pocketbase.PocketBase
-	nkeyManager *nkey.Manager
-	options     pbtypes.Options
+	nkeyManager     *nkey.Manager
+	options         pbtypes.Options
+	systemAccountID string
 }
 
-// NewGenerator creates a new JWT generator with PocketBase integration.
-func NewGenerator(app *pocketbase.PocketBase, nkeyManager *nkey.Manager, options pbtypes.Options) *Generator {
+// NewGenerator creates a new JWT generator.
+func NewGenerator(nkeyManager *nkey.Manager, options pbtypes.Options) *Generator {
 	return &Generator{
-		app:         app,
 		nkeyManager: nkeyManager,
 		options:     options,
 	}
+}
+
+// SetSystemAccountID records the system account's record ID, used to identify
+// the system user for special permission handling. Called once the system
+// account is known during initialization.
+func (g *Generator) SetSystemAccountID(id string) {
+	g.systemAccountID = id
 }
 
 // GenerateOperatorJWT generates a NATS operator JWT that serves as the root of trust.
@@ -36,11 +41,11 @@ func (g *Generator) GenerateOperatorJWT(operator *pbtypes.SystemOperatorRecord, 
 
 	operatorClaims := jwt.NewOperatorClaims(operator.PublicKey)
 	operatorClaims.Name = operator.Name
-	
+
 	if systemAccountPubKey != "" {
 		operatorClaims.SystemAccount = systemAccountPubKey
 	}
-	
+
 	for _, pubKey := range operator.AllSigningPublicKeys() {
 		operatorClaims.SigningKeys.Add(pubKey)
 	}
@@ -51,11 +56,6 @@ func (g *Generator) GenerateOperatorJWT(operator *pbtypes.SystemOperatorRecord, 
 	}
 
 	return jwtValue, nil
-}
-
-// GenerateOperatorJWTWithoutSystemAccount generates operator JWT for bootstrap mode.
-func (g *Generator) GenerateOperatorJWTWithoutSystemAccount(operator *pbtypes.SystemOperatorRecord) (string, error) {
-	return g.GenerateOperatorJWT(operator, "")
 }
 
 // GenerateAccountJWT generates a NATS account JWT for tenant isolation.
@@ -141,88 +141,23 @@ func (g *Generator) GenerateCredsFile(user *pbtypes.NatsUserRecord) (string, err
 	return string(creds), nil
 }
 
+// limitValue maps stored limit values to NATS JWT limit semantics:
+// negative = unlimited (jwt.NoLimit), 0 = disabled, positive = specific limit.
+func limitValue(v int64) int64 {
+	if v < 0 {
+		return jwt.NoLimit
+	}
+	return v
+}
+
 // applyAccountLimits applies configurable account-level limits to account JWT claims.
 func (g *Generator) applyAccountLimits(accountClaims *jwt.AccountClaims, account *pbtypes.AccountRecord) {
-	// JetStream limits
-	switch account.MaxJetStreamDiskStorage {
-	case -1:
-		accountClaims.Limits.JetStreamLimits.DiskStorage = jwt.NoLimit
-	case 0:
-		accountClaims.Limits.JetStreamLimits.DiskStorage = 0
-	default:
-		if account.MaxJetStreamDiskStorage > 0 {
-			accountClaims.Limits.JetStreamLimits.DiskStorage = account.MaxJetStreamDiskStorage
-		} else {
-			accountClaims.Limits.JetStreamLimits.DiskStorage = jwt.NoLimit
-		}
-	}
-	
-	switch account.MaxJetStreamMemoryStorage {
-	case -1:
-		accountClaims.Limits.JetStreamLimits.MemoryStorage = jwt.NoLimit
-	case 0:
-		accountClaims.Limits.JetStreamLimits.MemoryStorage = 0
-	default:
-		if account.MaxJetStreamMemoryStorage > 0 {
-			accountClaims.Limits.JetStreamLimits.MemoryStorage = account.MaxJetStreamMemoryStorage
-		} else {
-			accountClaims.Limits.JetStreamLimits.MemoryStorage = jwt.NoLimit
-		}
-	}
-
-	// Connection limits
-	switch account.MaxConnections {
-	case -1:
-		accountClaims.Limits.AccountLimits.Conn = jwt.NoLimit
-	case 0:
-		accountClaims.Limits.AccountLimits.Conn = 0
-	default:
-		if account.MaxConnections > 0 {
-			accountClaims.Limits.AccountLimits.Conn = account.MaxConnections
-		} else {
-			accountClaims.Limits.AccountLimits.Conn = jwt.NoLimit
-		}
-	}
-
-	// NATS limits
-	switch account.MaxSubscriptions {
-	case -1:
-		accountClaims.Limits.NatsLimits.Subs = jwt.NoLimit
-	case 0:
-		accountClaims.Limits.NatsLimits.Subs = 0
-	default:
-		if account.MaxSubscriptions > 0 {
-			accountClaims.Limits.NatsLimits.Subs = account.MaxSubscriptions
-		} else {
-			accountClaims.Limits.NatsLimits.Subs = jwt.NoLimit
-		}
-	}
-	
-	switch account.MaxData {
-	case -1:
-		accountClaims.Limits.NatsLimits.Data = jwt.NoLimit
-	case 0:
-		accountClaims.Limits.NatsLimits.Data = 0
-	default:
-		if account.MaxData > 0 {
-			accountClaims.Limits.NatsLimits.Data = account.MaxData
-		} else {
-			accountClaims.Limits.NatsLimits.Data = jwt.NoLimit
-		}
-	}
-	
-	switch account.MaxPayload {
-	case -1:
-		accountClaims.Limits.NatsLimits.Payload = jwt.NoLimit
-	case 0:
-		accountClaims.Limits.NatsLimits.Payload = 0
-	default:
-		if account.MaxPayload > 0 {
-			accountClaims.Limits.NatsLimits.Payload = account.MaxPayload
-		} else {
-			accountClaims.Limits.NatsLimits.Payload = jwt.NoLimit
-		}
-	}
+	accountClaims.Limits.JetStreamLimits.DiskStorage = limitValue(account.MaxJetStreamDiskStorage)
+	accountClaims.Limits.JetStreamLimits.MemoryStorage = limitValue(account.MaxJetStreamMemoryStorage)
+	accountClaims.Limits.AccountLimits.Conn = limitValue(account.MaxConnections)
+	accountClaims.Limits.NatsLimits.Subs = limitValue(account.MaxSubscriptions)
+	accountClaims.Limits.NatsLimits.Data = limitValue(account.MaxData)
+	accountClaims.Limits.NatsLimits.Payload = limitValue(account.MaxPayload)
 }
 
 // applyAccountExports converts export records to NATS JWT exports and adds them to account claims.
@@ -295,7 +230,7 @@ func (g *Generator) applyAccountImports(accountClaims *jwt.AccountClaims, import
 
 // isSystemUser checks if a user belongs to the system account and requires special permissions.
 func (g *Generator) isSystemUser(user *pbtypes.NatsUserRecord, account *pbtypes.AccountRecord) bool {
-	return account.NormalizeName() == "SYS" && user.NatsUsername == "sys"
+	return g.systemAccountID != "" && account.ID == g.systemAccountID && user.NatsUsername == "sys"
 }
 
 // applyPermissions merges role-based and per-user permissions into user JWT claims.
@@ -385,7 +320,7 @@ func (g *Generator) applyPermissions(userClaims *jwt.UserClaims, user *pbtypes.N
 	// Apply response permissions for request-reply patterns
 	if role.AllowResponse {
 		userClaims.Permissions.Resp = &jwt.ResponsePermission{}
-		
+
 		// Set max responses (-1 = unlimited, 0 or unset = default of 1)
 		if role.AllowResponseMax == -1 {
 			userClaims.Permissions.Resp.MaxMsgs = jwt.NoLimit
@@ -395,7 +330,7 @@ func (g *Generator) applyPermissions(userClaims *jwt.UserClaims, user *pbtypes.N
 			// Default: 1 response allowed
 			userClaims.Permissions.Resp.MaxMsgs = 1
 		}
-		
+
 		// Set response TTL (0 = no limit/default)
 		if role.AllowResponseTTL > 0 {
 			userClaims.Permissions.Resp.Expires = time.Duration(role.AllowResponseTTL) * time.Second
@@ -408,41 +343,9 @@ func (g *Generator) applyPermissions(userClaims *jwt.UserClaims, user *pbtypes.N
 
 // applyRoleLimits applies role-based per-user limits to user JWT claims.
 func (g *Generator) applyRoleLimits(userClaims *jwt.UserClaims, role *pbtypes.RoleRecord) {
-	// Data limits
-	switch role.MaxData {
-	case -1:
-		userClaims.Limits.Data = jwt.NoLimit
-	case 0:
-		userClaims.Limits.Data = 0
-	default:
-		if role.MaxData > 0 {
-			userClaims.Limits.Data = role.MaxData
-		}
-	}
-
-	// Subscription limits
-	switch role.MaxSubscriptions {
-	case -1:
-		userClaims.Limits.Subs = jwt.NoLimit
-	case 0:
-		userClaims.Limits.Subs = 0
-	default:
-		if role.MaxSubscriptions > 0 {
-			userClaims.Limits.Subs = role.MaxSubscriptions
-		}
-	}
-
-	// Payload limits
-	switch role.MaxPayload {
-	case -1:
-		userClaims.Limits.Payload = jwt.NoLimit
-	case 0:
-		userClaims.Limits.Payload = 0
-	default:
-		if role.MaxPayload > 0 {
-			userClaims.Limits.Payload = role.MaxPayload
-		}
-	}
+	userClaims.Limits.Data = limitValue(role.MaxData)
+	userClaims.Limits.Subs = limitValue(role.MaxSubscriptions)
+	userClaims.Limits.Payload = limitValue(role.MaxPayload)
 }
 
 // GenerateSystemAccountJWT generates a specialized JWT for the system account (SYS).
@@ -488,7 +391,7 @@ func (g *Generator) GenerateSystemAccountJWT(sysAccount *pbtypes.AccountRecord, 
 	accountClaims.Limits.JetStreamLimits.MemoryStorage = 0
 	accountClaims.Limits.JetStreamLimits.Streams = 0
 	accountClaims.Limits.JetStreamLimits.Consumer = 0
-	
+
 	// Unlimited core NATS limits for system operations
 	accountClaims.Limits.AccountLimits.Conn = jwt.NoLimit
 	accountClaims.Limits.NatsLimits.Subs = jwt.NoLimit

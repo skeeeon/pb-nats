@@ -1,41 +1,41 @@
 package pbnats
 
 import (
-	"time"
 	pbtypes "github.com/skeeeon/pb-nats/internal/types"
+	"time"
 )
 
 // DefaultOptions returns sensible defaults for the NATS JWT synchronization options
 func DefaultOptions() Options {
 	return Options{
-		UserCollectionName:      pbtypes.DefaultUserCollectionName,
-		RoleCollectionName:      pbtypes.DefaultRoleCollectionName,
-		AccountCollectionName:   pbtypes.DefaultAccountCollectionName,
-		ExportCollectionName:    pbtypes.DefaultExportCollectionName,
-		ImportCollectionName:    pbtypes.DefaultImportCollectionName,
-		
-		OperatorName:              pbtypes.DefaultOperatorName,
-		NATSServerURL:             "nats://localhost:4222",
-		BackupNATSServerURLs:      []string{},
-		
+		UserCollectionName:    pbtypes.DefaultUserCollectionName,
+		RoleCollectionName:    pbtypes.DefaultRoleCollectionName,
+		AccountCollectionName: pbtypes.DefaultAccountCollectionName,
+		ExportCollectionName:  pbtypes.DefaultExportCollectionName,
+		ImportCollectionName:  pbtypes.DefaultImportCollectionName,
+
+		OperatorName:         pbtypes.DefaultOperatorName,
+		NATSServerURL:        "nats://localhost:4222",
+		BackupNATSServerURLs: []string{},
+
 		// Connection management with sensible defaults
-		ConnectionRetryConfig:     pbtypes.DefaultRetryConfig(),
-		ConnectionTimeouts:        pbtypes.DefaultTimeoutConfig(),
-		
-		DefaultJWTExpiry:          0, // Never expires
-		PublishQueueInterval:      30 * time.Second,
-		DebounceInterval:          3 * time.Second,
-		LogToConsole:              true,
-		
+		ConnectionRetryConfig: pbtypes.DefaultRetryConfig(),
+		ConnectionTimeouts:    pbtypes.DefaultTimeoutConfig(),
+
+		DefaultJWTExpiry:     0, // Never expires
+		PublishQueueInterval: 30 * time.Second,
+		DebounceInterval:     3 * time.Second,
+		LogToConsole:         true,
+
 		// Failed record cleanup configuration
 		FailedRecordCleanupInterval: 6 * time.Hour,  // Run cleanup 4 times per day
 		FailedRecordRetentionTime:   24 * time.Hour, // Keep failed records for 1 day for debugging
-		
+
 		// Default permissions for users when role permissions are empty
 		DefaultPublishPermissions:   pbtypes.DefaultPublishPermissions,
 		DefaultSubscribePermissions: pbtypes.DefaultSubscribePermissions,
-		
-		EventFilter:               nil, // No filter by default, process all events
+
+		EventFilter: nil, // No filter by default, process all events
 	}
 }
 

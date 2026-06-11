@@ -20,32 +20,8 @@ type SigningKeyPublic struct {
 type SigningKeyPrivate struct {
 	PublicKey  string    `json:"public_key"`
 	PrivateKey string    `json:"private_key"`
-	Seed      string    `json:"seed"`
-	CreatedAt time.Time `json:"created_at"`
-}
-
-// ParseSigningKeysPublic parses a JSON array of public signing keys.
-func ParseSigningKeysPublic(data json.RawMessage) ([]SigningKeyPublic, error) {
-	if len(data) == 0 {
-		return nil, nil
-	}
-	var keys []SigningKeyPublic
-	if err := json.Unmarshal(data, &keys); err != nil {
-		return nil, err
-	}
-	return keys, nil
-}
-
-// ParseSigningKeysPrivate parses a JSON array of private signing keys.
-func ParseSigningKeysPrivate(data json.RawMessage) ([]SigningKeyPrivate, error) {
-	if len(data) == 0 {
-		return nil, nil
-	}
-	var keys []SigningKeyPrivate
-	if err := json.Unmarshal(data, &keys); err != nil {
-		return nil, err
-	}
-	return keys, nil
+	Seed       string    `json:"seed"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 // AccountRecord represents a NATS account that provides isolation boundary for users.
@@ -76,22 +52,22 @@ func ParseSigningKeysPrivate(data json.RawMessage) ([]SigningKeyPrivate, error) 
 // - JetStream limits: Storage and stream limits for the account
 //
 // LIMIT VALUES (CRITICAL - CORRECT NATS SEMANTICS):
-// - (-1) = Unlimited (no restrictions) 
+// - (-1) = Unlimited (no restrictions)
 // - (0) = Disabled/blocked (no access allowed)
 // - (positive) = Specific limit value
 type AccountRecord struct {
-	ID                string    `json:"id"`
-	Name              string    `json:"name"`
-	Description       string    `json:"description"`
-	PublicKey         string    `json:"public_key"`
-	PrivateKey        string    `json:"private_key"`
-	Seed              string    `json:"seed"`
+	ID                 string              `json:"id"`
+	Name               string              `json:"name"`
+	Description        string              `json:"description"`
+	PublicKey          string              `json:"public_key"`
+	PrivateKey         string              `json:"private_key"`
+	Seed               string              `json:"seed"`
 	SigningKeys        []SigningKeyPublic  `json:"signing_keys"`
 	SigningKeysPrivate []SigningKeyPrivate `json:"signing_keys_private"`
-	JWT               string              `json:"jwt"`
-	Active            bool                `json:"active"`
-	RotateKeys        bool                `json:"rotate_keys"`
-	
+	JWT                string              `json:"jwt"`
+	Active             bool                `json:"active"`
+	RotateKeys         bool                `json:"rotate_keys"`
+
 	// Account-level limits (NATS semantics: -1 = unlimited, 0 = disabled, positive = limit)
 	MaxConnections            int64 `json:"max_connections"`
 	MaxSubscriptions          int64 `json:"max_subscriptions"`
@@ -99,7 +75,7 @@ type AccountRecord struct {
 	MaxPayload                int64 `json:"max_payload"`
 	MaxJetStreamDiskStorage   int64 `json:"max_jetstream_disk_storage"`
 	MaxJetStreamMemoryStorage int64 `json:"max_jetstream_memory_storage"`
-	
+
 	Created time.Time `json:"created"`
 	Updated time.Time `json:"updated"`
 }
@@ -126,7 +102,7 @@ type NatsUserRecord struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
 	Verified bool   `json:"verified"`
-	
+
 	// NATS-specific fields (no encryption - plaintext storage by design)
 	NatsUsername string     `json:"nats_username"`
 	Description  string     `json:"description"`
@@ -174,7 +150,7 @@ type NatsUserRecord struct {
 //
 // LIMIT VALUES (CRITICAL - CORRECT NATS SEMANTICS):
 // - (-1) = Unlimited (no restrictions)
-// - (0) = Disabled/blocked (no access allowed) 
+// - (0) = Disabled/blocked (no access allowed)
 // - (positive) = Specific limit value
 //
 // CROSS-ACCOUNT USAGE:
@@ -185,15 +161,15 @@ type RoleRecord struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
 	IsDefault   bool   `json:"is_default"`
-	
+
 	// Allow permissions (subjects user CAN access)
 	PublishPermissions   json.RawMessage `json:"publish_permissions"`
 	SubscribePermissions json.RawMessage `json:"subscribe_permissions"`
-	
+
 	// Deny permissions (subjects user CANNOT access - takes precedence over allow)
 	PublishDenyPermissions   json.RawMessage `json:"publish_deny_permissions"`
 	SubscribeDenyPermissions json.RawMessage `json:"subscribe_deny_permissions"`
-	
+
 	// Response permission for request-reply patterns
 	// When true, allows the user to send responses to requests
 	AllowResponse bool `json:"allow_response"`
@@ -201,7 +177,7 @@ type RoleRecord struct {
 	AllowResponseMax int `json:"allow_response_max"`
 	// Response TTL in seconds (0 = no limit/default)
 	AllowResponseTTL int `json:"allow_response_ttl"`
-	
+
 	// Per-user limits (NATS semantics: -1 = unlimited, 0 = disabled, positive = limit)
 	MaxSubscriptions int64 `json:"max_subscriptions"`
 	MaxData          int64 `json:"max_data"`
@@ -285,8 +261,8 @@ func NewSigningKeyPair(publicKey, privateKey, seed string) (SigningKeyPublic, Si
 		}, SigningKeyPrivate{
 			PublicKey:  publicKey,
 			PrivateKey: privateKey,
-			Seed:      seed,
-			CreatedAt: now,
+			Seed:       seed,
+			CreatedAt:  now,
 		}
 }
 
@@ -347,10 +323,10 @@ type AccountExportRecord struct {
 	AccountID            string    `json:"account_id"`
 	Name                 string    `json:"name"`
 	Subject              string    `json:"subject"`
-	Type                 string    `json:"type"`                  // "stream" or "service"
+	Type                 string    `json:"type"` // "stream" or "service"
 	TokenReq             bool      `json:"token_req"`
-	ResponseType         string    `json:"response_type"`         // "Singleton", "Stream", "Chunked" (service only)
-	ResponseThreshold    int64     `json:"response_threshold"`    // milliseconds (service only)
+	ResponseType         string    `json:"response_type"`      // "Singleton", "Stream", "Chunked" (service only)
+	ResponseThreshold    int64     `json:"response_threshold"` // milliseconds (service only)
 	AccountTokenPosition int       `json:"account_token_position"`
 	Advertise            bool      `json:"advertise"`
 	AllowTrace           bool      `json:"allow_trace"`
@@ -374,10 +350,10 @@ type AccountImportRecord struct {
 	AccountID    string    `json:"account_id"`
 	Name         string    `json:"name"`
 	Subject      string    `json:"subject"`
-	Account      string    `json:"account"`       // public key of exporting account
-	Token        string    `json:"token"`          // optional activation JWT
+	Account      string    `json:"account"` // public key of exporting account
+	Token        string    `json:"token"`   // optional activation JWT
 	LocalSubject string    `json:"local_subject"`
-	Type         string    `json:"type"`           // "stream" or "service"
+	Type         string    `json:"type"` // "stream" or "service"
 	Share        bool      `json:"share"`
 	AllowTrace   bool      `json:"allow_trace"`
 	Description  string    `json:"description"`
@@ -438,37 +414,37 @@ func DefaultTimeoutConfig() *TimeoutConfig {
 // Options configures the behavior of NATS JWT synchronization.
 type Options struct {
 	// Collection names (customizable for different deployments)
-	UserCollectionName      string
-	RoleCollectionName      string
-	AccountCollectionName   string
-	ExportCollectionName    string
-	ImportCollectionName    string
-	
+	UserCollectionName    string
+	RoleCollectionName    string
+	AccountCollectionName string
+	ExportCollectionName  string
+	ImportCollectionName  string
+
 	// NATS server configuration
 	OperatorName         string
 	NATSServerURL        string
 	BackupNATSServerURLs []string
-	
+
 	// Connection management (nil values use defaults)
 	ConnectionRetryConfig *RetryConfig
 	ConnectionTimeouts    *TimeoutConfig
-	
+
 	// JWT configuration
 	DefaultJWTExpiry time.Duration
-	
+
 	// Performance and reliability
 	PublishQueueInterval time.Duration
 	DebounceInterval     time.Duration
 	LogToConsole         bool
-	
+
 	// Failed record cleanup
 	FailedRecordCleanupInterval time.Duration
 	FailedRecordRetentionTime   time.Duration
-	
+
 	// Default permissions applied when role permissions are empty
 	DefaultPublishPermissions   []string
 	DefaultSubscribePermissions []string
-	
+
 	// Event filtering (optional custom logic)
 	EventFilter func(collectionName, eventType string) bool
 
@@ -578,7 +554,7 @@ func parseJSONPermissions(data json.RawMessage) ([]string, error) {
 	if len(data) == 0 {
 		return []string{}, nil
 	}
-	
+
 	var permissions []string
 	if err := json.Unmarshal(data, &permissions); err != nil {
 		return nil, err
@@ -591,14 +567,14 @@ func (a *AccountRecord) NormalizeName() string {
 	name := strings.ToLower(a.Name)
 	name = strings.ReplaceAll(name, " ", "_")
 	name = strings.ReplaceAll(name, "-", "_")
-	
+
 	var result strings.Builder
 	for _, char := range name {
 		if (char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') || char == '_' {
 			result.WriteRune(char)
 		}
 	}
-	
+
 	normalized := result.String()
 	if normalized == "" {
 		return "unnamed_account"

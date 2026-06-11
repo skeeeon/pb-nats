@@ -4,6 +4,7 @@ package publisher
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,8 +14,8 @@ import (
 	"github.com/pocketbase/pocketbase"
 	"github.com/pocketbase/pocketbase/core"
 	"github.com/skeeeon/pb-nats/internal/connection"
-	"github.com/skeeeon/pb-nats/internal/utils"
 	pbtypes "github.com/skeeeon/pb-nats/internal/types"
+	"github.com/skeeeon/pb-nats/internal/utils"
 )
 
 // Manager orchestrates reliable publishing of account JWTs to NATS servers.
@@ -32,7 +33,7 @@ type Manager struct {
 func NewManager(app *pocketbase.PocketBase, options pbtypes.Options) *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
 	logger := utils.NewLogger(options.LogToConsole)
-	
+
 	connManager := connection.NewManager(
 		options.NATSServerURL,
 		options.BackupNATSServerURLs,
@@ -40,7 +41,7 @@ func NewManager(app *pocketbase.PocketBase, options pbtypes.Options) *Manager {
 		options.ConnectionTimeouts,
 		logger,
 	)
-	
+
 	return &Manager{
 		app:         app,
 		options:     options,
@@ -61,7 +62,7 @@ func (p *Manager) Start() error {
 	}
 
 	go p.processQueuePeriodically()
-	
+
 	p.logger.Success("NATS account publisher started (bootstrap mode enabled)")
 	return nil
 }
@@ -70,13 +71,13 @@ func (p *Manager) Start() error {
 func (p *Manager) Stop() {
 	p.logger.Stop("Stopping NATS account publisher...")
 	p.cancelCtx()
-	
+
 	if p.connManager != nil {
 		if err := p.connManager.Close(); err != nil {
 			p.logger.Warning("Error closing connection manager: %v", err)
 		}
 	}
-	
+
 	p.logger.Success("NATS account publisher stopped")
 }
 
@@ -91,19 +92,18 @@ func (p *Manager) PublishAccount(account *pbtypes.AccountRecord) error {
 	return p.publishAccountJWT(account.JWT, account.NormalizeName())
 }
 
-// RemoveAccount removes an account from NATS server registry.
-func (p *Manager) RemoveAccount(account *pbtypes.AccountRecord) error {
-	if account == nil {
-		return utils.WrapError(fmt.Errorf("account record is nil"), "remove account validation failed")
-	}
-	if err := p.validateAccount(account); err != nil {
-		return utils.WrapErrorf(err, "invalid account %s", account.ID)
-	}
-	return p.removeAccountJWT(account.PublicKey, account.NormalizeName())
+// UpdateCredentials pushes refreshed system user credentials to the connection manager.
+// Called when the system user's JWT is regenerated so the persistent NATS connection
+// doesn't keep authenticating with a stale JWT.
+func (p *Manager) UpdateCredentials(jwt, seed string) error {
+	return p.connManager.UpdateCredentials(jwt, seed)
 }
 
 // QueueAccountUpdate adds an account operation to the reliable publish queue.
-func (p *Manager) QueueAccountUpdate(accountID string, action string) error {
+// publicKey and accountName are snapshots stored on the queue record so delete
+// operations can be published after the account record is gone; pass empty
+// strings for upserts (the account is looked up at processing time).
+func (p *Manager) QueueAccountUpdate(accountID, action, publicKey, accountName string) error {
 	if err := utils.ValidateRequired(accountID, "account ID"); err != nil {
 		return utils.WrapError(err, "queue account update validation failed")
 	}
@@ -114,7 +114,7 @@ func (p *Manager) QueueAccountUpdate(accountID string, action string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	existingRecords, err := p.app.FindAllRecords(pbtypes.PublishQueueCollectionName, 
+	existingRecords, err := p.app.FindAllRecords(pbtypes.PublishQueueCollectionName,
 		dbx.And(
 			dbx.HashExp{"account_id": accountID},
 			dbx.Or(
@@ -131,13 +131,17 @@ func (p *Manager) QueueAccountUpdate(accountID string, action string) error {
 		record.Set("action", action)
 		record.Set("attempts", 0)
 		record.Set("message", "")
-		
+		if publicKey != "" {
+			record.Set("account_public_key", publicKey)
+			record.Set("account_name", accountName)
+		}
+
 		if err := p.app.Save(record); err != nil {
 			return utils.WrapErrorf(err, "failed to update queue record for account %s", accountID)
 		}
 		p.logger.Info("Updated queue record for account %s: action=%s", accountID, action)
 	} else {
-		if err := p.createQueueRecord(accountID, action); err != nil {
+		if err := p.createQueueRecord(accountID, action, publicKey, accountName); err != nil {
 			return utils.WrapErrorf(err, "failed to create queue record for account %s", accountID)
 		}
 		p.logger.Info("Created queue record for account %s: action=%s", accountID, action)
@@ -151,7 +155,7 @@ func (p *Manager) ProcessPublishQueue() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	records, err := p.app.FindAllRecords(pbtypes.PublishQueueCollectionName, 
+	records, err := p.app.FindAllRecords(pbtypes.PublishQueueCollectionName,
 		dbx.Or(
 			dbx.NewExp("failed_at IS NULL"),
 			dbx.HashExp{"failed_at": ""},
@@ -197,7 +201,7 @@ func (p *Manager) CleanupFailedRecords() error {
 	defer p.mu.Unlock()
 
 	cutoffTime := time.Now().Add(-p.options.FailedRecordRetentionTime)
-	
+
 	failedRecords, err := p.app.FindAllRecords(pbtypes.PublishQueueCollectionName,
 		dbx.And(
 			dbx.NewExp("failed_at IS NOT NULL"),
@@ -288,26 +292,40 @@ func (p *Manager) processQueueRecord(record *core.Record) error {
 		return nil
 	}
 
-	account, err := p.app.FindRecordById(p.options.AccountCollectionName, accountID)
-	if err != nil {
-		p.logger.Delete("Account %s not found, removing queue record", accountID)
-		return p.app.Delete(record)
-	}
-
-	accountRecord := pbtypes.RecordToAccountModel(account, p.options.EncryptionKey)
-
 	var processErr error
+	var accountLabel string
+
 	switch action {
 	case pbtypes.PublishActionUpsert:
+		account, err := p.app.FindRecordById(p.options.AccountCollectionName, accountID)
+		if err != nil {
+			p.logger.Delete("Account %s not found, removing queue record", accountID)
+			return p.app.Delete(record)
+		}
+		accountRecord := pbtypes.RecordToAccountModel(account, p.options.EncryptionKey)
+		accountLabel = accountRecord.Name
 		processErr = p.PublishAccount(accountRecord)
 	case pbtypes.PublishActionDelete:
-		processErr = p.RemoveAccount(accountRecord)
+		// Deletes use the snapshot taken at enqueue time - the account record
+		// no longer exists by the time the queue is processed.
+		publicKey := record.GetString("account_public_key")
+		accountLabel = record.GetString("account_name")
+		if accountLabel == "" {
+			accountLabel = accountID
+		}
+		if publicKey == "" {
+			// Legacy queue record without a snapshot; the account is already
+			// gone, so there is nothing we can send to NATS.
+			p.logger.Warning("Delete queue record %s has no account public key snapshot, removing", record.Id)
+			return p.app.Delete(record)
+		}
+		processErr = p.removeAccountJWT(publicKey, accountLabel)
 	default:
 		processErr = fmt.Errorf("unknown action: %s", action)
 	}
 
 	if processErr != nil {
-		if utils.Contains(processErr.Error(), "bootstrap mode") {
+		if strings.Contains(processErr.Error(), "bootstrap mode") {
 			record.Set("message", "Waiting for NATS connection (bootstrap mode)")
 			if err := p.app.Save(record); err != nil {
 				return utils.WrapError(err, "failed to update queue record with bootstrap message")
@@ -323,7 +341,7 @@ func (p *Manager) processQueueRecord(record *core.Record) error {
 		return processErr
 	}
 
-	p.logger.Success("Successfully processed %s for account %s", action, accountRecord.Name)
+	p.logger.Success("Successfully processed %s for account %s", action, accountLabel)
 	return p.app.Delete(record)
 }
 
@@ -338,7 +356,7 @@ func (p *Manager) publishAccountJWT(accountJWT, accountName string) error {
 
 	resp, err := p.connManager.Request("$SYS.REQ.CLAIMS.UPDATE", []byte(accountJWT), p.options.ConnectionTimeouts.RequestTimeout)
 	if err != nil {
-		if utils.Contains(err.Error(), "bootstrap mode") {
+		if strings.Contains(err.Error(), "bootstrap mode") {
 			return fmt.Errorf("NATS connection not available (bootstrap mode) - account %s will be published when connection is established", accountName)
 		}
 		return utils.WrapErrorf(err, "failed to publish account JWT for %s", accountName)
@@ -377,7 +395,7 @@ func (p *Manager) removeAccountJWT(accountPublicKey, accountName string) error {
 
 	resp, err := p.connManager.Request("$SYS.REQ.CLAIMS.DELETE", []byte(deleteJWT), p.options.ConnectionTimeouts.RequestTimeout)
 	if err != nil {
-		if utils.Contains(err.Error(), "bootstrap mode") {
+		if strings.Contains(err.Error(), "bootstrap mode") {
 			return fmt.Errorf("NATS connection not available (bootstrap mode) - account %s deletion will be processed when connection is established", accountName)
 		}
 		return utils.WrapErrorf(err, "failed to delete account JWT for %s", accountName)
@@ -388,7 +406,7 @@ func (p *Manager) removeAccountJWT(accountPublicKey, accountName string) error {
 }
 
 // createQueueRecord creates a new queue record for account operation.
-func (p *Manager) createQueueRecord(accountID, action string) error {
+func (p *Manager) createQueueRecord(accountID, action, publicKey, accountName string) error {
 	collection, err := p.app.FindCollectionByNameOrId(pbtypes.PublishQueueCollectionName)
 	if err != nil {
 		return utils.WrapError(err, "failed to find publish queue collection")
@@ -396,6 +414,8 @@ func (p *Manager) createQueueRecord(accountID, action string) error {
 
 	record := core.NewRecord(collection)
 	record.Set("account_id", accountID)
+	record.Set("account_public_key", publicKey)
+	record.Set("account_name", accountName)
 	record.Set("action", action)
 	record.Set("attempts", 0)
 	record.Set("message", "")

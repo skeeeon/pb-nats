@@ -4,12 +4,13 @@ package connection
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/nats-io/nats.go"
-	"github.com/skeeeon/pb-nats/internal/utils"
 	pbtypes "github.com/skeeeon/pb-nats/internal/types"
+	"github.com/skeeeon/pb-nats/internal/utils"
 )
 
 // FailoverState represents the current operational state of the connection manager.
@@ -17,10 +18,10 @@ import (
 type FailoverState int
 
 const (
-	StateHealthy FailoverState = iota // Connected to primary server, all systems normal
-	StateRetrying                     // Primary failed, retrying with backoff
-	StateFailedOver                   // Operating on backup server
-	StateBootstrapping                // Initial state, NATS not yet available
+	StateHealthy       FailoverState = iota // Connected to primary server, all systems normal
+	StateRetrying                           // Primary failed, retrying with backoff
+	StateFailedOver                         // Operating on backup server
+	StateBootstrapping                      // Initial state, NATS not yet available
 )
 
 // String returns human-readable representation of failover state for logging.
@@ -48,10 +49,10 @@ type ConnectionCredentials struct {
 
 // ConnectionStatus provides current connection state for monitoring and debugging.
 type ConnectionStatus struct {
-	Connected     bool       // True if actively connected to NATS
-	CurrentURL    string     // URL of currently connected server
+	Connected     bool          // True if actively connected to NATS
+	CurrentURL    string        // URL of currently connected server
 	FailoverState FailoverState // Current operational state
-	LastFailover  *time.Time // Time of last failover event (nil if never)
+	LastFailover  *time.Time    // Time of last failover event (nil if never)
 }
 
 // Manager handles persistent NATS connections with intelligent failover and graceful bootstrap.
@@ -69,15 +70,15 @@ type ConnectionStatus struct {
 // Primary → Retry with backoff → Failover to backup → Background primary health checks
 type Manager struct {
 	// Configuration
-	primaryURL   string                 // Primary NATS server URL
-	backupURLs   []string               // Backup server URLs for failover
-	credentials  *ConnectionCredentials // Authentication credentials
-	retryConfig  *pbtypes.RetryConfig   // Retry and backoff configuration
-	timeouts     *pbtypes.TimeoutConfig // Connection timeout settings
+	primaryURL  string                 // Primary NATS server URL
+	backupURLs  []string               // Backup server URLs for failover
+	credentials *ConnectionCredentials // Authentication credentials
+	retryConfig *pbtypes.RetryConfig   // Retry and backoff configuration
+	timeouts    *pbtypes.TimeoutConfig // Connection timeout settings
 
 	// Connection state
-	conn       *nats.Conn // Current NATS connection (nil if disconnected)
-	currentURL string     // URL of currently connected server
+	conn       *nats.Conn   // Current NATS connection (nil if disconnected)
+	currentURL string       // URL of currently connected server
 	mu         sync.RWMutex // Protects connection state
 
 	// Failover state
@@ -88,7 +89,7 @@ type Manager struct {
 	// Bootstrap state
 	isBootstrapping      bool         // True when in bootstrap mode
 	bootstrapRetryTicker *time.Ticker // Timer for bootstrap connection attempts
-	
+
 	// Context and cleanup
 	ctx       context.Context    // Context for graceful shutdown
 	cancelCtx context.CancelFunc // Cancels all background operations
@@ -116,9 +117,9 @@ type Manager struct {
 //
 // SIDE EFFECTS:
 // - Creates context and cancellation function
-func NewManager(primaryURL string, backupURLs []string, retryConfig *pbtypes.RetryConfig, 
+func NewManager(primaryURL string, backupURLs []string, retryConfig *pbtypes.RetryConfig,
 	timeouts *pbtypes.TimeoutConfig, logger *utils.Logger) *Manager {
-	
+
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Apply defaults if not provided
@@ -177,7 +178,7 @@ func (cm *Manager) StartBootstrap(jwt, seed string) {
 
 	// Start background connection attempts
 	cm.startBootstrapRetry()
-	
+
 	cm.logger.Info("Bootstrap mode: NATS connection will be established when server becomes available")
 }
 
@@ -392,10 +393,10 @@ func (cm *Manager) UpdateCredentials(jwt, seed string) error {
 	// If we have an active connection, we need to reconnect with new credentials
 	if cm.conn != nil && cm.conn.IsConnected() {
 		cm.logger.Info("Updating NATS credentials, reconnecting...")
-		
+
 		// Close current connection
 		cm.conn.Close()
-		
+
 		// Reconnect with new credentials
 		conn, url, err := cm.tryAllServers()
 		if err != nil {
@@ -499,7 +500,7 @@ func (cm *Manager) publishWithFailover(subject string, data []byte) error {
 	// Check if we should attempt failover
 	if cm.isRetryableError(err) {
 		cm.logger.Warning("Publish failed, attempting failover: %v", err)
-		
+
 		if reconnectErr := cm.handleConnectionFailure(err); reconnectErr != nil {
 			return fmt.Errorf("publish failed and failover unsuccessful: %v", reconnectErr)
 		}
@@ -561,7 +562,7 @@ func (cm *Manager) requestWithFailover(subject string, data []byte, timeout time
 	// Check if we should attempt failover
 	if cm.isRetryableError(err) {
 		cm.logger.Warning("Request failed, attempting failover: %v", err)
-		
+
 		if reconnectErr := cm.handleConnectionFailure(err); reconnectErr != nil {
 			return nil, fmt.Errorf("request failed and failover unsuccessful: %v", reconnectErr)
 		}
@@ -591,7 +592,7 @@ func (cm *Manager) requestWithFailover(subject string, data []byte, timeout time
 //
 // BOOTSTRAP MODE BEHAVIOR:
 // - All publish/request operations return specific bootstrap errors
-// - Background process attempts reconnection periodically  
+// - Background process attempts reconnection periodically
 // - Queue processor understands bootstrap errors and waits
 //
 // SIDE EFFECTS:
@@ -603,7 +604,7 @@ func (cm *Manager) enterBootstrapMode() {
 	cm.isBootstrapping = true
 	cm.failoverState = StateBootstrapping
 	cm.currentURL = ""
-	
+
 	// Close existing connection
 	if cm.conn != nil {
 		cm.conn.Close()
@@ -615,14 +616,14 @@ func (cm *Manager) enterBootstrapMode() {
 		// Store reference and clear field first to prevent race
 		ticker := cm.failbackTicker
 		cm.failbackTicker = nil
-		
+
 		// Stop ticker - safe to do since we have local reference
 		ticker.Stop()
 	}
 
 	// Start bootstrap retry
 	cm.startBootstrapRetry()
-	
+
 	cm.logger.Info("Entered bootstrap mode - will retry connection when NATS becomes available")
 }
 
@@ -636,13 +637,13 @@ func (cm *Manager) enterBootstrapMode() {
 func (cm *Manager) exitBootstrapMode() {
 	cm.isBootstrapping = false
 	cm.failoverState = StateHealthy
-	
+
 	// Stop bootstrap retry ticker safely
 	if cm.bootstrapRetryTicker != nil {
 		// Store reference and clear field first to prevent race
 		ticker := cm.bootstrapRetryTicker
 		cm.bootstrapRetryTicker = nil
-		
+
 		// Stop ticker - safe to do since we have local reference
 		ticker.Stop()
 	}
@@ -675,13 +676,13 @@ func (cm *Manager) startBootstrapRetry() {
 	// Create ticker
 	ticker := time.NewTicker(bootstrapInterval)
 	cm.bootstrapRetryTicker = ticker
-	
+
 	go func() {
 		defer func() {
 			// Safely stop the ticker - use local reference to avoid race condition
 			ticker.Stop()
 		}()
-		
+
 		for {
 			select {
 			case <-cm.ctx.Done():
@@ -774,11 +775,11 @@ func (cm *Manager) handleConnectionFailure(err error) error {
 	// Try primary first with retries
 	if cm.currentURL == cm.primaryURL {
 		cm.logger.Info("Primary connection failed, retrying with backoff...")
-		
+
 		for attempt := 1; attempt <= cm.retryConfig.MaxPrimaryRetries; attempt++ {
 			// Calculate backoff
 			backoff := cm.calculateBackoff(attempt)
-			cm.logger.Info("Retrying primary connection: attempt %d/%d (backoff: %v)", 
+			cm.logger.Info("Retrying primary connection: attempt %d/%d (backoff: %v)",
 				attempt, cm.retryConfig.MaxPrimaryRetries, backoff)
 
 			select {
@@ -941,13 +942,13 @@ func (cm *Manager) startFailbackMonitoring() {
 	// Create ticker
 	ticker := time.NewTicker(cm.retryConfig.FailbackInterval)
 	cm.failbackTicker = ticker
-	
+
 	go func() {
 		defer func() {
 			// Safely stop the ticker - use local reference to avoid race condition
 			ticker.Stop()
 		}()
-		
+
 		for {
 			select {
 			case <-cm.ctx.Done():
@@ -999,29 +1000,29 @@ func (cm *Manager) checkPrimaryHealth() {
 
 	// Primary is healthy, attempt failback
 	cm.logger.Info("Primary server healthy, attempting failback...")
-	
+
 	cm.mu.Lock()
 	// Close current connection
 	if cm.conn != nil {
 		cm.conn.Close()
 	}
-	
+
 	// Switch to primary
 	cm.conn = testConn
 	cm.currentURL = cm.primaryURL
 	cm.failoverState = StateHealthy
 	cm.lastFailover = time.Time{} // Clear last failover time
-	
+
 	// Stop failback monitoring safely
 	if cm.failbackTicker != nil {
 		// Store reference and clear field first to prevent race
 		ticker := cm.failbackTicker
 		cm.failbackTicker = nil
 		cm.mu.Unlock()
-		
+
 		// Stop ticker outside of lock to prevent deadlock
 		ticker.Stop()
-		
+
 		cm.logger.Success("Failed back to primary server: %s", cm.primaryURL)
 		return
 	}
@@ -1089,7 +1090,7 @@ func (cm *Manager) isRetryableError(err error) bool {
 	}
 
 	for _, pattern := range retryablePatterns {
-		if utils.Contains(errStr, pattern) {
+		if strings.Contains(errStr, pattern) {
 			return true
 		}
 	}

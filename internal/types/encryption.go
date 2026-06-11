@@ -3,6 +3,7 @@ package types
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/pocketbase/pocketbase/core"
@@ -76,6 +77,9 @@ func EncryptJSONAndSet(record *core.Record, field string, jsonData json.RawMessa
 }
 
 // decryptString reads a string field from a record and decrypts it if needed.
+// A decryption failure (e.g. wrong encryption key) returns an empty string so
+// downstream required-field validation fails with a clear message, instead of
+// passing ciphertext into cryptographic operations.
 func decryptString(record *core.Record, field, key string) string {
 	val := record.GetString(field)
 	if key == "" || val == "" {
@@ -83,7 +87,8 @@ func decryptString(record *core.Record, field, key string) string {
 	}
 	decrypted, err := DecryptField(val, key)
 	if err != nil {
-		return val // fall back to raw value on error
+		log.Printf("pb-nats: failed to decrypt field %q on record %s (wrong encryption key?): %v", field, record.Id, err)
+		return ""
 	}
 	return decrypted
 }

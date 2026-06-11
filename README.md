@@ -585,9 +585,6 @@ if pbnats.IsTemporaryError(err) {
 if pbnats.IsPermanentError(err) {
     // Invalid config/auth - don't retry
 }
-if pbnats.IsConfigurationError(err) {
-    // Setup issue - fail fast
-}
 ```
 
 ## Troubleshooting

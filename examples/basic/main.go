@@ -14,18 +14,18 @@ func main() {
 
 	// Setup NATS JWT integration with custom options
 	options := pbnats.DefaultOptions()
-	options.NATSServerURL = "nats://localhost:4222"           // Your NATS server
-	options.OperatorName = "my-company"                       // Your operator name
-	options.DebounceInterval = 3 * time.Second                // Wait 3 seconds after changes before updating
-	options.DefaultPublishPermissions = []string{">"}         // Default publish permissions when role is empty (full access within account)
+	options.NATSServerURL = "nats://localhost:4222"                 // Your NATS server
+	options.OperatorName = "my-company"                             // Your operator name
+	options.DebounceInterval = 3 * time.Second                      // Wait 3 seconds after changes before updating
+	options.DefaultPublishPermissions = []string{">"}               // Default publish permissions when role is empty (full access within account)
 	options.DefaultSubscribePermissions = []string{">", "_INBOX.>"} // Default subscribe permissions when role is empty
-	options.PublishQueueInterval = 30 * time.Second           // Process queue every 30 seconds
+	options.PublishQueueInterval = 30 * time.Second                 // Process queue every 30 seconds
 
 	// Initialize pb-nats
 	if err := pbnats.Setup(app, options); err != nil {
 		log.Fatalf("Failed to setup NATS JWT sync: %v", err)
 	}
-        
+
 	// Register NATS Commands
 	pbnats.RegisterCommands(app)
 

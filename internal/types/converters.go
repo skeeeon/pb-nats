@@ -187,8 +187,8 @@ func signingKeyFromScalarFields(record *core.Record) (*SigningKeyPublic, *Signin
 		}, &SigningKeyPrivate{
 			PublicKey:  pubKey,
 			PrivateKey: privKey,
-			Seed:      seed,
-			CreatedAt: now,
+			Seed:       seed,
+			CreatedAt:  now,
 		}
 }
 
