@@ -197,6 +197,18 @@ func (sm *Manager) setupUserHooks() {
 			return e.Next()
 		}
 
+		// Manual revocation takes precedence over regeneration: invalidate the
+		// user's current credentials without deleting the record.
+		if e.Record.GetBool("revoke") {
+			e.Record.Set("revoke", false)
+			if err := sm.revokeUser(e.Record); err != nil {
+				return utils.WrapError(err, "failed to revoke user")
+			}
+			sm.logger.Info("User %s revoked — distributed credentials are now rejected by NATS. Re-enable with the regenerate flag.",
+				e.Record.GetString("nats_username"))
+			return e.Next()
+		}
+
 		regenerate := e.Record.GetBool("regenerate")
 		if regenerate {
 			e.Record.Set("regenerate", false)
@@ -231,15 +243,27 @@ func (sm *Manager) setupUserHooks() {
 		return e.Next()
 	})
 
-	// User deletion
+	// User deletion. A user JWT is a bearer credential the client keeps (it is not
+	// pushed to NATS), so deleting the record alone would leave those credentials
+	// working. Revoke the deleted user's key on the account so NATS rejects them,
+	// then republish the account.
 	sm.app.OnRecordAfterDeleteSuccess().BindFunc(func(e *core.RecordEvent) error {
 		if e.Record.Collection().Name != sm.options.UserCollectionName {
 			return e.Next()
 		}
 		if sm.shouldHandleEvent(sm.options.UserCollectionName, pbtypes.EventTypeUserDelete) {
 			accountID := e.Record.GetString("account_id")
+			pubKey := e.Record.GetString("public_key")
 			if accountID != "" {
-				sm.scheduleSync(accountID, pbtypes.PublishActionUpsert)
+				if pubKey != "" {
+					if err := sm.revokeAccountUserKey(accountID, pubKey, time.Now()); err != nil {
+						sm.logger.Warning("Failed to revoke deleted user %s on account %s: %v",
+							utils.TruncateString(pubKey, 20), accountID, err)
+						sm.scheduleSync(accountID, pbtypes.PublishActionUpsert)
+					}
+				} else {
+					sm.scheduleSync(accountID, pbtypes.PublishActionUpsert)
+				}
 			}
 		}
 		return e.Next()
@@ -349,6 +373,53 @@ func (sm *Manager) regenerateAndSyncAccount(accountID string) {
 		return
 	}
 	sm.scheduleSync(accountID, pbtypes.PublishActionUpsert)
+}
+
+// revokeUser marks a user inactive and revokes their current public key on the
+// owning account, so NATS rejects any credentials the user still holds.
+//
+// The stored JWT/creds are intentionally left in place — they are already rejected
+// by NATS and clearing the JWT would cause the next unrelated save to auto-reissue.
+// To re-enable the user, set the regenerate flag: the fresh JWT carries a later
+// issue time and is accepted, while the revoked older credentials stay invalid
+// (the revocation cutoff is permanent).
+func (sm *Manager) revokeUser(record *core.Record) error {
+	accountID := record.GetString("account_id")
+	pubKey := record.GetString("public_key")
+	if accountID == "" || pubKey == "" {
+		return fmt.Errorf("user has no account or public key to revoke")
+	}
+
+	record.Set("active", false)
+	return sm.revokeAccountUserKey(accountID, pubKey, time.Now())
+}
+
+// revokeAccountUserKey adds a revocation for pubKey to the account, regenerates the
+// account JWT so the revocation is embedded, persists it, and schedules a NATS
+// resync. The cutoff advances but is never removed: user JWTs issued at or before
+// it are rejected, while JWTs issued afterward remain valid.
+func (sm *Manager) revokeAccountUserKey(accountID, pubKey string, ts time.Time) error {
+	accountRecord, err := sm.app.FindRecordById(sm.options.AccountCollectionName, accountID)
+	if err != nil {
+		return utils.WrapErrorf(err, "failed to find account %s for revocation", accountID)
+	}
+
+	account := pbtypes.RecordToAccountModel(accountRecord, sm.options.EncryptionKey)
+	updated, err := pbtypes.RevokeInJSON(account.Revocations, pubKey, ts.Unix())
+	if err != nil {
+		return utils.WrapError(err, "failed to update revocation list")
+	}
+	accountRecord.Set("revocations", updated)
+
+	if err := sm.generateAccountJWT(accountRecord); err != nil {
+		return utils.WrapError(err, "failed to regenerate account JWT after revocation")
+	}
+	if err := sm.app.Save(accountRecord); err != nil {
+		return utils.WrapError(err, "failed to save account after revocation")
+	}
+
+	sm.scheduleSync(accountID, pbtypes.PublishActionUpsert)
+	return nil
 }
 
 // rotateAccountSigningKeys performs emergency signing key rotation for an account.

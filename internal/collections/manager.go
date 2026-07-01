@@ -43,11 +43,17 @@ func (cm *Manager) InitializeCollections() error {
 	if err := cm.ensureUserPermissionFields(); err != nil {
 		return fmt.Errorf("failed to ensure user permission fields: %w", err)
 	}
+	if err := cm.ensureUserRevokeField(); err != nil {
+		return fmt.Errorf("failed to ensure user revoke field: %w", err)
+	}
 	if err := cm.ensureOperatorSigningKeysFields(); err != nil {
 		return fmt.Errorf("failed to ensure operator signing keys fields: %w", err)
 	}
 	if err := cm.ensureAccountSigningKeysFields(); err != nil {
 		return fmt.Errorf("failed to ensure account signing keys fields: %w", err)
+	}
+	if err := cm.ensureAccountRevocationsField(); err != nil {
+		return fmt.Errorf("failed to ensure account revocations field: %w", err)
 	}
 	if err := cm.createExportsCollection(); err != nil {
 		return fmt.Errorf("failed to create exports collection: %w", err)
@@ -120,7 +126,13 @@ func (cm *Manager) createAccountsCollection() error {
 	collection.Fields.Add(&core.TextField{Name: "seed", Max: 200, Hidden: true})
 	collection.Fields.Add(&core.JSONField{Name: "signing_keys", Required: false, MaxSize: 10000})
 	collection.Fields.Add(&core.JSONField{Name: "signing_keys_private", Required: false, MaxSize: 10000, Hidden: true})
-	collection.Fields.Add(&core.TextField{Name: "jwt", Max: 5000})
+	// jwt is generous because the account JWT also carries the revocation list.
+	collection.Fields.Add(&core.TextField{Name: "jwt", Max: 50000})
+
+	// Revocation list: {"<user-public-key>": <unix-second cutoff>}. Entries are
+	// permanent; they invalidate any user JWT for that key issued at or before the
+	// cutoff. Public — contains only public keys and timestamps, no secrets.
+	collection.Fields.Add(&core.JSONField{Name: "revocations", Required: false, MaxSize: 50000})
 
 	// Management fields
 	collection.Fields.Add(&core.BoolField{Name: "active"})
@@ -249,6 +261,9 @@ func (cm *Manager) createUsersCollection() error {
 	collection.Fields.Add(&core.BoolField{Name: "bearer_token"})
 	collection.Fields.Add(&core.DateField{Name: "jwt_expires_at"})
 	collection.Fields.Add(&core.BoolField{Name: "regenerate"})
+	// revoke: set true to invalidate this user's currently distributed credentials
+	// (adds their key to the account revocation list). Consumed on save.
+	collection.Fields.Add(&core.BoolField{Name: "revoke"})
 	collection.Fields.Add(&core.BoolField{Name: "active"})
 
 	// Per-user permission overrides (JSON arrays of subjects, merged with role permissions)
@@ -454,6 +469,51 @@ func (cm *Manager) ensureUserPermissionFields() error {
 	collection.Fields.Add(&core.JSONField{Name: "publish_deny_permissions", Required: false, MaxSize: 5000})
 	collection.Fields.Add(&core.JSONField{Name: "subscribe_deny_permissions", Required: false, MaxSize: 5000})
 
+	return cm.app.Save(collection)
+}
+
+// ensureUserRevokeField adds the revoke trigger field to existing nats_users
+// collections. Migration for deployments created before revocation support.
+func (cm *Manager) ensureUserRevokeField() error {
+	collection, err := cm.app.FindCollectionByNameOrId(cm.options.UserCollectionName)
+	if err != nil {
+		return nil // Collection doesn't exist yet; createUsersCollection will handle it
+	}
+
+	if collection.Fields.GetByName("revoke") != nil {
+		return nil
+	}
+
+	collection.Fields.Add(&core.BoolField{Name: "revoke"})
+	return cm.app.Save(collection)
+}
+
+// ensureAccountRevocationsField adds the revocations field to existing accounts
+// collections and widens the jwt field, which now also carries the (potentially
+// large) revocation list. Migration for deployments created before revocation support.
+func (cm *Manager) ensureAccountRevocationsField() error {
+	collection, err := cm.app.FindCollectionByNameOrId(cm.options.AccountCollectionName)
+	if err != nil {
+		return nil // Collection doesn't exist yet; createAccountsCollection will handle it
+	}
+
+	changed := false
+
+	if collection.Fields.GetByName("revocations") == nil {
+		collection.Fields.Add(&core.JSONField{Name: "revocations", Required: false, MaxSize: 50000})
+		changed = true
+	}
+
+	// Revocations are embedded in the account JWT, so a busy account's JWT can
+	// exceed the original 5000-char limit. Widen it so regeneration can't fail.
+	if f, ok := collection.Fields.GetByName("jwt").(*core.TextField); ok && f.Max < 50000 {
+		f.Max = 50000
+		changed = true
+	}
+
+	if !changed {
+		return nil
+	}
 	return cm.app.Save(collection)
 }
 

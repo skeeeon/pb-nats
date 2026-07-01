@@ -58,6 +58,9 @@ func RecordToAccountModel(record *core.Record, encryptionKey ...string) *Account
 		MaxJetStreamMemoryStorage: int64(record.GetInt("max_jetstream_memory_storage")),
 	}
 
+	// Revocation list (public: only user public keys + timestamps, no secrets)
+	marshalJSONField(record, "revocations", &account.Revocations)
+
 	// Parse signing keys from JSON fields (with decryption)
 	account.SigningKeys, account.SigningKeysPrivate = decryptSigningKeys(record, key)
 

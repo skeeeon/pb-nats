@@ -68,6 +68,13 @@ type AccountRecord struct {
 	Active             bool                `json:"active"`
 	RotateKeys         bool                `json:"rotate_keys"`
 
+	// Revocations maps a user public key to a unix-second cutoff. NATS rejects any
+	// user JWT for that key issued at or before the cutoff. Entries are permanent
+	// (never auto-cleared): this is what lets a revoked user be re-enabled safely —
+	// a freshly issued JWT carries a later issue time and is accepted, while the
+	// older, already-distributed credentials stay revoked forever.
+	Revocations json.RawMessage `json:"revocations"`
+
 	// Account-level limits (NATS semantics: -1 = unlimited, 0 = disabled, positive = limit)
 	MaxConnections            int64 `json:"max_connections"`
 	MaxSubscriptions          int64 `json:"max_subscriptions"`
@@ -560,6 +567,44 @@ func parseJSONPermissions(data json.RawMessage) ([]string, error) {
 		return nil, err
 	}
 	return permissions, nil
+}
+
+// ParseRevocations parses a revocations JSON object of the form
+// {"<pubkey>": <unix-seconds>} into a map. Empty or nil input yields an empty
+// (non-nil) map so callers can add entries without a nil check.
+func ParseRevocations(data json.RawMessage) (map[string]int64, error) {
+	revocations := map[string]int64{}
+	if len(data) == 0 {
+		return revocations, nil
+	}
+	if err := json.Unmarshal(data, &revocations); err != nil {
+		return nil, err
+	}
+	if revocations == nil {
+		revocations = map[string]int64{}
+	}
+	return revocations, nil
+}
+
+// GetRevocations returns the account's revocation list as a map of user public
+// key to unix-second cutoff.
+func (a *AccountRecord) GetRevocations() (map[string]int64, error) {
+	return ParseRevocations(a.Revocations)
+}
+
+// RevokeInJSON adds a revocation for pubKey at unix time ts to a revocations JSON
+// object and returns the updated JSON. If pubKey already has a later cutoff it is
+// kept — a cutoff only ever advances, never moves backward — matching the
+// semantics of nats-io/jwt's RevocationList.Revoke.
+func RevokeInJSON(data json.RawMessage, pubKey string, ts int64) (json.RawMessage, error) {
+	revocations, err := ParseRevocations(data)
+	if err != nil {
+		return nil, err
+	}
+	if existing, ok := revocations[pubKey]; !ok || ts > existing {
+		revocations[pubKey] = ts
+	}
+	return json.Marshal(revocations)
 }
 
 // NormalizeName creates a valid NATS account name from the display name.

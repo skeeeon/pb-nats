@@ -75,6 +75,9 @@ func (g *Generator) GenerateAccountJWT(account *pbtypes.AccountRecord, operatorS
 	g.applyAccountLimits(accountClaims, account)
 	g.applyAccountExports(accountClaims, exports)
 	g.applyAccountImports(accountClaims, imports)
+	if err := g.applyAccountRevocations(accountClaims, account); err != nil {
+		return "", fmt.Errorf("failed to apply account revocations: %w", err)
+	}
 
 	jwtValue, err := accountClaims.Encode(operatorKP)
 	if err != nil {
@@ -226,6 +229,21 @@ func (g *Generator) applyAccountImports(accountClaims *jwt.AccountClaims, import
 
 		accountClaims.Imports.Add(i)
 	}
+}
+
+// applyAccountRevocations embeds the account's user-key revocations into the JWT.
+// Each entry revokes all user JWTs for that public key issued at or before the
+// stored cutoff. The list is carried in the account JWT and enforced by the NATS
+// server when a user connects.
+func (g *Generator) applyAccountRevocations(accountClaims *jwt.AccountClaims, account *pbtypes.AccountRecord) error {
+	revocations, err := account.GetRevocations()
+	if err != nil {
+		return err
+	}
+	for pubKey, ts := range revocations {
+		accountClaims.RevokeAt(pubKey, time.Unix(ts, 0))
+	}
+	return nil
 }
 
 // isSystemUser checks if a user belongs to the system account and requires special permissions.

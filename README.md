@@ -176,6 +176,7 @@ Each account is an isolation boundary in NATS. Users within an account cannot se
 | `signing_keys` | JSON | | Array of signing public keys |
 | `signing_keys_private` | JSON | Yes | Array of signing key material |
 | `jwt` | Text | | Account JWT |
+| `revocations` | JSON | | Map of revoked user public keys to unix-second cutoff |
 | `active` | Bool | | Account enabled/disabled |
 | `add_signing_key` | Bool | | Trigger: append new signing key |
 | `remove_signing_key` | Text | | Trigger: remove key by public key string |
@@ -260,6 +261,7 @@ PocketBase auth collection with NATS integration. Each user belongs to one accou
 | `bearer_token` | Bool | | Enable bearer token auth |
 | `jwt_expires_at` | Date | | JWT expiration timestamp |
 | `regenerate` | Bool | | Trigger: regenerate JWT |
+| `revoke` | Bool | | Trigger: revoke this user's current credentials |
 | `active` | Bool | | User status |
 | `publish_permissions` | JSON | | Per-user publish overrides (merged with role) |
 | `subscribe_permissions` | JSON | | Per-user subscribe overrides (merged with role) |
@@ -417,6 +419,30 @@ PATCH /api/collections/nats_accounts/records/{id}
 1. `{"add_signing_key": true}` — new key added, old JWTs still valid
 2. Regenerate user JWTs at your own pace via `{"regenerate": true}` on each user
 3. `{"remove_signing_key": "OLD_KEY"}` — revoke the old key
+
+### Revoking Users
+
+User JWTs are bearer credentials the client holds (in `creds_file`); they are not pushed to NATS, so deleting or editing a user record does **not**, on its own, stop those credentials from working. Revocation is the surgical tool for invalidating already-distributed credentials without rotating the whole account signing key (which would invalidate *every* user in the account).
+
+Revocation is tracked on the account (`revocations`) as a map of user public key to a unix-second cutoff, embedded in the account JWT. NATS rejects any user JWT for that key issued **at or before** the cutoff. Entries are permanent — they are never auto-cleared.
+
+**Revoke a user (without deleting):**
+```http
+PATCH /api/collections/nats_users/records/{id}
+{"revoke": true}
+```
+This adds the user's key to the account revocation list, marks the user inactive, and republishes the account. The user's existing credentials stop working immediately.
+
+**Deleting a user** revokes their key automatically — no extra step needed.
+
+**Re-enable a revoked user:**
+```http
+PATCH /api/collections/nats_users/records/{id}
+{"active": true, "regenerate": true}
+```
+The freshly issued JWT carries a later issue time and is accepted, while the older, already-distributed credentials stay permanently revoked (the cutoff is never removed, so old creds can't be resurrected).
+
+> **Note:** Because the cutoff has one-second resolution, a JWT reissued in the *same second* as a revocation is also treated as revoked. This is a non-issue for human-driven actions, which are always well over a second apart.
 
 ## Permission System
 

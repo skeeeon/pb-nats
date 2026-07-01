@@ -2,7 +2,9 @@ package jwt
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
+	"time"
 
 	jwt "github.com/nats-io/jwt/v2"
 	"github.com/skeeeon/pb-nats/internal/nkey"
@@ -244,6 +246,52 @@ func TestGenerateAccountJWT(t *testing.T) {
 	// Account signing key embedded
 	if !claims.SigningKeys.Contains(account.SigningKeys[0].PublicKey) {
 		t.Error("account signing key not embedded in JWT")
+	}
+}
+
+func TestGenerateAccountJWTRevocations(t *testing.T) {
+	nm := nkey.NewManager()
+	g := NewGenerator(nm, pbtypes.Options{})
+
+	_, _, operatorSigningSeed, _, err := nm.GenerateOperatorKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateOperatorKeyPair: %v", err)
+	}
+
+	account := newTestAccount(t, nm)
+	_, userPublic, err := nm.GenerateUserKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateUserKeyPair: %v", err)
+	}
+
+	// Revoke the user's key with a cutoff of now.
+	cutoff := time.Now().Unix()
+	account.Revocations = json.RawMessage(fmt.Sprintf(`{%q:%d}`, userPublic, cutoff))
+
+	token, err := g.GenerateAccountJWT(account, operatorSigningSeed, nil, nil)
+	if err != nil {
+		t.Fatalf("GenerateAccountJWT: %v", err)
+	}
+	claims, err := jwt.DecodeAccountClaims(token)
+	if err != nil {
+		t.Fatalf("DecodeAccountClaims: %v", err)
+	}
+
+	if got := claims.Revocations[userPublic]; got != cutoff {
+		t.Errorf("Revocations[%s] = %d, want %d", userPublic, got, cutoff)
+	}
+
+	// A user JWT issued before the cutoff is revoked; one issued after is not.
+	before := jwt.NewUserClaims(userPublic)
+	before.IssuedAt = cutoff - 10
+	if !claims.IsClaimRevoked(before) {
+		t.Error("claim issued before cutoff should be revoked")
+	}
+
+	after := jwt.NewUserClaims(userPublic)
+	after.IssuedAt = cutoff + 10
+	if claims.IsClaimRevoked(after) {
+		t.Error("claim issued after cutoff should not be revoked")
 	}
 }
 

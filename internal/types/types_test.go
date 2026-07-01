@@ -111,6 +111,93 @@ func TestMarshalSigningKeysRoundTrip(t *testing.T) {
 	}
 }
 
+func TestParseRevocations(t *testing.T) {
+	// Empty/nil input yields a usable empty map, not nil.
+	for _, in := range []json.RawMessage{nil, json.RawMessage(""), json.RawMessage("{}")} {
+		m, err := ParseRevocations(in)
+		if err != nil {
+			t.Fatalf("ParseRevocations(%q): %v", in, err)
+		}
+		if m == nil {
+			t.Errorf("ParseRevocations(%q) = nil map, want empty non-nil", in)
+		}
+	}
+
+	m, err := ParseRevocations(json.RawMessage(`{"UABC":100,"UDEF":200}`))
+	if err != nil {
+		t.Fatalf("ParseRevocations: %v", err)
+	}
+	if m["UABC"] != 100 || m["UDEF"] != 200 {
+		t.Errorf("ParseRevocations = %v, want UABC=100 UDEF=200", m)
+	}
+
+	if _, err := ParseRevocations(json.RawMessage(`["not","an","object"]`)); err == nil {
+		t.Error("expected error for non-object JSON, got nil")
+	}
+}
+
+func TestRevokeInJSON(t *testing.T) {
+	// Add to empty.
+	data, err := RevokeInJSON(nil, "UABC", 100)
+	if err != nil {
+		t.Fatalf("RevokeInJSON: %v", err)
+	}
+	m, _ := ParseRevocations(data)
+	if m["UABC"] != 100 {
+		t.Errorf("after first revoke = %v, want UABC=100", m)
+	}
+
+	// A later cutoff advances the entry.
+	data, err = RevokeInJSON(data, "UABC", 150)
+	if err != nil {
+		t.Fatalf("RevokeInJSON: %v", err)
+	}
+	m, _ = ParseRevocations(data)
+	if m["UABC"] != 150 {
+		t.Errorf("after advancing = %v, want UABC=150", m)
+	}
+
+	// An earlier cutoff is ignored (cutoffs only move forward).
+	data, err = RevokeInJSON(data, "UABC", 120)
+	if err != nil {
+		t.Fatalf("RevokeInJSON: %v", err)
+	}
+	m, _ = ParseRevocations(data)
+	if m["UABC"] != 150 {
+		t.Errorf("after earlier cutoff = %v, want UABC unchanged at 150", m)
+	}
+
+	// A second key is independent.
+	data, err = RevokeInJSON(data, "UDEF", 300)
+	if err != nil {
+		t.Fatalf("RevokeInJSON: %v", err)
+	}
+	m, _ = ParseRevocations(data)
+	if m["UABC"] != 150 || m["UDEF"] != 300 {
+		t.Errorf("final = %v, want UABC=150 UDEF=300", m)
+	}
+}
+
+func TestGetRevocations(t *testing.T) {
+	a := &AccountRecord{Revocations: json.RawMessage(`{"UABC":100}`)}
+	m, err := a.GetRevocations()
+	if err != nil {
+		t.Fatalf("GetRevocations: %v", err)
+	}
+	if m["UABC"] != 100 {
+		t.Errorf("GetRevocations = %v, want UABC=100", m)
+	}
+
+	// Account with no revocations returns an empty map.
+	empty, err := (&AccountRecord{}).GetRevocations()
+	if err != nil {
+		t.Fatalf("GetRevocations (empty): %v", err)
+	}
+	if len(empty) != 0 {
+		t.Errorf("GetRevocations (empty) = %v, want empty", empty)
+	}
+}
+
 func TestAllSigningPublicKeys(t *testing.T) {
 	a := &AccountRecord{
 		SigningKeys: []SigningKeyPublic{{PublicKey: "A"}, {PublicKey: "B"}},
