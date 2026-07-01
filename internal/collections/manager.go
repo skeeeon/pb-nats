@@ -427,11 +427,15 @@ func (cm *Manager) ensurePublishQueueFields() error {
 
 	changed := false
 
-	if old, ok := collection.Fields.GetByName("account_id").(*core.RelationField); ok {
-		// Re-add with the same field id so PocketBase treats this as a field
-		// modification (preserving stored values) rather than a drop + add.
+	if _, ok := collection.Fields.GetByName("account_id").(*core.RelationField); ok {
+		// PocketBase forbids changing a field's type in place: re-adding with the
+		// original field id fails validation ("Field type cannot be changed").
+		// Drop the legacy relation field and add a fresh text field of the same
+		// name instead. The publish queue is transient and best-effort, so any
+		// in-flight rows that don't survive the column swap are an acceptable
+		// loss on upgrade.
 		collection.Fields.RemoveByName("account_id")
-		collection.Fields.Add(&core.TextField{Id: old.GetId(), Name: "account_id", Required: true, Max: 200})
+		collection.Fields.Add(&core.TextField{Name: "account_id", Required: true, Max: 200})
 		changed = true
 	}
 
