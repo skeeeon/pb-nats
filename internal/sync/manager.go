@@ -88,9 +88,21 @@ func (sm *Manager) setupAccountHooks() {
 		return e.Next()
 	})
 
-	// Account updates
-	sm.app.OnRecordUpdateRequest().BindFunc(func(e *core.RecordRequestEvent) error {
-		if e.Collection.Name != sm.options.AccountCollectionName {
+	// Account updates.
+	//
+	// Bound to OnRecordUpdate, the model-level hook, NOT OnRecordUpdateRequest.
+	// The trigger fields below are the account's whole key-management API, and a
+	// request-scoped hook only fires for updates arriving over the REST API — a
+	// server-side `app.Save()` from a custom route, a CLI command, a migration or
+	// another hook would persist `rotate_keys: true` and silently do nothing,
+	// leaving the flag set to fire later on an unrelated update. Model-level
+	// covers both paths.
+	//
+	// Safe against recursion: the helpers called here mutate the in-memory record
+	// only and rely on the caller's save to persist, so none of them re-enter
+	// app.Save.
+	sm.app.OnRecordUpdate().BindFunc(func(e *core.RecordEvent) error {
+		if e.Record.Collection().Name != sm.options.AccountCollectionName {
 			return e.Next()
 		}
 
@@ -192,8 +204,13 @@ func (sm *Manager) setupUserHooks() {
 
 	// User updates - only regenerate the JWT when a field embedded in it changed
 	// (or the regenerate flag is set), so unrelated edits don't rotate credentials.
-	sm.app.OnRecordUpdateRequest().BindFunc(func(e *core.RecordRequestEvent) error {
-		if e.Collection.Name != sm.options.UserCollectionName {
+	//
+	// Model-level, for the same reason as the account hook above: `regenerate` and
+	// `revoke` are the credential API, and they have to work for a server-side
+	// app.Save() as well as a REST update. A consumer's self-service rotation route
+	// that sets `regenerate` and saves would otherwise be a silent no-op.
+	sm.app.OnRecordUpdate().BindFunc(func(e *core.RecordEvent) error {
+		if e.Record.Collection().Name != sm.options.UserCollectionName {
 			return e.Next()
 		}
 
