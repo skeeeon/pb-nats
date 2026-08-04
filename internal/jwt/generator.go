@@ -104,11 +104,19 @@ func (g *Generator) GenerateUserJWT(user *pbtypes.NatsUserRecord, account *pbtyp
 	userClaims.IssuerAccount = account.PublicKey
 	userClaims.BearerToken = user.BearerToken
 
-	// Set expiration if specified
-	if user.JWTExpiresAt != nil {
-		userClaims.Expires = user.JWTExpiresAt.Unix()
-	} else if g.options.DefaultJWTExpiry > 0 {
-		userClaims.Expires = time.Now().Add(g.options.DefaultJWTExpiry).Unix()
+	// Set expiration if specified.
+	//
+	// The system user is exempt: its JWT authenticates pb-nats' own persistent
+	// connection to NATS, and nothing renews it. An expiry here — whether from a
+	// per-user date or a deployment-wide DefaultJWTExpiry — would silently kill JWT
+	// synchronization the moment it elapsed. Renewal is the client's job, and this
+	// credential has no client.
+	if !g.isSystemUser(user, account) {
+		if user.JWTExpiresAt != nil {
+			userClaims.Expires = user.JWTExpiresAt.Unix()
+		} else if g.options.DefaultJWTExpiry > 0 {
+			userClaims.Expires = time.Now().Add(g.options.DefaultJWTExpiry).Unix()
+		}
 	}
 
 	// Apply permissions from role and user-level overrides (merged via union)

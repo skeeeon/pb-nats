@@ -342,3 +342,57 @@ func TestGenerateCredsFile(t *testing.T) {
 		t.Error("expected error for missing seed")
 	}
 }
+
+func TestGenerateUserJWTExpiry(t *testing.T) {
+	nm := nkey.NewManager()
+	g := NewGenerator(nm, pbtypes.Options{DefaultJWTExpiry: time.Hour})
+
+	account := newTestAccount(t, nm)
+	g.SetSystemAccountID(account.ID)
+
+	newUser := func(t *testing.T, name string) *pbtypes.NatsUserRecord {
+		t.Helper()
+		seed, public, err := nm.GenerateUserKeyPair()
+		if err != nil {
+			t.Fatalf("GenerateUserKeyPair: %v", err)
+		}
+		return &pbtypes.NatsUserRecord{NatsUsername: name, PublicKey: public, Seed: seed}
+	}
+
+	expiryOf := func(t *testing.T, user *pbtypes.NatsUserRecord) int64 {
+		t.Helper()
+		token, err := g.GenerateUserJWT(user, account, &pbtypes.RoleRecord{Name: "r"})
+		if err != nil {
+			t.Fatalf("GenerateUserJWT: %v", err)
+		}
+		claims, err := jwt.DecodeUserClaims(token)
+		if err != nil {
+			t.Fatalf("DecodeUserClaims: %v", err)
+		}
+		return claims.Expires
+	}
+
+	// Ordinary users pick up DefaultJWTExpiry
+	if got := expiryOf(t, newUser(t, "alice")); got == 0 {
+		t.Error("Expires = 0 for regular user, want DefaultJWTExpiry applied")
+	}
+
+	// Per-user expiry wins over the default
+	explicit := time.Now().Add(48 * time.Hour)
+	user := newUser(t, "bob")
+	user.JWTExpiresAt = &explicit
+	if got := expiryOf(t, user); got != explicit.Unix() {
+		t.Errorf("Expires = %d, want %d", got, explicit.Unix())
+	}
+
+	// The system user never expires - nothing renews the control connection's JWT
+	if got := expiryOf(t, newUser(t, "sys")); got != 0 {
+		t.Errorf("system user Expires = %d, want 0 (never expires)", got)
+	}
+
+	sysUserWithExpiry := newUser(t, "sys")
+	sysUserWithExpiry.JWTExpiresAt = &explicit
+	if got := expiryOf(t, sysUserWithExpiry); got != 0 {
+		t.Errorf("system user Expires = %d with explicit date, want 0 (never expires)", got)
+	}
+}

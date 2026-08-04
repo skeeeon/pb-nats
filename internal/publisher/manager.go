@@ -3,6 +3,7 @@ package publisher
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -345,6 +346,52 @@ func (p *Manager) processQueueRecord(record *core.Record) error {
 	return p.app.Delete(record)
 }
 
+// claimsResponse mirrors the NATS server's ServerAPIClaimUpdateResponse, the reply
+// envelope for both $SYS.REQ.CLAIMS.UPDATE and $SYS.REQ.CLAIMS.DELETE.
+//
+// The server reports rejected JWTs in the Error field rather than by failing the
+// request, so a reply that arrives successfully still has to be inspected. Note the
+// server hardcodes Code to 500 for every failure regardless of cause, so Description
+// is the only usable signal.
+type claimsResponse struct {
+	Data *struct {
+		Account string `json:"account,omitempty"`
+		Code    int    `json:"code,omitempty"`
+		Message string `json:"message,omitempty"`
+	} `json:"data,omitempty"`
+	Error *struct {
+		Account     string `json:"account,omitempty"`
+		Code        int    `json:"code"`
+		Description string `json:"description,omitempty"`
+	} `json:"error,omitempty"`
+}
+
+// checkClaimsResponse inspects a claims operation reply and returns an error when
+// the server rejected the request. The returned status is the server's own message
+// (e.g. "jwt updated", "jwt update skipped" when the server already holds an
+// equal-or-newer JWT), suitable for logging.
+func checkClaimsResponse(data []byte) (string, error) {
+	var resp claimsResponse
+	if err := json.Unmarshal(data, &resp); err != nil {
+		// An unparseable reply is not proof of failure - older or future servers may
+		// answer differently - so surface the raw payload and treat it as success.
+		return utils.TruncateString(string(data), 100), nil
+	}
+
+	if resp.Error != nil {
+		description := resp.Error.Description
+		if description == "" {
+			description = "unspecified error"
+		}
+		return "", fmt.Errorf("NATS rejected the claims request: %s", description)
+	}
+
+	if resp.Data != nil && resp.Data.Message != "" {
+		return resp.Data.Message, nil
+	}
+	return utils.TruncateString(string(data), 100), nil
+}
+
 // publishAccountJWT sends account JWT to NATS via $SYS.REQ.CLAIMS.UPDATE.
 func (p *Manager) publishAccountJWT(accountJWT, accountName string) error {
 	if err := utils.ValidateRequired(accountJWT, "account JWT"); err != nil {
@@ -362,7 +409,12 @@ func (p *Manager) publishAccountJWT(accountJWT, accountName string) error {
 		return utils.WrapErrorf(err, "failed to publish account JWT for %s", accountName)
 	}
 
-	p.logger.Publish("Published account %s to NATS: %s", accountName, utils.TruncateString(string(resp.Data), 100))
+	status, err := checkClaimsResponse(resp.Data)
+	if err != nil {
+		return utils.WrapErrorf(err, "failed to publish account JWT for %s", accountName)
+	}
+
+	p.logger.Publish("Published account %s to NATS: %s", accountName, status)
 	return nil
 }
 
@@ -401,7 +453,14 @@ func (p *Manager) removeAccountJWT(accountPublicKey, accountName string) error {
 		return utils.WrapErrorf(err, "failed to delete account JWT for %s", accountName)
 	}
 
-	p.logger.Delete("Removed account %s from NATS: %s", accountName, utils.TruncateString(string(resp.Data), 100))
+	// Deletes report partial failure through the same envelope
+	// ("deleted N accounts, failed for M"), so the reply needs the same check.
+	status, err := checkClaimsResponse(resp.Data)
+	if err != nil {
+		return utils.WrapErrorf(err, "failed to delete account JWT for %s", accountName)
+	}
+
+	p.logger.Delete("Removed account %s from NATS: %s", accountName, status)
 	return nil
 }
 
@@ -442,9 +501,11 @@ func (p *Manager) validateAccount(account *pbtypes.AccountRecord) error {
 	if err := utils.ValidateRequired(account.JWT, "account JWT"); err != nil {
 		return err
 	}
-	if !account.Active {
-		return fmt.Errorf("account %s is inactive", account.Name)
-	}
+	// Deliberately no `active` check here. The sync hooks are the single authority
+	// on presence in NATS: deactivating an account enqueues a delete (which replaces
+	// any pending upsert for that account), so an inactive account is never queued
+	// for publishing. Rejecting here instead just burned retries on a queue record
+	// that could never succeed while the account stayed live in NATS.
 	if account.NormalizeName() == "" {
 		return fmt.Errorf("account %s has invalid name", account.Name)
 	}

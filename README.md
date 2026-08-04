@@ -9,10 +9,12 @@ A Go library for extending [PocketBase](https://pocketbase.io/) for managing [NA
 - **Cross-Account Communication**: Account-level imports and exports for sharing streams and services between accounts
 - **Graceful Bootstrap**: Starts without NATS running, operator JWT generated in-memory for initial NATS config
 - **Persistent Connections**: Single NATS connection with automatic failover to backup servers and exponential backoff
-- **Multiple Signing Keys**: Graceful and emergency key rotation per account
+- **Multiple Signing Keys**: Graceful and emergency key rotation per account, reissuing affected users automatically
 - **Two-Tier Permissions**: Role baseline + optional per-user overrides (union merge), with allow/deny semantics
 - **Two-Tier Limits**: Account-level (shared) and role-level (per-user) resource limits
 - **Queue-Based Publishing**: Reliable JWT publishing with retry, deduplication, and automatic cleanup
+- **Startup Reconciliation**: Republishes every active account, so a lost or rebuilt NATS resolver recovers on its own
+- **Reversible Suspend and Credential Rotation**: `active` withdraws an account or user from NATS; `revoke` rotates leaked user credentials
 - **Optional At-Rest Encryption**: AES-256-GCM encryption of sensitive fields using PocketBase's built-in security helpers
 - **Response Permissions**: Request-reply pattern support with configurable limits
 - **Locked-Down Defaults**: All collection API rules default to `nil` — consuming apps explicitly grant access
@@ -131,6 +133,15 @@ NATS Server ($SYS.REQ.CLAIMS.UPDATE)
 4. **System Components** — Creates operator, system account, system role, system user
 5. **Publisher** — Starts persistent NATS connection with failover
 6. **Sync Manager** — Registers PocketBase hooks for real-time sync
+7. **Reconciliation** — Queues every active account for publishing (see below)
+
+### Reconciliation on Startup
+
+Account JWTs live only in the NATS resolver directory. If that directory is lost, or you rebuild a server, or point pb-nats at a fresh NATS instance, the server has no record of your tenants — and because sync is hook-driven, nothing would republish them until someone happened to edit each account.
+
+On every startup pb-nats queues an upsert for each active account. This runs through the normal publish queue, so it dedupes per account, retries, and waits out bootstrap mode when NATS is down. It's cheap on the server side too: NATS answers `jwt update skipped` when it already holds an equal-or-newer JWT, so accounts that are already in sync cost one no-op request each.
+
+Inactive accounts are skipped — they're absent from NATS by design.
 
 ### Key Design Decisions
 
@@ -142,6 +153,16 @@ NATS Server ($SYS.REQ.CLAIMS.UPDATE)
 - **Multiple signing keys**: most recent key signs new JWTs, older keys remain valid
 - **Locked collections by default**: consuming app sets API rules appropriate to its deployment model
 - **NKeys stored in PocketBase** (PocketBase is the authority, optional encryption at rest)
+- **`active` is the durable state, triggers are verbs**: `active` says where a record should be, edge-triggered so unrelated saves change nothing; `revoke` / `regenerate` / `rotate_keys` are one-shot actions that clear themselves
+
+### Non-Goals
+
+Deliberately not supported, to keep the surface small:
+
+- **Scoped signing keys / account `default_permissions`** — these pin permissions to a signing key so that whatever a user JWT claims is overridden at connect time. pb-nats generates every user JWT server-side from PocketBase state, so there is no second authority to defend against.
+- **Operator key rotation** — rotating the operator means re-signing every account JWT *and* redeploying `nats.conf` and restarting servers. It's a deliberate, hands-on procedure, not a checkbox.
+- **Subject mappings, message tracing, connection-source (`src`) and time-of-day (`times`) restrictions, JetStream tiered limits, per-account leafnode limits, `allowed_connection_types`, `disallow_bearer`, JetStream stream/consumer counts** — real NATS features with narrow audiences, each a field and a line of generator code. Ask if you need one rather than carrying them all.
+- **Automatic JWT renewal** — see below.
 
 ## Collections
 
@@ -177,7 +198,7 @@ Each account is an isolation boundary in NATS. Users within an account cannot se
 | `signing_keys_private` | JSON | Yes | Array of signing key material |
 | `jwt` | Text | | Account JWT |
 | `revocations` | JSON | | Map of revoked user public keys to unix-second cutoff |
-| `active` | Bool | | Account enabled/disabled |
+| `active` | Bool | | Presence in NATS — clearing it withdraws the account (see [Suspending an Account](#suspending-an-account)) |
 | `add_signing_key` | Bool | | Trigger: append new signing key |
 | `remove_signing_key` | Text | | Trigger: remove key by public key string |
 | `rotate_keys` | Bool | | Trigger: emergency rotation (purge all, generate new) |
@@ -259,10 +280,10 @@ PocketBase auth collection with NATS integration. Each user belongs to one accou
 | `jwt` | Text | | User JWT |
 | `creds_file` | Text | | Complete NATS .creds file for client connection |
 | `bearer_token` | Bool | | Enable bearer token auth |
-| `jwt_expires_at` | Date | | JWT expiration timestamp |
+| `jwt_expires_at` | Date | | JWT expiration timestamp (renewal is the client's job — see [JWT Expiry](#jwt-expiry-and-renewal)) |
 | `regenerate` | Bool | | Trigger: regenerate JWT |
-| `revoke` | Bool | | Trigger: revoke this user's current credentials |
-| `active` | Bool | | User status |
+| `revoke` | Bool | | Trigger: rotate credentials, killing the leaked ones (user stays active) |
+| `active` | Bool | | Durable suspend switch — clearing it revokes and does not reissue |
 | `publish_permissions` | JSON | | Per-user publish overrides (merged with role) |
 | `subscribe_permissions` | JSON | | Per-user subscribe overrides (merged with role) |
 | `publish_deny_permissions` | JSON | | Per-user publish deny overrides |
@@ -420,29 +441,71 @@ PATCH /api/collections/nats_accounts/records/{id}
 2. Regenerate user JWTs at your own pace via `{"regenerate": true}` on each user
 3. `{"remove_signing_key": "OLD_KEY"}` — revoke the old key
 
+**Removing a key reissues the account's users automatically.** NATS validates a user JWT by looking its issuer up in the account's signing keys and rejects it outright when the key is gone — no revocation entry required. So whenever an update *removes* a signing key (`remove_signing_key` or `rotate_keys`), every active user in that account gets a fresh JWT and `creds_file`, and clients must download the new credentials. Adding a key removes nothing and so reissues nothing.
+
+Emergency rotation also **clears the account's revocation list**: every JWT those entries covered was signed by a key that no longer exists, so the entries can never matter again and only bloat the account JWT.
+
+### Suspending an Account
+
+An account's `active` flag is its presence in NATS, and it is edge-triggered — only a change to the flag moves the account.
+
+```http
+PATCH /api/collections/nats_accounts/records/{id}
+{"active": false}
+```
+
+This withdraws the account from NATS via `$SYS.REQ.CLAIMS.DELETE`. The server zeroes the account's connection, subscription, payload and leafnode limits, **disconnects its connected clients**, and disables its JetStream. Setting `active: true` again republishes the JWT and the server restores all of it, which is what makes this a reversible suspend rather than a destructive delete — the PocketBase record, its keys, and its exports and imports are untouched throughout.
+
+An account created with `active: false` is never published in the first place.
+
+> Requires `allow_delete: true` in the resolver block. The generated `nats.conf` sets this.
+
 ### Revoking Users
 
 User JWTs are bearer credentials the client holds (in `creds_file`); they are not pushed to NATS, so deleting or editing a user record does **not**, on its own, stop those credentials from working. Revocation is the surgical tool for invalidating already-distributed credentials without rotating the whole account signing key (which would invalidate *every* user in the account).
 
-Revocation is tracked on the account (`revocations`) as a map of user public key to a unix-second cutoff, embedded in the account JWT. NATS rejects any user JWT for that key issued **at or before** the cutoff. Entries are permanent — they are never auto-cleared.
+Revocation is tracked on the account (`revocations`) as a map of user public key to a unix-second cutoff, embedded in the account JWT. NATS rejects any user JWT for that key issued **at or before** the cutoff. Entries are permanent — they are never auto-cleared, because a revoked `creds_file` with no expiry stays valid forever and the entry is the only thing rejecting it. Dropping entries by age would hand those credentials back.
 
-**Revoke a user (without deleting):**
+The list therefore grows with revocations, and each entry costs roughly 100 bytes of the account JWT (capped at 50000 characters, shared with exports, imports and signing keys) — on the order of 450 revocations before it becomes a concern. Emergency rotation clears the list outright. If you ever churn credentials fast enough to approach the ceiling, the next step is `jwt.All` wildcard compaction: revoke everything issued before a cutoff with a single entry and reissue the account's active users. That isn't implemented — ask if you need it.
+
+There are two ways to invalidate a user's credentials, for two different situations.
+
+**`revoke` — the credentials leaked, but the user stays.** *"The laptop was stolen; they still work here."*
 ```http
 PATCH /api/collections/nats_users/records/{id}
 {"revoke": true}
 ```
-This adds the user's key to the account revocation list, marks the user inactive, and republishes the account. The user's existing credentials stop working immediately.
+This rotates the user's **entire key pair**: a new seed and public key are generated, the old public key is revoked on the account, and a fresh JWT and `creds_file` are issued. The user remains active and can pick up working credentials immediately. The key pair is replaced rather than reused because whoever holds the leaked `creds_file` also holds the seed — reissuing for the same key would leave compromised material in play.
+
+**`active: false` — suspend the user.** *"They left the company."*
+```http
+PATCH /api/collections/nats_users/records/{id}
+{"active": false}
+```
+This revokes the user's current key and deliberately does **not** reissue. The user has no working credentials until reactivated. The flag is edge-triggered, so unrelated edits to a suspended user don't churn anything.
+
+**Reactivate:**
+```http
+PATCH /api/collections/nats_users/records/{id}
+{"active": true}
+```
+A fresh JWT is issued automatically. It carries a later issue time than the revocation cutoff, so NATS accepts it while the older, already-distributed credentials stay permanently revoked (the cutoff is never removed, so old creds can't be resurrected).
 
 **Deleting a user** revokes their key automatically — no extra step needed.
 
-**Re-enable a revoked user:**
-```http
-PATCH /api/collections/nats_users/records/{id}
-{"active": true, "regenerate": true}
-```
-The freshly issued JWT carries a later issue time and is accepted, while the older, already-distributed credentials stay permanently revoked (the cutoff is never removed, so old creds can't be resurrected).
+> **`active` governs transitions, not creation.** A user created with `active: false` still gets a working JWT and `creds_file` — there is nothing distributed yet to revoke, and PocketBase bool fields default to `false`, so treating creation as a suspend would break every caller that simply omits the field. To provision a user without usable credentials, create them and then clear `active`. (Accounts differ: an account created inactive is never published to NATS at all, because presence there is a single yes-or-no fact about the account.)
 
-> **Note:** Because the cutoff has one-second resolution, a JWT reissued in the *same second* as a revocation is also treated as revoked. This is a non-issue for human-driven actions, which are always well over a second apart.
+> **Note:** Because the cutoff has one-second resolution, a JWT reissued in the *same second* as a revocation is also treated as revoked. This is a non-issue for human-driven actions, which are always well over a second apart — and `revoke` avoids the question entirely by issuing against a new public key that no cutoff covers.
+
+### JWT Expiry and Renewal
+
+Expiry is opt-in and **renewal is the client's responsibility** — pb-nats does not sweep for expiring JWTs or reissue them on a timer.
+
+Set it per user with `jwt_expires_at`, or deployment-wide with `DefaultJWTExpiry` (default `0`, never expires). A per-user date takes precedence over the deployment default.
+
+The tools for a client-driven renewal loop are already in place: a client whose NATS credentials have expired can still authenticate to PocketBase with its email and password, so it can call your rotation endpoint (which sets `regenerate: true`) and download the fresh `creds_file`. Expose that however suits your deployment.
+
+> **The system user is exempt from expiry**, both from `DefaultJWTExpiry` and from an explicit `jwt_expires_at`. Its JWT authenticates pb-nats' own persistent connection to NATS, and nothing renews it — an expiry there would silently stop all JWT synchronization the moment it elapsed.
 
 ## Permission System
 

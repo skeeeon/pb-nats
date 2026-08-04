@@ -195,6 +195,32 @@ func signingKeyFromScalarFields(record *core.Record) (*SigningKeyPublic, *Signin
 		}
 }
 
+// RecordSigningPublicKeys extracts the set of public signing keys from a record's
+// signing_keys field. Works on accounts and operators, and on a record's Original()
+// snapshot, which is how callers detect that a key was removed by an update.
+// Public signing keys are never encrypted.
+func RecordSigningPublicKeys(record *core.Record) map[string]bool {
+	keys := map[string]bool{}
+	val := record.Get("signing_keys")
+	if val == nil {
+		return keys
+	}
+	bytes, err := json.Marshal(val)
+	if err != nil {
+		return keys
+	}
+	var parsed []SigningKeyPublic
+	if err := json.Unmarshal(bytes, &parsed); err != nil {
+		return keys
+	}
+	for _, k := range parsed {
+		if k.PublicKey != "" {
+			keys[k.PublicKey] = true
+		}
+	}
+	return keys
+}
+
 // marshalJSONField extracts a JSON field from a PocketBase record and marshals it.
 func marshalJSONField(record *core.Record, field string, target *json.RawMessage) {
 	if val := record.Get(field); val != nil {

@@ -151,6 +151,13 @@ func initializeComponents(app *pocketbase.PocketBase, options Options, logger *u
 	}
 	logger.Success("   Sync hooks configured")
 
+	// Step 7: Converge NATS onto PocketBase. Queued rather than published inline, so
+	// a NATS server that is down (or has lost its resolver directory) is caught up by
+	// the queue processor as soon as it comes back.
+	if err := syncManager.ReconcileAccounts(); err != nil {
+		logger.Warning("   Account reconciliation failed: %v", err)
+	}
+
 	logger.Success("NATS JWT sync fully initialized and ready")
 	logger.Info("   System operator: %s", options.OperatorName)
 	logger.Info("   Queue processing: %v intervals", options.PublishQueueInterval)
