@@ -163,8 +163,25 @@ func limitValue(v int64) int64 {
 
 // applyAccountLimits applies configurable account-level limits to account JWT claims.
 func (g *Generator) applyAccountLimits(accountClaims *jwt.AccountClaims, account *pbtypes.AccountRecord) {
-	accountClaims.Limits.JetStreamLimits.DiskStorage = limitValue(account.MaxJetStreamDiskStorage)
-	accountClaims.Limits.JetStreamLimits.MemoryStorage = limitValue(account.MaxJetStreamMemoryStorage)
+	if g.isSystemAccount(account) {
+		// A NATS server refuses to start when the system account has JetStream
+		// enabled: "jetstream can not be enabled on the system account". The
+		// system account record is created with -1 (unlimited) JetStream
+		// storage, so regenerating its JWT through this path would produce a
+		// token no server will accept — and because that JWT is what
+		// `nats export` preloads into operator.conf, the failure lands at
+		// server startup rather than anywhere near the change that caused it.
+		//
+		// createSystemAccount and GenerateSystemAccountJWT already zero these.
+		// This keeps them zero on every subsequent regeneration.
+		accountClaims.Limits.JetStreamLimits.DiskStorage = 0
+		accountClaims.Limits.JetStreamLimits.MemoryStorage = 0
+		accountClaims.Limits.JetStreamLimits.Streams = 0
+		accountClaims.Limits.JetStreamLimits.Consumer = 0
+	} else {
+		accountClaims.Limits.JetStreamLimits.DiskStorage = limitValue(account.MaxJetStreamDiskStorage)
+		accountClaims.Limits.JetStreamLimits.MemoryStorage = limitValue(account.MaxJetStreamMemoryStorage)
+	}
 	accountClaims.Limits.AccountLimits.Conn = limitValue(account.MaxConnections)
 	accountClaims.Limits.NatsLimits.Subs = limitValue(account.MaxSubscriptions)
 	accountClaims.Limits.NatsLimits.Data = limitValue(account.MaxData)
@@ -254,9 +271,14 @@ func (g *Generator) applyAccountRevocations(accountClaims *jwt.AccountClaims, ac
 	return nil
 }
 
+// isSystemAccount reports whether this record is the NATS system account.
+func (g *Generator) isSystemAccount(account *pbtypes.AccountRecord) bool {
+	return g.systemAccountID != "" && account.ID == g.systemAccountID
+}
+
 // isSystemUser checks if a user belongs to the system account and requires special permissions.
 func (g *Generator) isSystemUser(user *pbtypes.NatsUserRecord, account *pbtypes.AccountRecord) bool {
-	return g.systemAccountID != "" && account.ID == g.systemAccountID && user.NatsUsername == "sys"
+	return g.isSystemAccount(account) && user.NatsUsername == "sys"
 }
 
 // applyPermissions merges role-based and per-user permissions into user JWT claims.
