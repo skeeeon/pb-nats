@@ -80,10 +80,14 @@ func main() {
 
 ### Step 3: Start NATS Server
 ```bash
-cd nats-config
-mkdir -p ./jwt ./storage/jetstream
-nats-server -c nats.conf
+nats-server -c ./nats-config/nats.conf
 ```
+
+The paths inside the generated config are absolute, so this works from any
+working directory, and the JWT and JetStream directories are created on first
+run. The config also enables a WebSocket listener on port 9222 (`--websocket-port`
+to change it), because browsers cannot speak the NATS TCP protocol and any web
+console that connects to the bus needs one.
 
 ### Step 4: Start PocketBase
 ```bash

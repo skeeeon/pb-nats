@@ -142,7 +142,7 @@ func generateOperatorConf(operator *pbtypes.SystemOperatorRecord, sysAccount *sy
 // outputDir is the directory the file will be written to, used to make the
 // resolver and JetStream directories absolute. Pass "" to keep them relative
 // (stdout preview). See resolveIn for why this matters.
-func generateNATSConf(serverName string, port int, jetstreamStoreDir string, outputDir string) string {
+func generateNATSConf(serverName string, port int, jetstreamStoreDir string, websocketPort int, outputDir string) string {
 	var sb strings.Builder
 
 	sb.WriteString("# NATS Server Configuration\n")
@@ -185,15 +185,22 @@ func generateNATSConf(serverName string, port int, jetstreamStoreDir string, out
 	sb.WriteString("#   port: 1883\n")
 	sb.WriteString("# }\n\n")
 
-	sb.WriteString("# Optional: WebSocket support\n")
-	sb.WriteString("# websocket {\n")
-	sb.WriteString("#   port: 8080\n")
-	sb.WriteString("#   # For TLS:\n")
-	sb.WriteString("#   # tls {\n")
-	sb.WriteString("#   #   cert_file: \"/path/to/cert.pem\"\n")
-	sb.WriteString("#   #   key_file: \"/path/to/key.pem\"\n")
-	sb.WriteString("#   # }\n")
-	sb.WriteString("# }\n")
+	sb.WriteString("# WebSocket listener\n")
+	sb.WriteString("#\n")
+	sb.WriteString("# Enabled by default because browsers cannot speak the NATS TCP protocol:\n")
+	sb.WriteString("# any web console that connects to the bus needs this listener, so leaving\n")
+	sb.WriteString("# it commented out makes the browser half of the platform silently unusable.\n")
+	sb.WriteString("#\n")
+	sb.WriteString("# no_tls means the listener itself terminates plaintext ws://. Put it behind\n")
+	sb.WriteString("# a TLS-terminating proxy, or swap in the tls block below for wss://.\n")
+	sb.WriteString("websocket {\n")
+	sb.WriteString(fmt.Sprintf("  port: %d\n", websocketPort))
+	sb.WriteString("  no_tls: true\n")
+	sb.WriteString("  # tls {\n")
+	sb.WriteString("  #   cert_file: \"/path/to/cert.pem\"\n")
+	sb.WriteString("  #   key_file: \"/path/to/key.pem\"\n")
+	sb.WriteString("  # }\n")
+	sb.WriteString("}\n")
 
 	return sb.String()
 }
@@ -246,7 +253,7 @@ func generateReadme(operator *pbtypes.SystemOperatorRecord, outputDir string) st
 }
 
 // exportAllFiles writes all configuration files to the output directory.
-func exportAllFiles(outputDir string, operator *pbtypes.SystemOperatorRecord, sysAccount *systemAccountInfo, serverName string, port int, jetstreamStoreDir string) error {
+func exportAllFiles(outputDir string, operator *pbtypes.SystemOperatorRecord, sysAccount *systemAccountInfo, serverName string, port int, jetstreamStoreDir string, websocketPort int) error {
 	// Resolve before writing anything: every path baked into the generated
 	// config is relative to this directory, and the whole point is that they
 	// come out absolute so the config works from any working directory.
@@ -277,7 +284,7 @@ func exportAllFiles(outputDir string, operator *pbtypes.SystemOperatorRecord, sy
 
 	// Write nats.conf
 	natsConfPath := filepath.Join(outputDir, "nats.conf")
-	natsConf := generateNATSConf(serverName, port, jetstreamStoreDir, outputDir)
+	natsConf := generateNATSConf(serverName, port, jetstreamStoreDir, websocketPort, outputDir)
 	if err := os.WriteFile(natsConfPath, []byte(natsConf), 0644); err != nil {
 		return fmt.Errorf("failed to write nats.conf: %w", err)
 	}
@@ -324,6 +331,7 @@ func RegisterCommandsWithOptions(app *pocketbase.PocketBase, opts CommandOptions
 type CommandOptions struct {
 	DefaultServerName     string
 	DefaultPort           int
+	DefaultWebsocketPort  int
 	DefaultJetstreamStore string
 	DefaultOutputDir      string
 	// AccountCollectionName must match Options.AccountCollectionName when a
@@ -339,6 +347,7 @@ func DefaultCommandOptions() CommandOptions {
 	return CommandOptions{
 		DefaultServerName:     "nats-server",
 		DefaultPort:           4222,
+		DefaultWebsocketPort:  9222,
 		DefaultJetstreamStore: "./storage/jetstream",
 		DefaultOutputDir:      "",
 		AccountCollectionName: DefaultAccountCollectionName,
@@ -353,6 +362,7 @@ func createExportCommandWithOptions(app *pocketbase.PocketBase, opts CommandOpti
 	var operatorConfOnly bool
 	var serverName string
 	var natsPort int
+	var websocketPort int
 	var jetstreamStoreDir string
 
 	cmd := &cobra.Command{
@@ -400,7 +410,7 @@ Examples:
 			}
 
 			if configOnly {
-				conf := generateNATSConf(serverName, natsPort, jetstreamStoreDir, "")
+				conf := generateNATSConf(serverName, natsPort, jetstreamStoreDir, websocketPort, "")
 				fmt.Println(conf)
 				return nil
 			}
@@ -409,7 +419,7 @@ Examples:
 				return fmt.Errorf("--output directory is required when not using --operator-jwt, --config, or --operator-conf")
 			}
 
-			return exportAllFiles(outputDir, operator, sysAccount, serverName, natsPort, jetstreamStoreDir)
+			return exportAllFiles(outputDir, operator, sysAccount, serverName, natsPort, jetstreamStoreDir, websocketPort)
 		},
 	}
 
@@ -419,6 +429,7 @@ Examples:
 	cmd.Flags().BoolVar(&operatorConfOnly, "operator-conf", false, "Output only the operator.conf to stdout")
 	cmd.Flags().StringVar(&serverName, "server-name", opts.DefaultServerName, "NATS server name")
 	cmd.Flags().IntVar(&natsPort, "port", opts.DefaultPort, "NATS server port")
+	cmd.Flags().IntVar(&websocketPort, "websocket-port", opts.DefaultWebsocketPort, "NATS WebSocket listener port (browsers require it)")
 	cmd.Flags().StringVar(&jetstreamStoreDir, "jetstream-store", opts.DefaultJetstreamStore, "JetStream storage directory")
 
 	return cmd

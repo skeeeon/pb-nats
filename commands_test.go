@@ -91,7 +91,7 @@ func TestGeneratedConfigPathsAreAbsolute(t *testing.T) {
 		t.Error("operator.conf still uses a CWD-relative operator path")
 	}
 
-	natsConf := generateNATSConf("test-server", 4222, "./storage/jetstream", outputDir)
+	natsConf := generateNATSConf("test-server", 4222, "./storage/jetstream", 9222, outputDir)
 	wantJWTDir := "dir: '" + filepath.ToSlash(filepath.Join(outputDir, "jwt")) + "'"
 	if !strings.Contains(natsConf, wantJWTDir) {
 		t.Errorf("nats.conf missing absolute resolver dir %q:\n%s", wantJWTDir, natsConf)
@@ -111,7 +111,7 @@ func TestPreviewConfigStaysRelative(t *testing.T) {
 	if got := generateOperatorConf(operator, sysAccount, ""); !strings.Contains(got, "operator: 'operator.jwt'") {
 		t.Errorf("preview operator.conf should keep a relative path:\n%s", got)
 	}
-	if got := generateNATSConf("test-server", 4222, "./storage/jetstream", ""); !strings.Contains(got, "dir: 'jwt'") {
+	if got := generateNATSConf("test-server", 4222, "./storage/jetstream", 9222, ""); !strings.Contains(got, "dir: 'jwt'") {
 		t.Errorf("preview nats.conf should keep a relative resolver dir:\n%s", got)
 	}
 }
