@@ -398,6 +398,19 @@ app.Save(accounts)
 
 Sensitive cryptographic material (`private_key`, `seed`, `signing_keys_private`) is marked `Hidden: true` on all collections. These fields are never included in API responses, regardless of access rules.
 
+### Protected Records
+
+Some deletions have no repair path, so pb-nats refuses them at the API layer — including for a superuser in the admin UI:
+
+| Record | Why |
+|--------|-----|
+| The `nats_system_operator` row | Its seed is the root of trust for every account and user JWT, and it exists nowhere else — there is no keystore and no key export. Deleting it orphans every credential ever issued, with no recovery short of restoring the database. |
+| The system account | It is the account pb-nats itself connects through. |
+| The system user (`sys`) | It authenticates pb-nats' own NATS connection; JWT synchronization stops until the process restarts. |
+| A role users still reference | `role_id` is a required relation with no cascade, so deleting a role in use leaves its users pointing at a row that is gone. Nothing fails at delete time — the next JWT regeneration then fails for every one of them, and a user whose role can't be resolved can no longer be reissued at all. Reassign them first. |
+
+These guards are request-scoped: they cover the REST API and the admin UI, not a deliberate `app.Delete()` from the consuming application, which is assumed to know what it is doing.
+
 ### At-Rest Encryption
 
 Optional AES-256-GCM encryption of sensitive fields stored in the database, using PocketBase's built-in security helpers.
@@ -486,7 +499,7 @@ This rotates the user's **entire key pair**: a new seed and public key are gener
 PATCH /api/collections/nats_users/records/{id}
 {"active": false}
 ```
-This revokes the user's current key and deliberately does **not** reissue. The user has no working credentials until reactivated. The flag is edge-triggered, so unrelated edits to a suspended user don't churn anything.
+This revokes the user's current key and deliberately does **not** reissue. The user has no working credentials until reactivated. The flag is edge-triggered, so unrelated edits to a suspended user don't churn anything — and neither does editing their role, since role changes skip suspended users rather than reissuing them.
 
 **Reactivate:**
 ```http

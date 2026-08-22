@@ -28,6 +28,20 @@ func RecordToUserModel(record *core.Record, encryptionKey ...string) *NatsUserRe
 		Regenerate:   record.GetBool("regenerate"),
 	}
 
+	// jwt_expires_at is the documented per-user expiry, and it takes precedence
+	// over DefaultJWTExpiry — but it never reached the generator, because this
+	// converter did not read it. The generator's `user.JWTExpiresAt != nil` branch
+	// could not fire, so setting a per-user date silently did nothing and the
+	// deployment-wide default always won. The expiry test in the jwt package sets
+	// the model field directly, one layer below the gap, so it kept passing.
+	//
+	// A zero date means "no expiry", not "expired at the epoch", so it has to stay
+	// a nil pointer rather than a zero time.
+	if expires := record.GetDateTime("jwt_expires_at"); !expires.IsZero() {
+		expiresAt := expires.Time()
+		user.JWTExpiresAt = &expiresAt
+	}
+
 	// Marshal per-user permission JSON fields
 	marshalJSONField(record, "publish_permissions", &user.PublishPermissions)
 	marshalJSONField(record, "subscribe_permissions", &user.SubscribePermissions)

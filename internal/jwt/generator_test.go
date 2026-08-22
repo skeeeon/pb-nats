@@ -396,3 +396,86 @@ func TestGenerateUserJWTExpiry(t *testing.T) {
 		t.Errorf("system user Expires = %d with explicit date, want 0 (never expires)", got)
 	}
 }
+
+// TestGenerateAccountJWTSystemAccount pins that the system account cannot be
+// regenerated into an ordinary account.
+//
+// GenerateSystemAccountJWT used to run only at creation, so every later
+// regeneration went through GenerateAccountJWT: an admin editing the record, or a
+// revocation on any user in the system account, silently renamed it to
+// `system_account` (NormalizeName) and dropped both monitoring exports. Asserting
+// via GenerateAccountJWT rather than GenerateSystemAccountJWT is the point — the
+// regeneration path is the one that was broken.
+func TestGenerateAccountJWTSystemAccount(t *testing.T) {
+	nm := nkey.NewManager()
+	g := NewGenerator(nm, pbtypes.Options{})
+
+	_, _, operatorSigningSeed, _, err := nm.GenerateOperatorKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateOperatorKeyPair: %v", err)
+	}
+
+	// The system account as createSystemAccount leaves it: named "System Account",
+	// with unlimited JetStream storage on the record.
+	account := newTestAccount(t, nm)
+	account.Name = "System Account"
+	account.MaxJetStreamDiskStorage = -1
+	account.MaxJetStreamMemoryStorage = -1
+	g.SetSystemAccountID(account.ID)
+
+	// A revocation, as suspending or deleting a user in the system account produces.
+	_, userPublic, err := nm.GenerateUserKeyPair()
+	if err != nil {
+		t.Fatalf("GenerateUserKeyPair: %v", err)
+	}
+	cutoff := time.Now().Unix()
+	account.Revocations = json.RawMessage(fmt.Sprintf(`{%q:%d}`, userPublic, cutoff))
+
+	// Export records attached to the system account must not displace the fixed
+	// monitoring exports.
+	token, err := g.GenerateAccountJWT(account, operatorSigningSeed,
+		[]*pbtypes.AccountExportRecord{{Name: "events", Subject: "events.>", Type: "stream"}}, nil)
+	if err != nil {
+		t.Fatalf("GenerateAccountJWT: %v", err)
+	}
+
+	claims, err := jwt.DecodeAccountClaims(token)
+	if err != nil {
+		t.Fatalf("DecodeAccountClaims: %v", err)
+	}
+
+	if claims.Name != "SYS" {
+		t.Errorf("Name = %q, want SYS", claims.Name)
+	}
+
+	subjects := map[string]bool{}
+	for _, e := range claims.Exports {
+		subjects[string(e.Subject)] = true
+	}
+	for _, want := range []string{"$SYS.REQ.ACCOUNT.*.*", "$SYS.ACCOUNT.*.>"} {
+		if !subjects[want] {
+			t.Errorf("monitoring export %q missing from regenerated system account", want)
+		}
+	}
+	if len(claims.Exports) != 2 {
+		t.Errorf("Exports = %d, want exactly the 2 monitoring exports", len(claims.Exports))
+	}
+
+	// A NATS server refuses to start when the system account has JetStream enabled.
+	if claims.Limits.JetStreamLimits.DiskStorage != 0 {
+		t.Errorf("JetStream DiskStorage = %d, want 0", claims.Limits.JetStreamLimits.DiskStorage)
+	}
+	if claims.Limits.JetStreamLimits.MemoryStorage != 0 {
+		t.Errorf("JetStream MemoryStorage = %d, want 0", claims.Limits.JetStreamLimits.MemoryStorage)
+	}
+
+	// The revocation that triggered the regeneration has to survive it.
+	if got := claims.Revocations[userPublic]; got != cutoff {
+		t.Errorf("Revocations[%s] = %d, want %d", userPublic, got, cutoff)
+	}
+
+	// The account's own signing key is still embedded, so its user JWTs verify.
+	if !claims.SigningKeys.Contains(account.SigningKeys[0].PublicKey) {
+		t.Error("account signing key not embedded in regenerated system account JWT")
+	}
+}

@@ -61,6 +61,26 @@ func (g *Generator) GenerateOperatorJWT(operator *pbtypes.SystemOperatorRecord, 
 // GenerateAccountJWT generates a NATS account JWT for tenant isolation.
 // Exports and imports enable cross-account communication and are embedded in the JWT.
 func (g *Generator) GenerateAccountJWT(account *pbtypes.AccountRecord, operatorSigningSeed string, exports []*pbtypes.AccountExportRecord, imports []*pbtypes.AccountImportRecord) (string, error) {
+	// The system account is not an ordinary account. Its name (`SYS`), its two
+	// monitoring exports and its zeroed JetStream limits are fixed by NATS
+	// convention rather than by the record, and GenerateSystemAccountJWT is the
+	// only place that knows them — but it used to run only at creation. Every
+	// later regeneration came through here instead, renaming the account to
+	// `system_account` via NormalizeName and dropping both exports, which is what
+	// account-scoped monitoring ($SYS.REQ.ACCOUNT.*) imports.
+	//
+	// Regeneration is not hypothetical. The account update hook has no
+	// system-account exemption, so a superuser editing the record hits it, and
+	// revoking, suspending or deleting any user in the system account regenerates
+	// its owning account to embed the revocation. The damage is quiet too: the
+	// after-update hook skips the system account, so nothing publishes the mangled
+	// JWT — it sits in the database until `nats export` bakes it into
+	// operator.conf as the resolver preload, where it becomes the SYS account for
+	// a freshly started server.
+	if g.isSystemAccount(account) {
+		return g.GenerateSystemAccountJWT(account, operatorSigningSeed)
+	}
+
 	operatorKP, err := g.nkeyManager.KeyPairFromSeed(operatorSigningSeed)
 	if err != nil {
 		return "", fmt.Errorf("failed to create operator signing key pair: %w", err)
@@ -172,8 +192,10 @@ func (g *Generator) applyAccountLimits(accountClaims *jwt.AccountClaims, account
 		// `nats export` preloads into operator.conf, the failure lands at
 		// server startup rather than anywhere near the change that caused it.
 		//
-		// createSystemAccount and GenerateSystemAccountJWT already zero these.
-		// This keeps them zero on every subsequent regeneration.
+		// GenerateAccountJWT now hands the system account to
+		// GenerateSystemAccountJWT, which zeroes these itself, so this branch is a
+		// backstop rather than the only thing standing between a NATS server and a
+		// refusal to start.
 		accountClaims.Limits.JetStreamLimits.DiskStorage = 0
 		accountClaims.Limits.JetStreamLimits.MemoryStorage = 0
 		accountClaims.Limits.JetStreamLimits.Streams = 0
@@ -407,6 +429,13 @@ func (g *Generator) GenerateSystemAccountJWT(sysAccount *pbtypes.AccountRecord, 
 	accountClaims.Name = "SYS"
 	for _, pubKey := range sysAccount.AllSigningPublicKeys() {
 		accountClaims.SigningKeys.Add(pubKey)
+	}
+
+	// The system account carries revocations like any other: suspending, revoking
+	// or deleting a user in it regenerates its JWT to embed the cutoff, and that
+	// regeneration now lands here rather than on the ordinary account path.
+	if err := g.applyAccountRevocations(accountClaims, sysAccount); err != nil {
+		return "", fmt.Errorf("failed to apply system account revocations: %w", err)
 	}
 
 	// System account has special exports for monitoring

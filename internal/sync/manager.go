@@ -92,9 +92,68 @@ func (sm *Manager) SetupHooks() error {
 	sm.setupRoleHooks()
 	sm.setupExportHooks()
 	sm.setupImportHooks()
+	sm.setupProtectionHooks()
 
 	sm.logger.Success("PocketBase hooks configured for NATS sync")
 	return nil
+}
+
+// setupProtectionHooks refuses deletions pb-nats cannot recover from.
+//
+// Request-scoped on purpose: these guard the admin UI and the REST API, not a
+// deliberate server-side app.Delete() by the consuming application, which is
+// assumed to know what it is doing. All of these collections are locked by
+// default, so the caller is a superuser either way — which is exactly why the
+// clicks worth refusing are the ones that look routine.
+func (sm *Manager) setupProtectionHooks() {
+	sm.app.OnRecordDeleteRequest().BindFunc(func(e *core.RecordRequestEvent) error {
+		if reason := sm.protectedDeleteReason(e.Collection.Name, e.Record); reason != "" {
+			return utils.WrapError(fmt.Errorf("%s", reason), "record deletion refused")
+		}
+		return e.Next()
+	})
+}
+
+// protectedDeleteReason reports why a record must not be deleted, or "" when the
+// delete is allowed.
+func (sm *Manager) protectedDeleteReason(collectionName string, record *core.Record) string {
+	switch collectionName {
+	case pbtypes.SystemOperatorCollectionName:
+		// The operator seed is the root of trust and lives nowhere else. pb-nats has
+		// no keystore and no key export, so deleting this row orphans every account
+		// JWT and every distributed creds file at once, with no repair short of
+		// restoring the database from backup.
+		return "cannot delete the system operator — it is the root of trust for every account and user JWT, and its seed exists nowhere outside this record"
+
+	case sm.options.AccountCollectionName:
+		if record.Id == sm.systemAccountID {
+			return "cannot delete the system account — it is the account pb-nats itself connects through"
+		}
+
+	case sm.options.UserCollectionName:
+		if record.GetString("nats_username") == "sys" && record.GetString("account_id") == sm.systemAccountID {
+			return "cannot delete the system user — it authenticates pb-nats' own NATS connection, and JWT synchronization stops until the process is restarted"
+		}
+
+	case sm.options.RoleCollectionName:
+		// role_id is a required relation with CascadeDelete: false, so deleting a
+		// role still in use leaves its users pointing at a row that is gone. Nothing
+		// notices at delete time; the next JWT regeneration then fails for every one
+		// of those users, and a user whose role cannot be resolved can no longer be
+		// reissued at all.
+		users, err := sm.app.FindAllRecords(sm.options.UserCollectionName, dbx.HashExp{"role_id": record.Id})
+		if err != nil {
+			// Can't establish the reference count; let the delete through rather than
+			// blocking legitimate cleanup on a query error.
+			return ""
+		}
+		if len(users) > 0 {
+			return fmt.Sprintf("cannot delete role %q — %d user(s) still reference it; reassign them to another role first",
+				record.GetString("name"), len(users))
+		}
+	}
+
+	return ""
 }
 
 // setupAccountHooks registers hooks for account lifecycle and management operations.
@@ -224,19 +283,10 @@ func (sm *Manager) setupAccountHooks() {
 		return e.Next()
 	})
 
-	// Account deletion - validation happens on the request, NATS removal is
-	// scheduled after the delete succeeds using snapshot data from the record
+	// Account deletion. Refusing to delete the system account is handled by
+	// setupProtectionHooks along with the other unrecoverable deletes; NATS removal
+	// is scheduled after the delete succeeds using snapshot data from the record
 	// (the account row no longer exists when the queue is processed).
-	sm.app.OnRecordDeleteRequest().BindFunc(func(e *core.RecordRequestEvent) error {
-		if e.Collection.Name != sm.options.AccountCollectionName {
-			return e.Next()
-		}
-		if e.Record.Id == sm.systemAccountID {
-			return utils.WrapError(fmt.Errorf("cannot delete system account"), "account deletion validation failed")
-		}
-		return e.Next()
-	})
-
 	sm.app.OnRecordAfterDeleteSuccess().BindFunc(func(e *core.RecordEvent) error {
 		if e.Record.Collection().Name != sm.options.AccountCollectionName {
 			return e.Next()
@@ -1041,7 +1091,7 @@ func (sm *Manager) regenerateUsersInAccount(accountID string) error {
 	return nil
 }
 
-// regenerateUsersWithRole updates JWTs for all users sharing a specific role.
+// regenerateUsersWithRole updates JWTs for all active users sharing a specific role.
 func (sm *Manager) regenerateUsersWithRole(roleID string) error {
 	users, err := sm.app.FindAllRecords(sm.options.UserCollectionName, dbx.HashExp{"role_id": roleID})
 	if err != nil {
@@ -1049,6 +1099,15 @@ func (sm *Manager) regenerateUsersWithRole(roleID string) error {
 	}
 
 	for _, user := range users {
+		// A suspended user has no working credentials by design: clearing `active`
+		// revoked their key and deliberately did not reissue. Reissuing here would
+		// stamp a JWT after the revocation cutoff — valid again — and write a fresh
+		// creds_file for them to download, silently undoing the suspension from an
+		// unrelated edit to a role they happen to share. regenerateUsersInAccount
+		// skips them for the same reason.
+		if !user.GetBool("active") {
+			continue
+		}
 		if err := sm.regenerateUserJWT(user); err != nil {
 			sm.logger.Warning("Failed to regenerate JWT for user %s: %v", user.Id, err)
 			continue
