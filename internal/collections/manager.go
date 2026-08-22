@@ -46,6 +46,9 @@ func (cm *Manager) InitializeCollections() error {
 	if err := cm.ensureUserRevokeField(); err != nil {
 		return fmt.Errorf("failed to ensure user revoke field: %w", err)
 	}
+	if err := cm.ensureSystemOperatorFields(); err != nil {
+		return fmt.Errorf("failed to ensure system operator fields: %w", err)
+	}
 	if err := cm.ensureOperatorSigningKeysFields(); err != nil {
 		return fmt.Errorf("failed to ensure operator signing keys fields: %w", err)
 	}
@@ -518,6 +521,40 @@ func (cm *Manager) ensureAccountRevocationsField() error {
 	if !changed {
 		return nil
 	}
+	return cm.app.Save(collection)
+}
+
+// ensureSystemOperatorFields adds system_account_id to existing operator collections.
+// Migration for deployments created before the operator recorded which account is the
+// system account.
+//
+// Without this, an operator collection predating the field can never acquire it:
+// createSystemOperatorCollection returns early when the collection exists, so nothing
+// adds it, and PocketBase silently discards writes to fields a collection does not
+// declare — so initializeSystemComponents' own repair path (resolve the system account
+// by name, then save the id onto the operator) reports success while persisting
+// nothing, and runs again identically on every boot.
+//
+// The consequence is remote from the cause and silent. publisher.getSystemUser
+// requires operator.SystemAccountID with no name fallback, so it fails, StartBootstrap
+// is never called, and no bootstrap retry ticker is ever created: the process stays in
+// bootstrap mode for its whole life, logging queued operations every 30s while making
+// zero connection attempts. Nothing else looks wrong, because a NATS server whose
+// resolver directory is already populated keeps authenticating every client. The
+// breakage only surfaces on meeting an empty resolver — a rebuilt server, or a restore
+// onto a new host — where ReconcileAccounts is the thing that should repopulate it and
+// is precisely what cannot run.
+func (cm *Manager) ensureSystemOperatorFields() error {
+	collection, err := cm.app.FindCollectionByNameOrId(pbtypes.SystemOperatorCollectionName)
+	if err != nil {
+		return nil // Collection doesn't exist yet; createSystemOperatorCollection will handle it
+	}
+
+	if collection.Fields.GetByName("system_account_id") != nil {
+		return nil
+	}
+
+	collection.Fields.Add(&core.TextField{Name: "system_account_id", Max: 200})
 	return cm.app.Save(collection)
 }
 
