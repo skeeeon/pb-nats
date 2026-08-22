@@ -109,6 +109,40 @@ console that connects to the bus needs one.
   --jetstream-store /var/lib/nats/jetstream
 ```
 
+## Backup and Restore
+
+`pb_data` is the entire system of record: the operator seed, every account and user key, every JWT, and the pending publish queue. Back it up and you have backed up the whole NATS trust hierarchy. Nothing outside it needs backing up — the NATS resolver directory is a cache pb-nats repopulates, and the exported config files are regenerated from the database.
+
+If at-rest encryption is enabled, **the encryption key is part of the backup**. Without it the seeds in `pb_data` cannot be read and every credential you have issued is unrecoverable; a database backup on its own is not a backup.
+
+### Restoring onto a Different Host
+
+1. Restore `pb_data`.
+
+2. **Re-run the export.** This step is mandatory, not a formality:
+
+```bash
+./myapp nats export --output /srv/nats/
+```
+
+The generated config is host-specific. `nats.conf` carries absolute paths for the resolver and JetStream directories, and `operator.conf` embeds the system account JWT. Copying an old export directory across gets both wrong — usually as a server that starts and then rejects everything.
+
+3. Start the NATS server with the regenerated config, then start PocketBase.
+
+The resolver directory starts out empty, and that is expected. The system account is preloaded from `operator.conf`, which is enough for pb-nats to connect, and reconciliation then queues every active account — so tenants are republished within a debounce interval of startup. See [Reconciliation on Startup](#reconciliation-on-startup).
+
+One thing a restore cannot recover: an account deleted *after* the backup was taken. The restored database still contains it, so reconciliation republishes it to NATS. Delete it again. (A deletion that was still pending or had failed when the backup ran is in the restored queue and is retried on startup.)
+
+### Extracting the Operator Seed
+
+pb-nats has no keystore and no `nsc`-style key export — see [Non-Goals](#non-goals). If you need the operator seed in nsc's hands, read it out of the database directly:
+
+```bash
+sqlite3 pb_data/data.db "SELECT seed FROM nats_system_operator;"
+```
+
+With at-rest encryption enabled, the stored value carries an `enc::` prefix and is AES-256-GCM ciphertext under your encryption key rather than a usable seed.
+
 ## Architecture
 
 ### Data Flow
@@ -135,7 +169,7 @@ NATS Server ($SYS.REQ.CLAIMS.UPDATE)
 2. **NKey Manager** — Generates NATS NKey pairs (operator, account, user)
 3. **JWT Generator** — Generates NATS JWTs with permissions, limits, imports, and exports
 4. **System Components** — Creates operator, system account, system role, system user
-5. **Publisher** — Starts persistent NATS connection with failover
+5. **Publisher** — Starts persistent NATS connection with failover, and retries account deletions that were previously given up on
 6. **Sync Manager** — Registers PocketBase hooks for real-time sync
 7. **Reconciliation** — Queues every active account for publishing (see below)
 
@@ -146,6 +180,8 @@ Account JWTs live only in the NATS resolver directory. If that directory is lost
 On every startup pb-nats queues an upsert for each active account. This runs through the normal publish queue, so it dedupes per account, retries, and waits out bootstrap mode when NATS is down. It's cheap on the server side too: NATS answers `jwt update skipped` when it already holds an equal-or-newer JWT, so accounts that are already in sync cost one no-op request each.
 
 Inactive accounts are skipped — they're absent from NATS by design.
+
+Deletions are handled from the other direction. A queued deletion that exhausts its retries is marked failed and would otherwise never be attempted again — and unlike an upsert it cannot be reconstructed, because the account row it refers to is already gone and the queue record's public key snapshot is the only surviving record of the intent. Startup clears that mark so the deletion is retried: whatever was rejecting it has had a whole process lifetime to change. Attempts stay capped afterwards, so this is a bounded retry per boot, not a loop.
 
 ### Key Design Decisions
 
@@ -166,6 +202,9 @@ Deliberately not supported, to keep the surface small:
 - **Scoped signing keys / account `default_permissions`** — these pin permissions to a signing key so that whatever a user JWT claims is overridden at connect time. pb-nats generates every user JWT server-side from PocketBase state, so there is no second authority to defend against.
 - **Operator key rotation** — rotating the operator means re-signing every account JWT *and* redeploying `nats.conf` and restarting servers. It's a deliberate, hands-on procedure, not a checkbox.
 - **Subject mappings, message tracing, connection-source (`src`) and time-of-day (`times`) restrictions, JetStream tiered limits, per-account leafnode limits, `allowed_connection_types`, `disallow_bearer`, JetStream stream/consumer counts** — real NATS features with narrow audiences, each a field and a line of generator code. Ask if you need one rather than carrying them all.
+- **Preloading account JWTs into the exported config** (`nsc generate config --mem-resolver`) — a second write path into the resolver directory, where a config exported months ago could push stale account JWTs, and their stale revocation lists, back over newer ones on the next server start. Reconciliation already repopulates an empty resolver at boot, which is the case preloading would be for.
+- **Pruning NATS to match PocketBase** (`nsc push --prune`) — only safe where PocketBase is the sole authority for that resolver. Share the server with a second pb-nats instance, or one hand-made nsc account, and prune deletes it. The gap it would cover — a deletion given up on — is closed at startup instead, by retrying queued deletions.
+- **A keystore, key export, or adopting an existing nsc operator** — `pb_data` is the backup and it holds the only copy of the operator seed, so a key export adds a second thing to lose rather than a safety net (and it could not survive a lost encryption key either). For the escape-hatch case, read the seed out of the database: see [Extracting the Operator Seed](#extracting-the-operator-seed).
 - **Automatic JWT renewal** — see below.
 
 ## Collections

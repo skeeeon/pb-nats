@@ -62,6 +62,13 @@ func (p *Manager) Start() error {
 		p.logger.Info("Publisher will continue operating - connection will be established when NATS becomes available")
 	}
 
+	// Give up-for-dead account deletions another chance, before the queue processor
+	// starts and before cleanup can sweep them away. See ReviveFailedDeletes: a
+	// failed delete is the one queue operation nothing else can reconstruct.
+	if err := p.ReviveFailedDeletes(); err != nil {
+		p.logger.Warning("Failed to revive queued account deletions: %v", err)
+	}
+
 	go p.processQueuePeriodically()
 
 	p.logger.Success("NATS account publisher started (bootstrap mode enabled)")
@@ -232,6 +239,63 @@ func (p *Manager) CleanupFailedRecords() error {
 		p.logger.Success("Cleanup completed: %d old failed records removed", cleaned)
 	}
 
+	return nil
+}
+
+// ReviveFailedDeletes clears the permanent-failure mark from queued account
+// deletions so a restart retries them.
+//
+// A queue record that exhausts MaxQueueAttempts is marked failed and never retried.
+// For an upsert that is harmless — ReconcileAccounts re-enqueues every active
+// account at boot. A delete cannot be reconstructed that way: reconciliation walks
+// account records, and the account this operation refers to is already gone, so the
+// queue row's public key snapshot is the only surviving record of the intent. Left
+// dead, and then swept by CleanupFailedRecords, the account stays live in NATS
+// forever — precisely the outcome deleting it was meant to prevent, and with no
+// trace left to notice it by.
+//
+// Startup is the natural retry point: whatever made the request fail ten times in a
+// row (a server rejecting the claim, a persistent timeout) has had a whole process
+// lifetime to change. Attempts stay capped afterwards, so this is a bounded retry
+// per boot rather than an unbounded loop.
+func (p *Manager) ReviveFailedDeletes() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	records, err := p.app.FindAllRecords(pbtypes.PublishQueueCollectionName,
+		dbx.And(
+			dbx.HashExp{"action": pbtypes.PublishActionDelete},
+			dbx.NewExp("failed_at IS NOT NULL"),
+			dbx.NewExp("failed_at != ''"),
+		))
+	if err != nil {
+		return utils.WrapError(err, "failed to find failed delete records")
+	}
+	if len(records) == 0 {
+		return nil
+	}
+
+	revived := 0
+	for _, record := range records {
+		// Without a public key snapshot there is nothing to send and no way to
+		// recover it, since the account row is gone. Leave it for cleanup.
+		if record.GetString("account_public_key") == "" {
+			continue
+		}
+
+		record.Set("failed_at", "")
+		record.Set("attempts", 0)
+		record.Set("message", "Retrying after restart")
+		if err := p.app.Save(record); err != nil {
+			p.logger.Warning("Failed to revive delete queue record %s: %v", record.Id, err)
+			continue
+		}
+		revived++
+	}
+
+	if revived > 0 {
+		p.logger.Info("Revived %d failed account deletion(s) for retry", revived)
+	}
 	return nil
 }
 
