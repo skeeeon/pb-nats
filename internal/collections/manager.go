@@ -49,8 +49,18 @@ func (cm *Manager) InitializeCollections() error {
 	if err := cm.ensureSystemOperatorFields(); err != nil {
 		return fmt.Errorf("failed to ensure system operator fields: %w", err)
 	}
+	// Must precede every write to the operator record below: a blank required column
+	// fails the whole save, and the backfill saves that record.
+	if err := cm.ensureOperatorIdentityOptional(); err != nil {
+		return fmt.Errorf("failed to relax operator identity fields: %w", err)
+	}
 	if err := cm.ensureOperatorSigningKeysFields(); err != nil {
 		return fmt.Errorf("failed to ensure operator signing keys fields: %w", err)
+	}
+	// Must follow ensureOperatorSigningKeysFields: that one moves legacy scalar keys
+	// into the array, and this one only acts on an operator still left with none.
+	if err := cm.ensureOperatorHasSigningKey(); err != nil {
+		return fmt.Errorf("failed to backfill operator signing key: %w", err)
 	}
 	if err := cm.ensureAccountSigningKeysFields(); err != nil {
 		return fmt.Errorf("failed to ensure account signing keys fields: %w", err)
@@ -91,8 +101,11 @@ func (cm *Manager) createSystemOperatorCollection() error {
 
 	collection.Fields.Add(&core.TextField{Name: "name", Required: true, Max: 100})
 	collection.Fields.Add(&core.TextField{Name: "public_key", Required: true, Max: 200})
-	collection.Fields.Add(&core.TextField{Name: "private_key", Required: true, Max: 200})
-	collection.Fields.Add(&core.TextField{Name: "seed", Required: true, Max: 200})
+	// The identity key: not required, so it can be taken offline. Nothing in a running
+	// pb-nats reads it — account JWTs and the CLAIMS.DELETE claim are both signed with a
+	// signing key. See ensureOperatorIdentityOptional.
+	collection.Fields.Add(&core.TextField{Name: "private_key", Required: false, Max: 200})
+	collection.Fields.Add(&core.TextField{Name: "seed", Required: false, Max: 200})
 	collection.Fields.Add(&core.JSONField{Name: "signing_keys", Required: false, MaxSize: 10000})
 	collection.Fields.Add(&core.JSONField{Name: "signing_keys_private", Required: false, MaxSize: 10000, Hidden: true})
 	collection.Fields.Add(&core.TextField{Name: "jwt", Max: 5000})
@@ -648,4 +661,117 @@ func (cm *Manager) migrateSigningKeyData(collectionName string) error {
 	}
 
 	return nil
+}
+
+// ensureOperatorHasSigningKey registers the operator's own identity key as its first
+// signing key, on deployments that have no signing keys at all.
+//
+// Every account JWT is signed with operator.LatestSigningKey() (sync.generateAccountJWT),
+// and the publisher refuses to start without one (getSystemOperator). An operator with an
+// empty key list therefore fails every account save and never leaves bootstrap mode — but
+// only once something tries. A NATS server whose resolver directory is already populated
+// keeps authenticating every client in the meantime, so the deployment looks healthy right
+// up until the first account edit.
+//
+// Deployments predating signing keys land in exactly that state. migrateSigningKeyData
+// only copies the legacy scalar fields across, and skips when they are empty; nothing
+// anywhere generates a signing key for an operator that already exists, because
+// createSystemOperatorWithoutJWT (the only producer) returns early for one.
+//
+// The identity key is reused deliberately rather than generating a fresh signing key.
+// An operator's signing key list lives in the operator JWT, which lives in nats.conf and
+// is never published over $SYS — so a newly generated key is untrusted until the operator
+// JWT is re-exported and every server restarted. Signing accounts with it before that
+// happens would reject them all. The identity key is already trusted (it is the operator
+// subject), and it already signed every existing account JWT on these deployments, so
+// adopting it changes nothing a running server can observe: no re-export, no restart, no
+// downtime. This mirrors nsc's own migration for operators that never used signing keys,
+// `nsc reissue operator --convert-to-signing-key`.
+//
+// The cost is that identity and signing key are now the same key, which blocks anything
+// that assumes they differ (keeping the identity offline; strict_signing_key_usage).
+// Separating them is a deliberate ceremony — add_signing_key, re-export, restart, re-sign
+// accounts, remove_signing_key — not something a library upgrade should do behind an
+// operator's back. checkOperatorSigningKeySeparation warns about it on every boot.
+//
+// Fresh installs never reach the loop body: this runs from InitializeCollections, well
+// before initializeSystemComponents creates the operator, and that path generates a
+// distinct signing key of its own.
+func (cm *Manager) ensureOperatorHasSigningKey() error {
+	records, err := cm.app.FindAllRecords(pbtypes.SystemOperatorCollectionName)
+	if err != nil {
+		return nil // Collection doesn't exist yet; nothing to backfill
+	}
+
+	for _, record := range records {
+		operator := pbtypes.RecordToOperatorModel(record, cm.options.EncryptionKey)
+		if len(operator.SigningKeysPrivate) > 0 {
+			continue
+		}
+
+		// Without the seed there is no key material to adopt. Leave the record alone
+		// rather than writing a signing key entry that cannot sign.
+		if operator.Seed == "" || operator.PublicKey == "" {
+			continue
+		}
+
+		pub, priv := pbtypes.NewSigningKeyPair(operator.PublicKey, operator.PrivateKey, operator.Seed)
+		pubJSON, privJSON, err := pbtypes.MarshalSigningKeys(
+			[]pbtypes.SigningKeyPublic{pub},
+			[]pbtypes.SigningKeyPrivate{priv},
+		)
+		if err != nil {
+			return fmt.Errorf("failed to marshal backfilled signing key for operator %s: %w", record.Id, err)
+		}
+
+		record.Set("signing_keys", pubJSON)
+		if err := pbtypes.EncryptJSONAndSet(record, "signing_keys_private", privJSON, cm.options.EncryptionKey); err != nil {
+			return fmt.Errorf("failed to encrypt backfilled signing key for operator %s: %w", record.Id, err)
+		}
+		if err := cm.app.Save(record); err != nil {
+			return fmt.Errorf("failed to backfill signing key for operator %s: %w", record.Id, err)
+		}
+	}
+
+	return nil
+}
+
+// ensureOperatorIdentityOptional drops the required flag from nats_system_operator's
+// private_key and seed.
+//
+// Both are the operator's identity key material, and after the CLAIMS.DELETE claim moved
+// onto the signing key (publisher.removeAccountJWT) nothing in a running pb-nats reads
+// either one. They stay declared, and every deployment still populates them; they are
+// simply no longer load-bearing, which is what makes taking the identity key offline
+// possible at all.
+//
+// Required-and-blank is the specific hazard being removed. PocketBase validates the whole
+// record on every save, so a blank required column fails the *next* write to the operator
+// record for an unrelated reason — and because pb-nats initializes from OnBootstrap, which
+// fires for every command, an operator save it cannot complete takes down `migrate` and
+// every other subcommand alongside `serve`. There is then no way to reach the code that
+// would relax the flag; the column has to be edited out of band. Relaxing it in advance
+// is what keeps that door open.
+//
+// No backfill: relaxing a constraint cannot strand an existing row.
+func (cm *Manager) ensureOperatorIdentityOptional() error {
+	collection, err := cm.app.FindCollectionByNameOrId(pbtypes.SystemOperatorCollectionName)
+	if err != nil {
+		return nil // Collection doesn't exist yet; createSystemOperatorCollection handles it
+	}
+
+	changed := false
+	for _, name := range []string{"private_key", "seed"} {
+		field, ok := collection.Fields.GetByName(name).(*core.TextField)
+		if !ok || !field.Required {
+			continue
+		}
+		field.Required = false
+		changed = true
+	}
+
+	if !changed {
+		return nil
+	}
+	return cm.app.Save(collection)
 }

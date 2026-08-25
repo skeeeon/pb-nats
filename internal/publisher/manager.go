@@ -496,17 +496,9 @@ func (p *Manager) removeAccountJWT(accountPublicKey, accountName string) error {
 		return utils.WrapError(err, "failed to get system operator for account deletion")
 	}
 
-	claim := jwt.NewGenericClaims(operator.PublicKey)
-	claim.Data["accounts"] = []string{accountPublicKey}
-
-	operatorKP, err := nkeys.FromSeed([]byte(operator.Seed))
+	deleteJWT, err := buildAccountDeleteClaim(operator, accountPublicKey)
 	if err != nil {
-		return utils.WrapError(err, "failed to create operator key pair for deletion")
-	}
-
-	deleteJWT, err := claim.Encode(operatorKP)
-	if err != nil {
-		return utils.WrapError(err, "failed to encode deletion JWT")
+		return utils.WrapErrorf(err, "failed to build deletion claim for %s", accountName)
 	}
 
 	resp, err := p.connManager.Request("$SYS.REQ.CLAIMS.DELETE", []byte(deleteJWT), p.options.ConnectionTimeouts.RequestTimeout)
@@ -592,9 +584,10 @@ func (p *Manager) getSystemOperator() (*pbtypes.SystemOperatorRecord, error) {
 	if err := utils.ValidateRequired(operator.PublicKey, "operator public key"); err != nil {
 		return nil, utils.WrapError(err, "invalid system operator")
 	}
-	if err := utils.ValidateRequired(operator.Seed, "operator seed"); err != nil {
-		return nil, utils.WrapError(err, "invalid system operator")
-	}
+	// The identity seed is deliberately not required. Nothing the publisher does needs
+	// it — account JWTs and the CLAIMS.DELETE claim are both signed with the signing key
+	// below — and requiring it would block an operator whose identity key has been taken
+	// offline. LatestSigningKey is the real invariant.
 	if operator.LatestSigningKey() == nil {
 		return nil, utils.WrapError(fmt.Errorf("operator has no signing keys"), "invalid system operator")
 	}
@@ -635,4 +628,43 @@ func (p *Manager) getSystemUser() (*pbtypes.NatsUserRecord, error) {
 	}
 
 	return user, nil
+}
+
+// buildAccountDeleteClaim encodes the self-signed claim that $SYS.REQ.CLAIMS.DELETE
+// requires in order to withdraw an account from the resolver.
+//
+// It is signed by the operator's signing key, not its identity key, so that one rule
+// holds everywhere: pb-nats signs with LatestSigningKey() and the identity key signs
+// nothing but the operator JWT.
+//
+// The server accepts this claim only when it is self-signed by a trusted operator key —
+// nats-server's handleDeleteRequest rejects "not self signed" unless subject equals
+// issuer, then "not trusted" unless that issuer is in the operator key set. That set is
+// the operator subject plus every signing key, except under strict_signing_key_usage,
+// which drops the subject. Making subject and issuer both the signing key is accepted
+// either way; signing with the identity key, as this used to, is rejected outright the
+// moment strict mode is on.
+//
+// Extracted from removeAccountJWT so the property above is testable without a NATS
+// server: decode the result and check issuer, subject and the accounts payload.
+func buildAccountDeleteClaim(operator *pbtypes.SystemOperatorRecord, accountPublicKey string) (string, error) {
+	signingKey := operator.LatestSigningKey()
+	if signingKey == nil {
+		return "", fmt.Errorf("operator has no signing keys")
+	}
+
+	claim := jwt.NewGenericClaims(signingKey.PublicKey)
+	claim.Data["accounts"] = []string{accountPublicKey}
+
+	operatorKP, err := nkeys.FromSeed([]byte(signingKey.Seed))
+	if err != nil {
+		return "", fmt.Errorf("failed to create operator signing key pair: %w", err)
+	}
+
+	deleteJWT, err := claim.Encode(operatorKP)
+	if err != nil {
+		return "", fmt.Errorf("failed to encode deletion claim: %w", err)
+	}
+
+	return deleteJWT, nil
 }

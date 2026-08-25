@@ -106,19 +106,30 @@ func decryptSigningKeys(record *core.Record, key string) ([]SigningKeyPublic, []
 		}
 	}
 
-	// Private signing keys may be encrypted as a single string blob
+	// Private signing keys may be encrypted as a single string blob.
+	//
+	// The shape is decided by the *stored JSON*, not by the Go type. A JSON field
+	// always reads back as types.JSONRaw — never a Go string, even for the value
+	// EncryptJSONAndSet just wrote — so type-switching on `string` here matched
+	// nothing and every encrypted deployment silently parsed zero signing keys.
+	// That is fatal rather than cosmetic: the operator's key list drives
+	// LatestSigningKey, so account JWT generation and the publisher both fail.
+	//
+	// Unmarshalling into a string is the discriminator that works for both: a blob
+	// written by EncryptJSONAndSet is a JSON string, an unencrypted key list is a
+	// JSON array.
 	if val := record.Get("signing_keys_private"); val != nil {
-		switch v := val.(type) {
-		case string:
-			// Encrypted blob or plain JSON string
-			decrypted, err := DecryptField(v, key)
-			if err == nil && decrypted != "" {
-				_ = json.Unmarshal([]byte(decrypted), &priv)
-			}
-		default:
-			// Unencrypted JSON value (PocketBase returns parsed JSON)
-			if bytes, err := json.Marshal(val); err == nil {
-				_ = json.Unmarshal(bytes, &priv)
+		if raw, err := json.Marshal(val); err == nil {
+			var blob string
+			if err := json.Unmarshal(raw, &blob); err == nil {
+				// JSON string: an "enc::" blob, or plaintext JSON that was stored
+				// as a string. DecryptField passes unprefixed values through.
+				if decrypted, err := DecryptField(blob, key); err == nil && decrypted != "" {
+					_ = json.Unmarshal([]byte(decrypted), &priv)
+				}
+			} else {
+				// JSON array: unencrypted key list.
+				_ = json.Unmarshal(raw, &priv)
 			}
 		}
 	}

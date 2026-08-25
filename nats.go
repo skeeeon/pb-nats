@@ -129,6 +129,8 @@ func initializeComponents(app *pocketbase.PocketBase, options Options, logger *u
 	}
 	logger.Success("   System components initialized")
 
+	checkOperatorSigningKeySeparation(app, options, logger)
+
 	// Step 5: Initialize publisher
 	logger.Info("   Starting account publisher with connection manager...")
 	accountPublisher := publisher.NewManager(app, options)
@@ -681,4 +683,39 @@ const Version = "1.3.0"
 // GetVersion returns the library version
 func GetVersion() string {
 	return Version
+}
+
+// checkOperatorSigningKeySeparation warns when the operator's identity key is also one
+// of its signing keys, which is the state collections.ensureOperatorHasSigningKey leaves
+// behind on deployments that predate signing keys.
+//
+// It is a working state, not a broken one — the identity key is trusted by every server
+// and already signed those deployments' account JWTs — so this is a warning rather than
+// an error. But it is invisible otherwise, and it silently blocks the two things signing
+// keys exist to enable: keeping the identity key offline, and strict_signing_key_usage.
+// Both assume the identity key signs nothing but the operator JWT. Warning on every boot
+// rather than once at migration time is deliberate: the deployment that needs to hear
+// this is the one still in this state a year later.
+func checkOperatorSigningKeySeparation(app *pocketbase.PocketBase, options Options, logger *utils.Logger) {
+	records, err := app.FindAllRecords(pbtypes.SystemOperatorCollectionName)
+	if err != nil || len(records) == 0 {
+		return
+	}
+
+	operator := pbtypes.RecordToOperatorModel(records[0], options.EncryptionKey)
+	if operator.PublicKey == "" {
+		return
+	}
+
+	for _, pubKey := range operator.AllSigningPublicKeys() {
+		if pubKey != operator.PublicKey {
+			continue
+		}
+		logger.Warning("Operator identity key is also its signing key (backfilled from a pre-signing-key install).")
+		logger.Warning("   Accounts are signed by the operator identity. This works, but blocks")
+		logger.Warning("   keeping the identity key offline and strict_signing_key_usage.")
+		logger.Warning("   To separate them: add_signing_key on the operator, re-run `nats export`,")
+		logger.Warning("   restart NATS, re-save every account, then remove_signing_key for %s", operator.PublicKey)
+		return
+	}
 }
