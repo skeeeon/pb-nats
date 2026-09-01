@@ -115,3 +115,77 @@ func TestPreviewConfigStaysRelative(t *testing.T) {
 		t.Errorf("preview nats.conf should keep a relative resolver dir:\n%s", got)
 	}
 }
+
+// The export command lives in someone else's binary, so its flag names share a
+// namespace with the host application's. `--config` was the collision that
+// actually happened: a PocketBase host defining `--config <path>` as a
+// persistent root flag, cobra letting this subcommand's local bool shadow the
+// root's string, and `myapp --config ./app.yaml nats export -o ./out` therefore
+// setting the PREVIEW flag, swallowing the path as a positional argument,
+// printing nats.conf to stdout and creating no files at all. Exit status zero.
+//
+// The flags are now named for the artifacts they produce. This test is a
+// tripwire on that: any future flag whose name a host is likely to have taken —
+// `config`, `dir`, `dev`, `debug` — is the same bug waiting to happen.
+func TestExportFlagsDoNotCollideWithCommonHostFlags(t *testing.T) {
+	cmd := createExportCommandWithOptions(nil, DefaultCommandOptions())
+
+	// Names a PocketBase host is likely to define on its root command. PocketBase
+	// itself ships --dir, --dev, --encryptionEnv and --queryTimeout; --config is
+	// near-universal in applications that read a config file.
+	for _, name := range []string{"config", "dir", "dev", "debug", "http", "encryptionEnv", "queryTimeout"} {
+		if f := cmd.Flags().Lookup(name); f != nil {
+			t.Errorf("export defines --%s, which collides with a flag a host application is likely to own; "+
+				"name flags after the artifact they produce", name)
+		}
+	}
+
+	// The replacement must exist, or the rename silently removed a capability.
+	for _, name := range []string{"output", "operator-jwt", "nats-conf", "operator-conf"} {
+		if f := cmd.Flags().Lookup(name); f == nil {
+			t.Errorf("export is missing --%s", name)
+		}
+	}
+}
+
+// A preview flag prints one artifact and writes nothing. Combined with an
+// explicit --output the caller has asked for two contradictory things, and the
+// silent outcome — text on the terminal, an empty directory, exit 0 — is exactly
+// what the --config collision produced. Refusing makes the next such collision
+// loud instead.
+func TestExportRefusesPreviewFlagsAlongsideOutput(t *testing.T) {
+	for _, preview := range []string{"operator-jwt", "nats-conf", "operator-conf"} {
+		cmd := createExportCommandWithOptions(nil, DefaultCommandOptions())
+		cmd.SetArgs([]string{"--output", t.TempDir(), "--" + preview})
+		cmd.SetOut(&strings.Builder{})
+		cmd.SetErr(&strings.Builder{})
+
+		err := cmd.Execute()
+		if err == nil {
+			t.Errorf("--%s with --output was accepted; it writes no files, so this must be an error", preview)
+			continue
+		}
+		if !strings.Contains(err.Error(), preview) || !strings.Contains(err.Error(), "--output") {
+			t.Errorf("--%s with --output: error should name both flags, got %q", preview, err)
+		}
+	}
+}
+
+// Without --output and without a preview flag there is nothing to do, and the
+// error has to say so rather than bootstrapping the app first. This also pins
+// that the check runs before app.Bootstrap() — the test passes a nil app, so a
+// reordering that bootstraps first would panic here rather than fail politely.
+func TestExportRequiresOutputOrAPreviewFlag(t *testing.T) {
+	cmd := createExportCommandWithOptions(nil, DefaultCommandOptions())
+	cmd.SetArgs(nil)
+	cmd.SetOut(&strings.Builder{})
+	cmd.SetErr(&strings.Builder{})
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("export with no flags was accepted")
+	}
+	if !strings.Contains(err.Error(), "--output") {
+		t.Errorf("error should name --output, got %q", err)
+	}
+}

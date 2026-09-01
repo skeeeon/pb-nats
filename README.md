@@ -99,7 +99,7 @@ console that connects to the bus needs one.
 ```bash
 ./myapp nats export --output ./nats-config/     # All files to directory
 ./myapp nats export --operator-jwt              # Operator JWT to stdout
-./myapp nats export --config                    # nats.conf to stdout
+./myapp nats export --nats-conf                 # nats.conf to stdout
 ./myapp nats export --operator-conf             # operator.conf to stdout
 
 # Custom server settings

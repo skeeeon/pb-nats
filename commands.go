@@ -20,7 +20,7 @@ import (
 //
 //	./myapp nats export --output ./nats-config/
 //	./myapp nats export --operator-jwt
-//	./myapp nats export --config
+//	./myapp nats export --nats-conf
 func RegisterCommands(app *pocketbase.PocketBase) {
 	RegisterCommandsWithOptions(app, DefaultCommandOptions())
 }
@@ -378,9 +378,38 @@ This command exports:
 Examples:
   ./myapp nats export --output ./nats-config/
   ./myapp nats export --operator-jwt
-  ./myapp nats export --config
+  ./myapp nats export --nats-conf
   ./myapp nats export --operator-conf`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// A preview flag prints one artifact to stdout and writes nothing, so
+			// combining it with an explicit --output is a contradiction: the
+			// caller asked for files in a directory and would get text on a
+			// terminal, with no error and no files. Refuse instead.
+			//
+			// This is not hypothetical tidiness. --nats-conf was called --config
+			// until it collided with the `--config <path>` persistent flag that
+			// almost every PocketBase host application defines: cobra let the
+			// subcommand's local bool shadow the root's string, so
+			// `myapp --config ./app.yaml nats export -o ./out` set the PREVIEW
+			// flag, treated the path as a positional argument, printed nats.conf,
+			// and created nothing. The rename removes that particular collision;
+			// this check is what makes the next one loud.
+			if cmd.Flags().Changed("output") {
+				for _, name := range []string{"operator-jwt", "nats-conf", "operator-conf"} {
+					if cmd.Flags().Changed(name) {
+						return fmt.Errorf("--%s prints to stdout and writes no files; it cannot be combined with --output", name)
+					}
+				}
+			}
+
+			// Argument validation happens before Bootstrap, not after. Bootstrap
+			// opens the database and runs migrations; telling someone they forgot
+			// a flag should not cost that, and it certainly should not depend on
+			// it succeeding first.
+			if outputDir == "" && !operatorJWTOnly && !configOnly && !operatorConfOnly {
+				return fmt.Errorf("--output directory is required when not using --operator-jwt, --nats-conf, or --operator-conf")
+			}
+
 			if err := app.Bootstrap(); err != nil {
 				return fmt.Errorf("failed to bootstrap app: %w", err)
 			}
@@ -415,17 +444,18 @@ Examples:
 				return nil
 			}
 
-			if outputDir == "" {
-				return fmt.Errorf("--output directory is required when not using --operator-jwt, --config, or --operator-conf")
-			}
-
 			return exportAllFiles(outputDir, operator, sysAccount, serverName, natsPort, jetstreamStoreDir, websocketPort)
 		},
 	}
 
 	cmd.Flags().StringVarP(&outputDir, "output", "o", opts.DefaultOutputDir, "Output directory for configuration files")
 	cmd.Flags().BoolVar(&operatorJWTOnly, "operator-jwt", false, "Output only the operator JWT to stdout")
-	cmd.Flags().BoolVar(&configOnly, "config", false, "Output only the nats.conf to stdout")
+	// NOT "config": see the note in RunE. A library that registers subcommands
+	// into someone else's binary shares a flag namespace with the host, and
+	// `--config` is the single most likely name for a host to have already taken.
+	// Every flag here is named for the artifact it produces, which is both
+	// clearer and collision-resistant.
+	cmd.Flags().BoolVar(&configOnly, "nats-conf", false, "Output only the nats.conf to stdout")
 	cmd.Flags().BoolVar(&operatorConfOnly, "operator-conf", false, "Output only the operator.conf to stdout")
 	cmd.Flags().StringVar(&serverName, "server-name", opts.DefaultServerName, "NATS server name")
 	cmd.Flags().IntVar(&natsPort, "port", opts.DefaultPort, "NATS server port")
