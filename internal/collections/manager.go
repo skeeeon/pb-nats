@@ -37,6 +37,9 @@ func (cm *Manager) InitializeCollections() error {
 	if err := cm.createRolesCollection(); err != nil {
 		return fmt.Errorf("failed to create roles collection: %w", err)
 	}
+	if err := cm.ensureRoleFields(); err != nil {
+		return fmt.Errorf("failed to ensure role fields: %w", err)
+	}
 	if err := cm.createUsersCollection(); err != nil {
 		return fmt.Errorf("failed to create users collection: %w", err)
 	}
@@ -194,31 +197,76 @@ func (cm *Manager) createRolesCollection() error {
 	collection.Fields.Add(&core.TextField{Name: "description", Max: 500})
 	collection.Fields.Add(&core.BoolField{Name: "is_default"})
 
-	// Allow permission fields (JSON arrays of subjects)
-	collection.Fields.Add(&core.JSONField{Name: "publish_permissions", Required: false, MaxSize: 5000})
-	collection.Fields.Add(&core.JSONField{Name: "subscribe_permissions", Required: false, MaxSize: 5000})
-
-	// Deny permission fields (JSON arrays of subjects - takes precedence over allow)
-	collection.Fields.Add(&core.JSONField{Name: "publish_deny_permissions", Required: false, MaxSize: 5000})
-	collection.Fields.Add(&core.JSONField{Name: "subscribe_deny_permissions", Required: false, MaxSize: 5000})
-
-	// Response permission fields for request-reply patterns
-	// allow_response: When true, enables response permissions for the user
-	collection.Fields.Add(&core.BoolField{Name: "allow_response"})
-	// allow_response_max: Maximum responses per request (-1 = unlimited, 0 = default/1)
-	collection.Fields.Add(&core.NumberField{Name: "allow_response_max", OnlyInt: true, Min: types.Pointer(-1.0)})
-	// allow_response_ttl: Response TTL in seconds (0 = no limit/default)
-	collection.Fields.Add(&core.NumberField{Name: "allow_response_ttl", OnlyInt: true, Min: types.Pointer(0.0)})
-
-	// Per-user limits (-1 = unlimited, 0 = disabled, positive = limit)
-	collection.Fields.Add(&core.NumberField{Name: "max_subscriptions", OnlyInt: true, Min: types.Pointer(-1.0)})
-	collection.Fields.Add(&core.NumberField{Name: "max_data", OnlyInt: true, Min: types.Pointer(-1.0)})
-	collection.Fields.Add(&core.NumberField{Name: "max_payload", OnlyInt: true, Min: types.Pointer(-1.0)})
+	for _, field := range roleFields() {
+		collection.Fields.Add(field)
+	}
 
 	// Timestamps
 	collection.Fields.Add(&core.AutodateField{Name: "created", OnCreate: true})
 	collection.Fields.Add(&core.AutodateField{Name: "updated", OnCreate: true, OnUpdate: true})
 
+	return cm.app.Save(collection)
+}
+
+// roleFields returns the nats_roles fields that shape a user's JWT. It is shared by
+// createRolesCollection and ensureRoleFields, so a field added here reaches deployments
+// whose roles collection already exists, not only fresh installs. Every call returns new
+// field instances, because a collection keeps the pointers it is given.
+func roleFields() []core.Field {
+	return []core.Field{
+		// Allow permission fields (JSON arrays of subjects)
+		&core.JSONField{Name: "publish_permissions", Required: false, MaxSize: 5000},
+		&core.JSONField{Name: "subscribe_permissions", Required: false, MaxSize: 5000},
+
+		// Deny permission fields (JSON arrays of subjects - takes precedence over allow)
+		&core.JSONField{Name: "publish_deny_permissions", Required: false, MaxSize: 5000},
+		&core.JSONField{Name: "subscribe_deny_permissions", Required: false, MaxSize: 5000},
+
+		// Response permission fields for request-reply patterns
+		// allow_response: When true, enables response permissions for the user
+		&core.BoolField{Name: "allow_response"},
+		// allow_response_max: Maximum responses per request (-1 = unlimited, 0 = default/1)
+		&core.NumberField{Name: "allow_response_max", OnlyInt: true, Min: types.Pointer(-1.0)},
+		// allow_response_ttl: Response TTL in seconds (0 = no limit/default)
+		&core.NumberField{Name: "allow_response_ttl", OnlyInt: true, Min: types.Pointer(0.0)},
+
+		// Per-user limits (-1 = unlimited, 0 = disabled, positive = limit)
+		&core.NumberField{Name: "max_subscriptions", OnlyInt: true, Min: types.Pointer(-1.0)},
+		&core.NumberField{Name: "max_data", OnlyInt: true, Min: types.Pointer(-1.0)},
+		&core.NumberField{Name: "max_payload", OnlyInt: true, Min: types.Pointer(-1.0)},
+	}
+}
+
+// ensureRoleFields adds any roleFields field missing from an existing roles collection.
+//
+// Role fields were added twice without a migration. max_subscriptions replaced
+// max_connections in August 2025, and the deny lists and allow_response* arrived in
+// January 2026. createRolesCollection returns early when the collection exists, and
+// PocketBase silently discards writes to undeclared fields, so on a deployment created
+// before either change those writes reported success and persisted nothing. A role's
+// publish_deny_permissions was dropped, so a deny the operator set was never signed into
+// any JWT. allow_response always read false, so a subscribe-only responder role could
+// not answer requests. A consumer that defines nats_roles in its own schema hits the same
+// gap. Each field is checked by name rather than inferred from one sentinel, because
+// collections exist in more than one historical shape. A field that exists with another
+// type is left alone: changing a field's type would rewrite the consumer's data.
+func (cm *Manager) ensureRoleFields() error {
+	collection, err := cm.app.FindCollectionByNameOrId(cm.options.RoleCollectionName)
+	if err != nil {
+		return nil // Collection doesn't exist yet; createRolesCollection will handle it
+	}
+
+	changed := false
+	for _, field := range roleFields() {
+		if collection.Fields.GetByName(field.GetName()) == nil {
+			collection.Fields.Add(field)
+			changed = true
+		}
+	}
+
+	if !changed {
+		return nil
+	}
 	return cm.app.Save(collection)
 }
 

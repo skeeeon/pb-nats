@@ -25,6 +25,24 @@ If you set them, decide what each affected role should grant and write that into
 
 `pbnats.Version` now reports `0.3.0`. It said `1.3.0`, which matched no release.
 
+### Fixed: role fields missing on older deployments were silently dropped
+
+Two releases added fields to `nats_roles` without a migration:
+
+- **August 2025**: `max_subscriptions` replaced `max_connections`.
+- **January 2026**: `publish_deny_permissions`, `subscribe_deny_permissions`, `allow_response`, `allow_response_max` and `allow_response_ttl` were added.
+
+pb-nats only adds role fields when it first creates the collection. PocketBase discards writes to fields a collection does not declare, and it does not report an error. So on a deployment created before either change, writes to these fields appeared to succeed but stored nothing:
+
+- A role's deny lists never reached any JWT.
+- `allow_response` always read `false`.
+
+A consumer that defines `nats_roles` in its own schema without these fields had the same problem.
+
+pb-nats now adds any missing role field at startup, and leaves existing fields and their data untouched. Fresh installs and upgrades use the same field list, so a role field added later reaches existing deployments too.
+
+**After upgrading, re-enter what was lost.** pb-nats can add the missing fields, but it cannot recover values that were never stored. If an operator set deny lists or `allow_response` on an affected deployment, those values are gone and must be set again. Saving the role reissues its users' JWTs. Because of the change above, a responder role with no publish permissions needs `allow_response: true` to answer requests.
+
 ### Upgrade notes
 
 **1. Before upgrading, find the users this affects.** A user is affected when the role and the user *together* have no subjects in a direction. A per-user list fills an empty role. Run this against `pb_data/data.db` (SQLite; adjust the table names if you changed the collection names):
