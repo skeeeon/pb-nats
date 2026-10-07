@@ -583,6 +583,18 @@ Permissions follow NATS semantics: deny takes precedence over allow.
 }
 ```
 
+### Empty Means Nothing
+
+If the role and the user together grant no publish subjects, the user cannot publish anything. The same applies to subscribe. Each direction is handled on its own: a role with only `subscribe_permissions` produces a subscribe-only user.
+
+pb-nats writes this as `deny: [">"]` in the user JWT, not as an empty allow list. nats-server reads an empty allow list as **no restriction**, so an empty list would let the user publish and subscribe anywhere in its account. Response permissions still work with `deny: [">"]`. A role with `subscribe_permissions`, no `publish_permissions` and `allow_response: true` is a reply-only service.
+
+Inbox subscriptions are not added for you. A role that sends requests must list `_INBOX.>` in `subscribe_permissions`. Within an account, that permission also lets the user read replies sent to other users.
+
+The only exception is the `sys` user in the system account. It is pb-nats' own connection, so it keeps `$SYS.>` and `>` even if its role is emptied.
+
+> Before v0.3.0, empty lists fell back to `DefaultPublishPermissions` (`>`) and `DefaultSubscribePermissions` (`>`, `_INBOX.>`), so they granted everything. Those options are removed. See [CHANGELOG.md](CHANGELOG.md) for the upgrade steps.
+
 ### Per-User Permission Overrides
 
 User-level permissions are **merged (union)** with role permissions — they extend the role's baseline, not replace it.
@@ -676,10 +688,6 @@ options.DebounceInterval = 3 * time.Second       // batch rapid changes
 // Cleanup
 options.FailedRecordCleanupInterval = 6 * time.Hour
 options.FailedRecordRetentionTime = 24 * time.Hour
-
-// Default permissions (when role permissions are empty)
-options.DefaultPublishPermissions = []string{">"}
-options.DefaultSubscribePermissions = []string{">", "_INBOX.>"}
 
 // JWT
 options.DefaultJWTExpiry = 0 // never expires

@@ -355,19 +355,29 @@ func (g *Generator) applyPermissions(userClaims *jwt.UserClaims, user *pbtypes.N
 	publishDenyPerms = append(publishDenyPerms, userPubDenyPerms...)
 	subscribeDenyPerms = append(subscribeDenyPerms, userSubDenyPerms...)
 
-	// Apply default permissions if both role and user permissions are empty
-	if len(publishPerms) == 0 {
-		if g.isSystemUser(user, account) {
+	// An empty allow list grants nothing, and has to be written as deny ">": nats-server
+	// reads an empty allow list in a user JWT as "no restriction", so leaving it empty
+	// signs a user that can publish and subscribe anywhere in its account. Deny ">" is
+	// how nats-server itself says "nothing" when a permission template expands to an
+	// empty list. Response permissions survive it, since replies are checked after
+	// allow/deny: a subscribe-only role with allow_response can still answer requests.
+	//
+	// The system user is the exception. It authenticates pb-nats' own connection, which
+	// must reach $SYS to publish claims, so an emptied system_admin role must not lock
+	// pb-nats out of NATS.
+	if g.isSystemUser(user, account) {
+		if len(publishPerms) == 0 {
 			publishPerms = []string{"$SYS.>", ">"}
-		} else {
-			publishPerms = g.options.DefaultPublishPermissions
 		}
-	}
-	if len(subscribePerms) == 0 {
-		if g.isSystemUser(user, account) {
+		if len(subscribePerms) == 0 {
 			subscribePerms = []string{"$SYS.>", ">"}
-		} else {
-			subscribePerms = g.options.DefaultSubscribePermissions
+		}
+	} else {
+		if len(publishPerms) == 0 {
+			publishDenyPerms = append(publishDenyPerms, ">")
+		}
+		if len(subscribePerms) == 0 {
+			subscribeDenyPerms = append(subscribeDenyPerms, ">")
 		}
 	}
 

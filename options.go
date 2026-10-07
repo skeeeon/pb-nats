@@ -31,10 +31,6 @@ func DefaultOptions() Options {
 		FailedRecordCleanupInterval: 6 * time.Hour,  // Run cleanup 4 times per day
 		FailedRecordRetentionTime:   24 * time.Hour, // Keep failed records for 1 day for debugging
 
-		// Default permissions for users when role permissions are empty
-		DefaultPublishPermissions:   pbtypes.DefaultPublishPermissions,
-		DefaultSubscribePermissions: pbtypes.DefaultSubscribePermissions,
-
 		EventFilter: nil, // No filter by default, process all events
 	}
 }
@@ -90,14 +86,6 @@ func applyDefaultOptions(options Options) Options {
 	}
 	if options.FailedRecordRetentionTime <= 0 {
 		options.FailedRecordRetentionTime = defaults.FailedRecordRetentionTime
-	}
-
-	// Apply default permissions if not provided
-	if len(options.DefaultPublishPermissions) == 0 {
-		options.DefaultPublishPermissions = defaults.DefaultPublishPermissions
-	}
-	if len(options.DefaultSubscribePermissions) == 0 {
-		options.DefaultSubscribePermissions = defaults.DefaultSubscribePermissions
 	}
 
 	return options

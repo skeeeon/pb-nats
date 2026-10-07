@@ -77,10 +77,7 @@ func newTestAccount(t *testing.T, nm *nkey.Manager) *pbtypes.AccountRecord {
 
 func TestGenerateUserJWT(t *testing.T) {
 	nm := nkey.NewManager()
-	g := NewGenerator(nm, pbtypes.Options{
-		DefaultPublishPermissions:   []string{">"},
-		DefaultSubscribePermissions: []string{">", "_INBOX.>"},
-	})
+	g := NewGenerator(nm, pbtypes.Options{})
 
 	account := newTestAccount(t, nm)
 
@@ -157,37 +154,82 @@ func TestGenerateUserJWT(t *testing.T) {
 	}
 }
 
-func TestGenerateUserJWTDefaultPermissions(t *testing.T) {
+// An empty allow list must come out as deny ">", never as an empty allow list (which
+// nats-server treats as unrestricted). TestEmptyRoleIsDeniedByServer checks the
+// server's side of this; here the per-direction shape is pinned.
+func TestGenerateUserJWTEmptyPermissionsDenyAll(t *testing.T) {
 	nm := nkey.NewManager()
-	g := NewGenerator(nm, pbtypes.Options{
-		DefaultPublishPermissions:   []string{"default.pub.>"},
-		DefaultSubscribePermissions: []string{"default.sub.>"},
+	g := NewGenerator(nm, pbtypes.Options{})
+	account := newTestAccount(t, nm)
+
+	mint := func(user *pbtypes.NatsUserRecord, role *pbtypes.RoleRecord) *jwt.UserClaims {
+		t.Helper()
+		_, public, err := nm.GenerateUserKeyPair()
+		if err != nil {
+			t.Fatalf("GenerateUserKeyPair: %v", err)
+		}
+		user.PublicKey = public
+		token, err := g.GenerateUserJWT(user, account, role)
+		if err != nil {
+			t.Fatalf("GenerateUserJWT: %v", err)
+		}
+		claims, err := jwt.DecodeUserClaims(token)
+		if err != nil {
+			t.Fatalf("DecodeUserClaims: %v", err)
+		}
+		return claims
+	}
+
+	t.Run("empty role", func(t *testing.T) {
+		c := mint(&pbtypes.NatsUserRecord{NatsUsername: "bob"}, &pbtypes.RoleRecord{
+			Name:                 "empty_role",
+			PublishPermissions:   json.RawMessage(`[]`),
+			SubscribePermissions: json.RawMessage(`[]`),
+		})
+		if len(c.Permissions.Pub.Allow) != 0 || !c.Permissions.Pub.Deny.Contains(">") {
+			t.Errorf("Pub = %+v, want no allow and deny >", c.Permissions.Pub)
+		}
+		if len(c.Permissions.Sub.Allow) != 0 || !c.Permissions.Sub.Deny.Contains(">") {
+			t.Errorf("Sub = %+v, want no allow and deny >", c.Permissions.Sub)
+		}
 	})
 
-	account := newTestAccount(t, nm)
-	_, userPublic, err := nm.GenerateUserKeyPair()
-	if err != nil {
-		t.Fatalf("GenerateUserKeyPair: %v", err)
-	}
+	t.Run("subscribe-only role", func(t *testing.T) {
+		c := mint(&pbtypes.NatsUserRecord{NatsUsername: "carol"}, &pbtypes.RoleRecord{
+			Name:                 "sub_only",
+			SubscribePermissions: json.RawMessage(`["sensors.>"]`),
+		})
+		if !c.Permissions.Pub.Deny.Contains(">") {
+			t.Errorf("Pub.Deny = %v, want >", c.Permissions.Pub.Deny)
+		}
+		if !c.Permissions.Sub.Allow.Contains("sensors.>") || len(c.Permissions.Sub.Deny) != 0 {
+			t.Errorf("Sub = %+v, want allow sensors.> and no deny", c.Permissions.Sub)
+		}
+	})
 
-	user := &pbtypes.NatsUserRecord{NatsUsername: "bob", PublicKey: userPublic}
-	role := &pbtypes.RoleRecord{Name: "empty_role"}
+	t.Run("per-user permissions fill an empty role", func(t *testing.T) {
+		c := mint(&pbtypes.NatsUserRecord{
+			NatsUsername:         "dave",
+			PublishPermissions:   json.RawMessage(`["dave.>"]`),
+			SubscribePermissions: json.RawMessage(`["dave.>"]`),
+		}, &pbtypes.RoleRecord{Name: "empty_role"})
+		if len(c.Permissions.Pub.Deny) != 0 || len(c.Permissions.Sub.Deny) != 0 {
+			t.Errorf("Pub.Deny = %v, Sub.Deny = %v, want none", c.Permissions.Pub.Deny, c.Permissions.Sub.Deny)
+		}
+	})
 
-	token, err := g.GenerateUserJWT(user, account, role)
-	if err != nil {
-		t.Fatalf("GenerateUserJWT: %v", err)
-	}
-	claims, err := jwt.DecodeUserClaims(token)
-	if err != nil {
-		t.Fatalf("DecodeUserClaims: %v", err)
-	}
-
-	if !claims.Permissions.Pub.Allow.Contains("default.pub.>") {
-		t.Errorf("Pub.Allow = %v, want defaults applied", claims.Permissions.Pub.Allow)
-	}
-	if !claims.Permissions.Sub.Allow.Contains("default.sub.>") {
-		t.Errorf("Sub.Allow = %v, want defaults applied", claims.Permissions.Sub.Allow)
-	}
+	// The system user keeps full access with an empty role: it is pb-nats' own
+	// connection, and must still reach $SYS to publish claims.
+	t.Run("system user", func(t *testing.T) {
+		g.SetSystemAccountID(account.ID)
+		defer g.SetSystemAccountID("")
+		c := mint(&pbtypes.NatsUserRecord{NatsUsername: "sys"}, &pbtypes.RoleRecord{Name: "system_admin"})
+		for _, perms := range []jwt.Permission{c.Permissions.Pub, c.Permissions.Sub} {
+			if !perms.Allow.Contains("$SYS.>") || !perms.Allow.Contains(">") || len(perms.Deny) != 0 {
+				t.Errorf("system user perms = %+v, want allow $SYS.> and > with no deny", perms)
+			}
+		}
+	})
 }
 
 func TestGenerateAccountJWT(t *testing.T) {

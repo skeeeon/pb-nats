@@ -59,12 +59,6 @@ const (
 	DefaultInboxSubscribe = pbtypes.DefaultInboxSubscribe
 )
 
-// Re-export variables for external use
-var (
-	DefaultPublishPermissions   = pbtypes.DefaultPublishPermissions
-	DefaultSubscribePermissions = pbtypes.DefaultSubscribePermissions
-)
-
 // Setup initializes NATS JWT synchronization for a PocketBase instance.
 func Setup(app *pocketbase.PocketBase, options Options) error {
 	options = applyDefaultOptions(options)
@@ -678,7 +672,7 @@ func GetDefaultCollectionNames() (user, role, account string) {
 }
 
 // Version information
-const Version = "1.3.0"
+const Version = "0.3.0"
 
 // GetVersion returns the library version
 func GetVersion() string {

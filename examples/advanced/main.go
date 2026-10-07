@@ -66,16 +66,6 @@ func main() {
 	natsOptions.FailedRecordCleanupInterval = 2 * time.Hour    // More frequent cleanup
 	natsOptions.FailedRecordRetentionTime = 7 * 24 * time.Hour // Keep for 7 days
 
-	// Custom default permissions for production security
-	// Note: No scoping needed - accounts provide isolation
-	natsOptions.DefaultPublishPermissions = []string{"events.>"} // More restrictive than full access
-	natsOptions.DefaultSubscribePermissions = []string{
-		"events.>",               // Account events
-		"notifications.>",        // Account notifications
-		"_INBOX.>",               // Standard inbox
-		"global.announcements.>", // Company-wide announcements (if using imports/exports)
-	}
-
 	// Custom event filtering for production
 	natsOptions.EventFilter = func(collectionName, eventType string) bool {
 		// Skip processing user deletions (handle manually)

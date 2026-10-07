@@ -448,10 +448,6 @@ type Options struct {
 	FailedRecordCleanupInterval time.Duration
 	FailedRecordRetentionTime   time.Duration
 
-	// Default permissions applied when role permissions are empty
-	DefaultPublishPermissions   []string
-	DefaultSubscribePermissions []string
-
 	// Event filtering (optional custom logic)
 	EventFilter func(collectionName, eventType string) bool
 
@@ -500,10 +496,6 @@ const (
 const (
 	DefaultInboxSubscribe = "_INBOX.>"
 )
-
-// Default permission arrays applied when role permissions are empty.
-var DefaultPublishPermissions = []string{">"}
-var DefaultSubscribePermissions = []string{">", "_INBOX.>"}
 
 // System constants
 const (
