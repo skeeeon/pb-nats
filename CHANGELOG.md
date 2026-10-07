@@ -45,7 +45,11 @@ pb-nats now adds any missing role field at startup, and leaves existing fields a
 
 ### Upgrade notes
 
-**1. Before upgrading, find the users this affects.** A user is affected when the role and the user *together* have no subjects in a direction. A per-user list fills an empty role. Run this against `pb_data/data.db` (SQLite; adjust the table names if you changed the collection names):
+**1. Upgrade.** Starting the new version changes nothing right away. It does not modify any role or user, and it does not reissue any JWT, so every user keeps the credentials they have. A user gets a JWT under the new rules on the next event that reissues it: a role edit, a user edit, `regenerate`, `revoke`, or reactivation. You can do the steps below before or after upgrading. Do them before the next round of edits.
+
+**2. Find the roles this affects.** A role is affected when its `publish_permissions` or `subscribe_permissions` is empty. Its users lose that direction, except a user whose own list for that direction is not empty, because a per-user list fills an empty role. The usual way to check is to open `nats_roles` in the PocketBase admin UI and look for blank permission lists. Most deployments have only a few roles.
+
+If you have too many roles to scan by eye, this query lists the affected active users. Run it against a copy of `pb_data/data.db` rather than the live file. It is SQLite; adjust the table names if you renamed the collections.
 
 ```sql
 -- Active users whose next JWT will deny all publishing and/or all subscribing.
@@ -68,23 +72,12 @@ WHERE u.active = 1
   AND (pub.n = 0 OR sub.n = 0);
 ```
 
-To list the roles instead, for example to check `is_default` roles that have no users yet:
-
-```sql
-SELECT id, name, is_default, publish_permissions, subscribe_permissions
-FROM nats_roles
-WHERE COALESCE(json_array_length(NULLIF(publish_permissions, '')), 0) = 0
-   OR COALESCE(json_array_length(NULLIF(subscribe_permissions, '')), 0) = 0;
-```
-
-**2. Decide what each affected role should grant, and write it into the role.**
+**3. Decide what each affected role should grant, and write it into the role.**
 
 - If the role really needed full access, set `publish_permissions: [">"]` and `subscribe_permissions: [">", "_INBOX.>"]`. Behaviour is then unchanged, and the grant is visible on the role.
 - Otherwise, list the subjects the role needs, or leave the list empty to grant nothing.
 
-Saving a role reissues the JWTs of its active users.
-
-**3. Upgrade.** Nothing is reissued at startup. A user gets a JWT under the new rules on the next event that reissues it: a role edit, a user edit, `regenerate`, `revoke`, or reactivation.
+Saving a role reissues the JWTs of its active users. On the new version, those JWTs follow the new rules.
 
 **4. Revoke where the old grant must stop now.** A JWT minted before the upgrade still carries `>`. NATS keeps accepting it until it expires or its key is revoked, and with `DefaultJWTExpiry: 0` it never expires. A reissue does **not** invalidate it, because `regenerate` keeps the same key pair. For a user who should not have had full access, set `{"revoke": true}`. This rotates the key pair, revokes the old key on the account, and issues new credentials, which must then be redistributed to the client.
 
