@@ -245,12 +245,14 @@ Each account is an isolation boundary in NATS. Users within an account cannot se
 | `add_signing_key` | Bool | | Trigger: append new signing key |
 | `remove_signing_key` | Text | | Trigger: remove key by public key string |
 | `rotate_keys` | Bool | | Trigger: emergency rotation (purge all, generate new) |
-| `max_connections` | Number | | Max concurrent connections (-1=unlimited, 0=disabled) |
-| `max_subscriptions` | Number | | Max subscriptions (-1=unlimited, 0=disabled) |
-| `max_data` | Number | | Max bytes in-flight (-1=unlimited, 0=disabled) |
-| `max_payload` | Number | | Max message size (-1=unlimited, 0=disabled) |
-| `max_jetstream_disk_storage` | Number | | JetStream disk limit (-1=unlimited, 0=disabled) |
-| `max_jetstream_memory_storage` | Number | | JetStream memory limit (-1=unlimited, 0=disabled) |
+| `max_connections` | Number | | Max concurrent connections in the account (-1=unlimited, 0=no client can connect) |
+| `max_subscriptions` | Number | | Max subscriptions per connection (-1=unlimited, 0=every client disconnected at connect) |
+| `max_data` | Number | | Not enforced by nats-server (0 and -1 behave the same) |
+| `max_payload` | Number | | Max message size per connection (-1=unlimited, 0=first non-empty publish disconnects) |
+| `max_jetstream_disk_storage` | Number | | JetStream disk limit in bytes (-1=unlimited, 0=none; both JetStream limits 0=JetStream disabled) |
+| `max_jetstream_memory_storage` | Number | | JetStream memory limit in bytes (-1=unlimited, 0=none; both JetStream limits 0=JetStream disabled) |
+
+The limit fields have no default. An account saved without them stores `0`, so no client can connect to it. See [Limit Values](#limit-values).
 
 ### Account Exports (`nats_account_exports`)
 
@@ -303,9 +305,11 @@ Permission templates assigned to users. Defines allowed/denied subjects and per-
 | `allow_response` | Bool | Enable request-reply response permissions |
 | `allow_response_max` | Number | Max responses per request (-1=unlimited, 0=default/1) |
 | `allow_response_ttl` | Number | Response TTL in seconds (0=no limit) |
-| `max_subscriptions` | Number | Per-user subscription limit |
-| `max_data` | Number | Per-user data limit |
-| `max_payload` | Number | Per-user message size limit |
+| `max_subscriptions` | Number | Max subscriptions per connection (-1=unlimited, 0=disconnected at connect) |
+| `max_data` | Number | Not enforced by nats-server (0 and -1 behave the same) |
+| `max_payload` | Number | Max message size (-1=unlimited, 0=first non-empty publish disconnects) |
+
+The limit fields have no default. A role saved without them stores `0`, and its users are disconnected as soon as they connect. See [Limit Values](#limit-values).
 
 ### Users (`nats_users`)
 
@@ -579,7 +583,10 @@ Permissions follow NATS semantics: deny takes precedence over allow.
   "publish_permissions": ["sensors.>"],
   "subscribe_permissions": ["sensors.>", "alerts.>"],
   "publish_deny_permissions": ["sensors.internal.>"],
-  "subscribe_deny_permissions": ["alerts.admin.>"]
+  "subscribe_deny_permissions": ["alerts.admin.>"],
+  "max_subscriptions": -1,
+  "max_data": -1,
+  "max_payload": -1
 }
 ```
 
@@ -627,15 +634,16 @@ For request-reply patterns, configure on the role:
 
 ## Resource Limits
 
-### Account-Level (Shared)
+### Account-Level
 
-Set on the account record. Controls total resources across all users in the account:
-- `max_connections`, `max_subscriptions`, `max_data`, `max_payload`
-- `max_jetstream_disk_storage`, `max_jetstream_memory_storage`
+Set on the account record:
+- `max_connections`, `max_jetstream_disk_storage` and `max_jetstream_memory_storage` are totals, shared by all users in the account.
+- `max_subscriptions` and `max_payload` are not totals. nats-server applies them to each connection in the account. A connection gets the lower of the account value and its role's value, and `-1` on one side does not lift a limit set on the other.
+- `max_data` is not enforced (see below).
 
-### User-Level (Per-User)
+### User-Level
 
-Set on the role record. Controls individual user resource usage:
+Set on the role record and signed into each user's JWT. nats-server applies them to each connection the user opens:
 - `max_subscriptions`, `max_data`, `max_payload`
 
 ### Limit Values
@@ -643,10 +651,25 @@ Set on the role record. Controls individual user resource usage:
 | Value | Meaning |
 |-------|---------|
 | `-1` | Unlimited |
-| `0` | **Disabled** (blocks access entirely) |
+| `0` | A limit of zero, not "off". For most fields this makes the connection unusable (see below). |
 | positive | Specific limit (bytes, count, etc.) |
 
-Setting a limit to `0` completely disables access for that resource.
+What `0` does in each field, checked against nats-server v2.15:
+
+| Field | Set on | Effect of `0` |
+|-------|--------|---------------|
+| `max_connections` | account | No client can connect. |
+| `max_subscriptions` | role | At CONNECT the server sends `-ERR 'maximum subscriptions exceeded'` and closes the connection, before the client subscribes to anything. So the user cannot publish either. |
+| `max_subscriptions` | account | The same, for every client in the account. |
+| `max_payload` | role or account | The first publish with a non-empty payload closes the connection. Publishes with an empty payload pass. |
+| `max_data` | role or account | None. nats-server does not read this field from any JWT, so `0` and `-1` behave the same. |
+| `max_jetstream_disk_storage`, `max_jetstream_memory_storage` | account | A zero-byte limit for that storage type. With both at `0`, JetStream is disabled for the account. This is the one case where `0` is a real "disabled" setting. |
+
+`max_subscriptions: 0` does not make a publish-only user. To make one, leave `subscribe_permissions` empty (see [Empty Means Nothing](#empty-means-nothing)).
+
+**Set every limit explicitly.** PocketBase number fields have no default, so an account or role saved without these fields stores `0`, and pb-nats signs that `0` as written. Write `-1` for each limit you do not want to restrict. The system account and the `system_admin` role that pb-nats creates already do this.
+
+`nats-server.conf` works differently. There, `0` means "not set", and the server uses its default: unlimited for `max_subscriptions`, 1 MB for `max_payload`, 64K for `max_connections`. In a JWT, `0` means zero.
 
 ## Configuration
 
@@ -748,7 +771,7 @@ if pbnats.IsPermanentError(err) {
 
 **Signing key issues**: After `rotate_keys`, all user JWTs are invalid — regenerate explicitly. After `remove_signing_key`, only JWTs signed by that key are invalidated.
 
-**Resource limits**: `-1` = unlimited, `0` = **disabled** (blocks access), positive = specific limit.
+**Resource limits**: `-1` = unlimited, positive = specific limit. `0` is a limit of zero, not "off": it refuses every connection (`max_connections`), disconnects at CONNECT (`max_subscriptions`), or disconnects on the first non-empty publish (`max_payload`). `max_data` is not enforced. Unset limit fields store `0`, so a client that is disconnected right after connecting usually has an unset limit on its role or account. See [Limit Values](#limit-values).
 
 **Encryption**: If you enable encryption on an existing deployment, data encrypts on next write. Changing the key without re-encryption breaks reads of previously encrypted data.
 

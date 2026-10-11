@@ -159,7 +159,8 @@ func (cm *Manager) createAccountsCollection() error {
 	collection.Fields.Add(&core.BoolField{Name: "add_signing_key"})
 	collection.Fields.Add(&core.TextField{Name: "remove_signing_key", Max: 200})
 
-	// Account-level limits (-1 = unlimited, 0 = disabled, positive = limit)
+	// Account-level limits (-1 = unlimited, 0 = a limit of zero, positive = limit).
+	// No default: a record saved without them stores 0, which admits no client.
 	collection.Fields.Add(&core.NumberField{Name: "max_connections", OnlyInt: true, Min: types.Pointer(-1.0)})
 	collection.Fields.Add(&core.NumberField{Name: "max_subscriptions", OnlyInt: true, Min: types.Pointer(-1.0)})
 	collection.Fields.Add(&core.NumberField{Name: "max_data", OnlyInt: true, Min: types.Pointer(-1.0)})
@@ -230,7 +231,9 @@ func roleFields() []core.Field {
 		// allow_response_ttl: Response TTL in seconds (0 = no limit/default)
 		&core.NumberField{Name: "allow_response_ttl", OnlyInt: true, Min: types.Pointer(0.0)},
 
-		// Per-user limits (-1 = unlimited, 0 = disabled, positive = limit)
+		// Per-user limits (-1 = unlimited, 0 = a limit of zero, positive = limit).
+		// No default: a role saved without them stores 0, which disconnects its
+		// users at CONNECT.
 		&core.NumberField{Name: "max_subscriptions", OnlyInt: true, Min: types.Pointer(-1.0)},
 		&core.NumberField{Name: "max_data", OnlyInt: true, Min: types.Pointer(-1.0)},
 		&core.NumberField{Name: "max_payload", OnlyInt: true, Min: types.Pointer(-1.0)},

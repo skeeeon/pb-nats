@@ -173,7 +173,8 @@ func (g *Generator) GenerateCredsFile(user *pbtypes.NatsUserRecord) (string, err
 }
 
 // limitValue maps stored limit values to NATS JWT limit semantics:
-// negative = unlimited (jwt.NoLimit), 0 = disabled, positive = specific limit.
+// negative = unlimited (jwt.NoLimit); 0 and positive values pass through as
+// written. A JWT 0 is a limit of zero, not "off": see the README's Limit Values.
 func limitValue(v int64) int64 {
 	if v < 0 {
 		return jwt.NoLimit

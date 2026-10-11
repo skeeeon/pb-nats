@@ -44,17 +44,23 @@ type SigningKeyPrivate struct {
 // - remove_signing_key: Removes a specific key by public key
 // - rotate_keys: Emergency rotation — purges all keys, generates single new one
 //
-// ACCOUNT LIMITS (FIXED - CORRECT NATS SEMANTICS):
-// Account-level limits control resources across the entire account:
-// - Connection limits: Total concurrent connections to the account
-// - Data limits: Total bytes in-flight across all users in account
-// - Subscription limits: Total subscriptions across all users in account
-// - JetStream limits: Storage and stream limits for the account
+// ACCOUNT LIMITS:
+// - max_connections: Total concurrent connections to the account
+// - max_subscriptions, max_payload: Per connection, not account totals
+// - max_data: Not enforced. nats-server never reads it from a JWT
+// - JetStream limits: Storage for the account. Both at 0 disables JetStream
 //
-// LIMIT VALUES (CRITICAL - CORRECT NATS SEMANTICS):
-// - (-1) = Unlimited (no restrictions)
-// - (0) = Disabled/blocked (no access allowed)
+// nats-server folds max_subscriptions and max_payload into each connection in
+// the account, taking the lower of the account value and the role's.
+//
+// LIMIT VALUES (in a JWT, 0 is a limit of zero, not "off"):
+// - (-1) = Unlimited
+// - (0) = Zero. See the README's Limit Values for what each field then does
 // - (positive) = Specific limit value
+//
+// At 0, max_connections admits no client, max_subscriptions disconnects every
+// client at CONNECT, and max_payload disconnects on the first non-empty publish.
+// The fields have no default, so a record saved without them stores 0.
 type AccountRecord struct {
 	ID                 string              `json:"id"`
 	Name               string              `json:"name"`
@@ -75,7 +81,7 @@ type AccountRecord struct {
 	// older, already-distributed credentials stay revoked forever.
 	Revocations json.RawMessage `json:"revocations"`
 
-	// Account-level limits (NATS semantics: -1 = unlimited, 0 = disabled, positive = limit)
+	// Account-level limits (-1 = unlimited, 0 = a limit of zero, positive = limit)
 	MaxConnections            int64 `json:"max_connections"`
 	MaxSubscriptions          int64 `json:"max_subscriptions"`
 	MaxData                   int64 `json:"max_data"`
@@ -149,16 +155,20 @@ type NatsUserRecord struct {
 // 2. If allowed, check if subject matches any Deny pattern
 // 3. Deny takes precedence over Allow for matching subjects
 //
-// USER LIMIT ENFORCEMENT (CORRECT NATS SEMANTICS):
-// Role limits are applied per-user and control individual user resource usage:
-// - max_subscriptions: Concurrent subscriptions per user
-// - max_data: Total bytes user can have in-flight
+// USER LIMIT ENFORCEMENT:
+// Role limits are signed into each user's JWT and applied to each connection:
+// - max_subscriptions: Concurrent subscriptions per connection
+// - max_data: Not enforced. nats-server never reads it from a JWT
 // - max_payload: Maximum size of individual messages
 //
-// LIMIT VALUES (CRITICAL - CORRECT NATS SEMANTICS):
-// - (-1) = Unlimited (no restrictions)
-// - (0) = Disabled/blocked (no access allowed)
+// LIMIT VALUES (in a JWT, 0 is a limit of zero, not "off"):
+// - (-1) = Unlimited
+// - (0) = Zero. See the README's Limit Values for what each field then does
 // - (positive) = Specific limit value
+//
+// At 0, max_subscriptions disconnects the user at CONNECT, before it can
+// subscribe or publish, and max_payload disconnects on the first non-empty
+// publish. The fields have no default, so a record saved without them stores 0.
 //
 // CROSS-ACCOUNT USAGE:
 // The same role can be used by users in different accounts. The permissions
@@ -185,7 +195,7 @@ type RoleRecord struct {
 	// Response TTL in seconds (0 = no limit/default)
 	AllowResponseTTL int `json:"allow_response_ttl"`
 
-	// Per-user limits (NATS semantics: -1 = unlimited, 0 = disabled, positive = limit)
+	// Per-user limits (-1 = unlimited, 0 = a limit of zero, positive = limit)
 	MaxSubscriptions int64 `json:"max_subscriptions"`
 	MaxData          int64 `json:"max_data"`
 	MaxPayload       int64 `json:"max_payload"`
