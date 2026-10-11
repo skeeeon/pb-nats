@@ -11,7 +11,7 @@ A Go library for extending [PocketBase](https://pocketbase.io/) for managing [NA
 - **Persistent Connections**: Single NATS connection with automatic failover to backup servers and exponential backoff
 - **Multiple Signing Keys**: Graceful and emergency key rotation per account, reissuing affected users automatically
 - **Two-Tier Permissions**: Role baseline + optional per-user overrides (union merge), with allow/deny semantics
-- **Two-Tier Limits**: Account-level (shared) and role-level (per-user) resource limits
+- **Two-Tier Limits**: Account-level limits (connection and JetStream totals, per-connection caps) and role-level per-connection limits, with the lower cap winning
 - **Queue-Based Publishing**: Reliable JWT publishing with retry, deduplication, and automatic cleanup
 - **Startup Reconciliation**: Republishes every active account, so a lost or rebuilt NATS resolver recovers on its own
 - **Reversible Suspend and Credential Rotation**: `active` withdraws an account or user from NATS; `revoke` rotates leaked user credentials
@@ -188,7 +188,7 @@ Deletions are handled from the other direction. A queued deletion that exhausts 
 - **Account isolation** for multi-tenancy (not subject scoping)
 - **Graceful bootstrap**: operator JWT generated before NATS is running
 - **Two-tier permissions**: role provides baseline, per-user permissions merged via union
-- **Two-tier limits**: account-level and role-based per-user limits
+- **Two-tier limits**: account-level and role-based limits; a connection gets the lower of the two (see [Resource Limits](#resource-limits))
 - **Cross-account imports/exports**: managed as separate collections, embedded in account JWTs
 - **Multiple signing keys**: most recent key signs new JWTs, older keys remain valid
 - **Locked collections by default**: consuming app sets API rules appropriate to its deployment model
