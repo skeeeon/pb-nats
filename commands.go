@@ -137,12 +137,24 @@ func generateOperatorConf(operator *pbtypes.SystemOperatorRecord, sysAccount *sy
 	return sb.String()
 }
 
+// natsConfParams is everything nats.conf is generated from. Named fields rather
+// than positional arguments because three of them are port numbers, and a
+// swapped pair would compile and quietly listen on the wrong port.
+type natsConfParams struct {
+	ServerName        string
+	Port              int
+	WebsocketPort     int
+	LeafnodePort      int // 0 writes no leafnodes block
+	JetstreamStoreDir string
+	JetstreamDomain   string // "" writes no domain
+}
+
 // generateNATSConf generates the nats.conf content.
 //
 // outputDir is the directory the file will be written to, used to make the
 // resolver and JetStream directories absolute. Pass "" to keep them relative
 // (stdout preview). See resolveIn for why this matters.
-func generateNATSConf(serverName string, port int, jetstreamStoreDir string, websocketPort int, outputDir string) string {
+func generateNATSConf(p natsConfParams, outputDir string) string {
 	var sb strings.Builder
 
 	sb.WriteString("# NATS Server Configuration\n")
@@ -152,8 +164,8 @@ func generateNATSConf(serverName string, port int, jetstreamStoreDir string, web
 	sb.WriteString("# Customize as needed for your deployment.\n\n")
 
 	sb.WriteString("# Server identification\n")
-	sb.WriteString(fmt.Sprintf("server_name: %s\n", serverName))
-	sb.WriteString(fmt.Sprintf("port: %d\n\n", port))
+	sb.WriteString(fmt.Sprintf("server_name: %s\n", p.ServerName))
+	sb.WriteString(fmt.Sprintf("port: %d\n\n", p.Port))
 
 	sb.WriteString("# Include operator configuration\n")
 	sb.WriteString("include operator.conf\n\n")
@@ -174,7 +186,13 @@ func generateNATSConf(serverName string, port int, jetstreamStoreDir string, web
 
 	sb.WriteString("# JetStream Configuration\n")
 	sb.WriteString("jetstream: {\n")
-	sb.WriteString(fmt.Sprintf("  store_dir: '%s'\n", resolveIn(outputDir, jetstreamStoreDir)))
+	sb.WriteString(fmt.Sprintf("  store_dir: '%s'\n", resolveIn(outputDir, p.JetstreamStoreDir)))
+	if p.JetstreamDomain != "" {
+		sb.WriteString("  # This server's JetStream domain. A leaf node with a domain of its own\n")
+		sb.WriteString("  # reaches this server's JetStream across the leaf link as\n")
+		sb.WriteString("  # $JS.<domain>.API, so it has to know this name.\n")
+		sb.WriteString(fmt.Sprintf("  domain: %s\n", p.JetstreamDomain))
+	}
 	sb.WriteString("}\n\n")
 
 	sb.WriteString("# Optional: HTTP monitoring port\n")
@@ -194,13 +212,30 @@ func generateNATSConf(serverName string, port int, jetstreamStoreDir string, web
 	sb.WriteString("# no_tls means the listener itself terminates plaintext ws://. Put it behind\n")
 	sb.WriteString("# a TLS-terminating proxy, or swap in the tls block below for wss://.\n")
 	sb.WriteString("websocket {\n")
-	sb.WriteString(fmt.Sprintf("  port: %d\n", websocketPort))
+	sb.WriteString(fmt.Sprintf("  port: %d\n", p.WebsocketPort))
 	sb.WriteString("  no_tls: true\n")
 	sb.WriteString("  # tls {\n")
 	sb.WriteString("  #   cert_file: \"/path/to/cert.pem\"\n")
 	sb.WriteString("  #   key_file: \"/path/to/key.pem\"\n")
 	sb.WriteString("  # }\n")
 	sb.WriteString("}\n")
+
+	if p.LeafnodePort != 0 {
+		sb.WriteString("\n")
+		sb.WriteString("# Leaf node listener\n")
+		sb.WriteString("#\n")
+		sb.WriteString("# Where other NATS servers, such as edge sites, connect as leaf nodes. A\n")
+		sb.WriteString("# leaf signs the server's nonce like any client, so its seed never crosses\n")
+		sb.WriteString("# the wire. The messages do, in plaintext: add the tls block for a leaf\n")
+		sb.WriteString("# that connects over the internet.\n")
+		sb.WriteString("leafnodes {\n")
+		sb.WriteString(fmt.Sprintf("  port: %d\n", p.LeafnodePort))
+		sb.WriteString("  # tls {\n")
+		sb.WriteString("  #   cert_file: \"/path/to/cert.pem\"\n")
+		sb.WriteString("  #   key_file: \"/path/to/key.pem\"\n")
+		sb.WriteString("  # }\n")
+		sb.WriteString("}\n")
+	}
 
 	return sb.String()
 }
@@ -253,7 +288,7 @@ func generateReadme(operator *pbtypes.SystemOperatorRecord, outputDir string) st
 }
 
 // exportAllFiles writes all configuration files to the output directory.
-func exportAllFiles(outputDir string, operator *pbtypes.SystemOperatorRecord, sysAccount *systemAccountInfo, serverName string, port int, jetstreamStoreDir string, websocketPort int) error {
+func exportAllFiles(outputDir string, operator *pbtypes.SystemOperatorRecord, sysAccount *systemAccountInfo, params natsConfParams) error {
 	// Resolve before writing anything: every path baked into the generated
 	// config is relative to this directory, and the whole point is that they
 	// come out absolute so the config works from any working directory.
@@ -284,7 +319,7 @@ func exportAllFiles(outputDir string, operator *pbtypes.SystemOperatorRecord, sy
 
 	// Write nats.conf
 	natsConfPath := filepath.Join(outputDir, "nats.conf")
-	natsConf := generateNATSConf(serverName, port, jetstreamStoreDir, websocketPort, outputDir)
+	natsConf := generateNATSConf(params, outputDir)
 	if err := os.WriteFile(natsConfPath, []byte(natsConf), 0644); err != nil {
 		return fmt.Errorf("failed to write nats.conf: %w", err)
 	}
@@ -334,6 +369,13 @@ type CommandOptions struct {
 	DefaultWebsocketPort  int
 	DefaultJetstreamStore string
 	DefaultOutputDir      string
+	// DefaultLeafnodePort is the port other NATS servers connect to as leaf
+	// nodes. 0, the default, writes no leafnodes block.
+	DefaultLeafnodePort int
+	// DefaultJetstreamDomain is this server's JetStream domain. "", the
+	// default, writes none. A leaf node with a domain of its own needs this
+	// name to reach this server's JetStream.
+	DefaultJetstreamDomain string
 	// AccountCollectionName must match Options.AccountCollectionName when a
 	// custom account collection name is used.
 	AccountCollectionName string
@@ -360,10 +402,7 @@ func createExportCommandWithOptions(app *pocketbase.PocketBase, opts CommandOpti
 	var operatorJWTOnly bool
 	var configOnly bool
 	var operatorConfOnly bool
-	var serverName string
-	var natsPort int
-	var websocketPort int
-	var jetstreamStoreDir string
+	var params natsConfParams
 
 	cmd := &cobra.Command{
 		Use:   "export",
@@ -439,12 +478,11 @@ Examples:
 			}
 
 			if configOnly {
-				conf := generateNATSConf(serverName, natsPort, jetstreamStoreDir, websocketPort, "")
-				fmt.Println(conf)
+				fmt.Println(generateNATSConf(params, ""))
 				return nil
 			}
 
-			return exportAllFiles(outputDir, operator, sysAccount, serverName, natsPort, jetstreamStoreDir, websocketPort)
+			return exportAllFiles(outputDir, operator, sysAccount, params)
 		},
 	}
 
@@ -457,10 +495,12 @@ Examples:
 	// clearer and collision-resistant.
 	cmd.Flags().BoolVar(&configOnly, "nats-conf", false, "Output only the nats.conf to stdout")
 	cmd.Flags().BoolVar(&operatorConfOnly, "operator-conf", false, "Output only the operator.conf to stdout")
-	cmd.Flags().StringVar(&serverName, "server-name", opts.DefaultServerName, "NATS server name")
-	cmd.Flags().IntVar(&natsPort, "port", opts.DefaultPort, "NATS server port")
-	cmd.Flags().IntVar(&websocketPort, "websocket-port", opts.DefaultWebsocketPort, "NATS WebSocket listener port (browsers require it)")
-	cmd.Flags().StringVar(&jetstreamStoreDir, "jetstream-store", opts.DefaultJetstreamStore, "JetStream storage directory")
+	cmd.Flags().StringVar(&params.ServerName, "server-name", opts.DefaultServerName, "NATS server name")
+	cmd.Flags().IntVar(&params.Port, "port", opts.DefaultPort, "NATS server port")
+	cmd.Flags().IntVar(&params.WebsocketPort, "websocket-port", opts.DefaultWebsocketPort, "NATS WebSocket listener port (browsers require it)")
+	cmd.Flags().IntVar(&params.LeafnodePort, "leafnode-port", opts.DefaultLeafnodePort, "NATS leaf node listener port for edge servers (0 = none)")
+	cmd.Flags().StringVar(&params.JetstreamStoreDir, "jetstream-store", opts.DefaultJetstreamStore, "JetStream storage directory")
+	cmd.Flags().StringVar(&params.JetstreamDomain, "jetstream-domain", opts.DefaultJetstreamDomain, "This server's JetStream domain, which leaf nodes address it by (empty = none)")
 
 	return cmd
 }

@@ -672,7 +672,7 @@ func GetDefaultCollectionNames() (user, role, account string) {
 }
 
 // Version information
-const Version = "0.3.0"
+const Version = "0.3.1"
 
 // GetVersion returns the library version
 func GetVersion() string {

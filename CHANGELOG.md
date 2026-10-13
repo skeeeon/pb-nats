@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.3.1
+
+### Added: a leaf node listener and a JetStream domain in `nats export`
+
+`nats export` has two new flags. Each has a matching `CommandOptions` field, so a host can set its own default:
+
+| Flag | `CommandOptions` field | Writes |
+|---|---|---|
+| `--leafnode-port` | `DefaultLeafnodePort` | `leafnodes { port: N }` |
+| `--jetstream-domain` | `DefaultJetstreamDomain` | `domain: NAME` inside `jetstream { }` |
+
+Both are off by default, so a host that sets neither gets the same `nats.conf` as before.
+
+A hub needs both before edge servers can join it as leaf nodes. Without the listener a leaf has nothing to connect to. Without the domain a leaf with its own JetStream domain cannot reach the hub's JetStream, because it addresses it as `$JS.<domain>.API`.
+
 ## v0.3.0
 
 ### Breaking: an empty permission list now grants nothing

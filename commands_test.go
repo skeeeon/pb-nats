@@ -1,10 +1,12 @@
 package pbnats
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/nats-io/nats-server/v2/server"
 	pbtypes "github.com/skeeeon/pb-nats/internal/types"
 )
 
@@ -91,7 +93,7 @@ func TestGeneratedConfigPathsAreAbsolute(t *testing.T) {
 		t.Error("operator.conf still uses a CWD-relative operator path")
 	}
 
-	natsConf := generateNATSConf("test-server", 4222, "./storage/jetstream", 9222, outputDir)
+	natsConf := generateNATSConf(natsConfParams{ServerName: "test-server", Port: 4222, WebsocketPort: 9222, JetstreamStoreDir: "./storage/jetstream"}, outputDir)
 	wantJWTDir := "dir: '" + filepath.ToSlash(filepath.Join(outputDir, "jwt")) + "'"
 	if !strings.Contains(natsConf, wantJWTDir) {
 		t.Errorf("nats.conf missing absolute resolver dir %q:\n%s", wantJWTDir, natsConf)
@@ -111,9 +113,57 @@ func TestPreviewConfigStaysRelative(t *testing.T) {
 	if got := generateOperatorConf(operator, sysAccount, ""); !strings.Contains(got, "operator: 'operator.jwt'") {
 		t.Errorf("preview operator.conf should keep a relative path:\n%s", got)
 	}
-	if got := generateNATSConf("test-server", 4222, "./storage/jetstream", 9222, ""); !strings.Contains(got, "dir: 'jwt'") {
+	if got := generateNATSConf(natsConfParams{ServerName: "test-server", Port: 4222, WebsocketPort: 9222, JetstreamStoreDir: "./storage/jetstream"}, ""); !strings.Contains(got, "dir: 'jwt'") {
 		t.Errorf("preview nats.conf should keep a relative resolver dir:\n%s", got)
 	}
+}
+
+// The leaf node listener and the JetStream domain are opt-in, and when set they
+// land where nats-server reads them. Checked by parsing the file with
+// nats-server's own config parser, not by matching text: a block that only
+// looked right would pass a string check and fail when the server starts.
+func TestNATSConfLeafnodesAndDomain(t *testing.T) {
+	parse := func(t *testing.T, p natsConfParams) *server.Options {
+		t.Helper()
+		dir := t.TempDir()
+		// nats.conf includes operator.conf. An empty one is enough to parse.
+		if err := os.WriteFile(filepath.Join(dir, "operator.conf"), nil, 0644); err != nil {
+			t.Fatal(err)
+		}
+		confPath := filepath.Join(dir, "nats.conf")
+		if err := os.WriteFile(confPath, []byte(generateNATSConf(p, dir)), 0644); err != nil {
+			t.Fatal(err)
+		}
+		opts, err := server.ProcessConfigFile(confPath)
+		if err != nil {
+			t.Fatalf("nats-server cannot parse the generated nats.conf: %v", err)
+		}
+		return opts
+	}
+	base := natsConfParams{ServerName: "hub", Port: 4222, WebsocketPort: 9222, JetstreamStoreDir: "js"}
+
+	t.Run("zero values write neither", func(t *testing.T) {
+		opts := parse(t, base)
+		if opts.LeafNode.Port != 0 {
+			t.Errorf("leafnode port = %d, want 0 (no leafnodes block)", opts.LeafNode.Port)
+		}
+		if opts.JetStreamDomain != "" {
+			t.Errorf("JetStream domain = %q, want none", opts.JetStreamDomain)
+		}
+	})
+
+	t.Run("set values are what the server reads", func(t *testing.T) {
+		p := base
+		p.LeafnodePort = 7422
+		p.JetstreamDomain = "hub"
+		opts := parse(t, p)
+		if opts.LeafNode.Port != 7422 {
+			t.Errorf("leafnode port = %d, want 7422", opts.LeafNode.Port)
+		}
+		if opts.JetStreamDomain != "hub" {
+			t.Errorf("JetStream domain = %q, want %q", opts.JetStreamDomain, "hub")
+		}
+	})
 }
 
 // The export command lives in someone else's binary, so its flag names share a

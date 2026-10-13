@@ -107,7 +107,17 @@ console that connects to the bus needs one.
   --server-name my-nats \
   --port 4222 \
   --jetstream-store /var/lib/nats/jetstream
+
+# A hub that edge servers join as leaf nodes
+./myapp nats export --output ./nats-config/ \
+  --leafnode-port 7422 \
+  --jetstream-domain hub
 ```
+
+`--leafnode-port` writes a `leafnodes` listener and `--jetstream-domain` writes
+`jetstream { domain }`. Both are off unless set. A leaf node with its own
+JetStream domain reaches the hub's JetStream as `$JS.<domain>.API`, so it needs
+the hub's domain too.
 
 ## Backup and Restore
 
@@ -728,10 +738,12 @@ options.EventFilter = func(collection, event string) bool {
 
 ```go
 pbnats.RegisterCommandsWithOptions(app, pbnats.CommandOptions{
-    DefaultServerName:     "my-nats-server",
-    DefaultPort:           4222,
-    DefaultJetstreamStore: "/var/lib/nats/jetstream",
-    DefaultOutputDir:      "./nats-config",
+    DefaultServerName:      "my-nats-server",
+    DefaultPort:            4222,
+    DefaultJetstreamStore:  "/var/lib/nats/jetstream",
+    DefaultOutputDir:       "./nats-config",
+    DefaultLeafnodePort:    7422,  // 0 = no leafnodes block
+    DefaultJetstreamDomain: "hub", // "" = no domain
 })
 ```
 
