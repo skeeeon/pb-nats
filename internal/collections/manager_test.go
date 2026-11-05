@@ -197,3 +197,54 @@ func TestEnsurePublishQueueFields_RelationToText(t *testing.T) {
 		t.Fatalf("ensurePublishQueueFields (second run): %v", err)
 	}
 }
+
+// An exports collection from before allowed_importers is the shape every upgraded
+// deployment has. createExportsCollection returns early on it, so the field arrives
+// only through ensureExportFields, and asserting the field exists is not enough:
+// the test is that a grant written afterwards reads back.
+func TestEnsureExportFields_AddsGrantFields(t *testing.T) {
+	app := newTestApp(t)
+
+	exports := core.NewBaseCollection(pbtypes.DefaultExportCollectionName)
+	exports.Fields.Add(&core.TextField{Name: "name", Required: true, Max: 100})
+	exports.Fields.Add(&core.TextField{Name: "subject", Required: true, Max: 500})
+	exports.Fields.Add(&core.BoolField{Name: "token_req"})
+	if err := app.Save(exports); err != nil {
+		t.Fatalf("save legacy exports collection: %v", err)
+	}
+
+	cm := NewManager(app, testOptions())
+	if err := cm.ensureExportFields(); err != nil {
+		t.Fatalf("ensureExportFields: %v", err)
+	}
+
+	col, err := app.FindCollectionByNameOrId(pbtypes.DefaultExportCollectionName)
+	if err != nil {
+		t.Fatalf("reload exports collection: %v", err)
+	}
+	rec := core.NewRecord(col)
+	rec.Set("name", "inventory-x")
+	rec.Set("subject", "inv.x.>")
+	rec.Set("token_req", true)
+	rec.Set("allowed_importers", []string{"AIMPORTER"})
+	rec.Set("revocations", map[string]int64{"AGONE": 42})
+	if err := app.Save(rec); err != nil {
+		t.Fatalf("save export: %v", err)
+	}
+	reloaded, err := app.FindRecordById(col.Id, rec.Id)
+	if err != nil {
+		t.Fatalf("reload export: %v", err)
+	}
+	model := pbtypes.RecordToExportModel(reloaded)
+	if len(model.AllowedImporters) != 1 || model.AllowedImporters[0] != "AIMPORTER" {
+		t.Errorf("AllowedImporters = %v after the migration, want [AIMPORTER]", model.AllowedImporters)
+	}
+	if model.Revocations["AGONE"] != 42 {
+		t.Errorf("Revocations = %v after the migration, want AGONE: 42", model.Revocations)
+	}
+
+	// Running it again changes nothing, as every boot does.
+	if err := cm.ensureExportFields(); err != nil {
+		t.Fatalf("second ensureExportFields: %v", err)
+	}
+}

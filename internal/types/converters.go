@@ -164,6 +164,35 @@ func RecordToExportModel(record *core.Record) *AccountExportRecord {
 		Description:          record.GetString("description"),
 		Created:              record.GetDateTime("created").Time(),
 		Updated:              record.GetDateTime("updated").Time(),
+		AllowedImporters:     ExportAllowedImporters(record),
+		Revocations:          ExportRevocations(record),
+	}
+}
+
+// ExportAllowedImporters reads an export record's allowed_importers. A JSON field
+// reads back as types.JSONRaw, never as a []string, so it is decoded from its
+// stored JSON rather than type-asserted.
+func ExportAllowedImporters(record *core.Record) []string {
+	var keys []string
+	unmarshalJSONField(record, "allowed_importers", &keys)
+	return keys
+}
+
+// ExportRevocations reads an export record's revocations, decoded from the stored
+// JSON for the same reason.
+func ExportRevocations(record *core.Record) map[string]int64 {
+	var revs map[string]int64
+	unmarshalJSONField(record, "revocations", &revs)
+	return revs
+}
+
+// unmarshalJSONField decodes a JSON field into target, leaving target at its zero
+// value when the field is absent, null or not the expected shape.
+func unmarshalJSONField(record *core.Record, field string, target any) {
+	var raw json.RawMessage
+	marshalJSONField(record, field, &raw)
+	if len(raw) > 0 {
+		_ = json.Unmarshal(raw, target)
 	}
 }
 

@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.3.3
+
+### Added: pb-nats signs activation tokens for exports it grants
+
+An export can now name the accounts that may import it, in a new JSON field `allowed_importers` (a list of account public keys). For a `token_req` export, pb-nats signs the activation token itself. It does this when it builds the JWT of a listed account that imports the export, so nobody signs or pastes a token by hand.
+
+- **The grant is on the export,** which is the NATS model: the exporting account decides who may import. An account that adds its own import of a private export that does not list it gets no token, and nats-server refuses the import.
+- **A token is signed only for an exporter in the same database,** and only when the import has no token of its own. A pasted token is left as it is, so an import from an account outside this operator works as before.
+- **The token is signed with the exporter's identity key,** not a signing key, so `rotate_keys` does not invalidate the tokens an account has granted. It is scoped to the export's subject and does not expire.
+- **Changing an export's list republishes every listed account that imports it,** so each one gains or loses its token.
+- **Removing a key revokes it on the export.** pb-nats writes the key and the time into a second new JSON field, `revocations`, and nats-server refuses that importer's earlier tokens. Republishing the importer is not enough on its own, because a leaf node keeps the importer JWT it preloaded. Putting a key back clears its entry.
+
+Both fields are added to existing exports collections on boot. A host that defines `nats_account_exports` in its own schema should add them there too.
+
+## v0.3.2
+
+### Changed: mimetype moves off a version its author retracted
+
+An indirect dependency bump and nothing else: `gabriel-vasile/mimetype` v1.4.15 to v1.4.16, in the library and the examples module. v1.4.15 was retracted by its author for spending quadratic time on specially crafted CDF files (GHSA-jjmc-jx7j-hp68). pb-nats inherits it through PocketBase and imports it nowhere, so nothing in its behaviour changes.
+
 ## v0.3.1
 
 ### Added: a leaf node listener and a JetStream domain in `nats export`

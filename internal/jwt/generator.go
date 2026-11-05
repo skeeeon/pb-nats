@@ -248,8 +248,39 @@ func (g *Generator) applyAccountExports(accountClaims *jwt.AccountClaims, export
 			e.Info.Description = export.Description
 		}
 
+		for importer, cutoff := range export.Revocations {
+			e.RevokeAt(importer, time.Unix(cutoff, 0))
+		}
+
 		accountClaims.Exports.Add(e)
 	}
+}
+
+// GenerateActivationToken signs the activation token that lets importerPublicKey
+// import a token_req export, with the exporting account's IDENTITY seed.
+//
+// Identity rather than a signing key, so rotate_keys -- which purges every signing
+// key -- does not invalidate every token the account has granted. The token is
+// scoped to the export's own subject: nats-server accepts any import whose subject
+// is contained in it, so one token serves every import a listed account makes of
+// that export. It carries no expiry; withdrawing it is a revocation on the export.
+func (g *Generator) GenerateActivationToken(exporterSeed, importerPublicKey, exportSubject, exportType string) (string, error) {
+	exporterKP, err := g.nkeyManager.KeyPairFromSeed(exporterSeed)
+	if err != nil {
+		return "", fmt.Errorf("failed to create exporter key pair: %w", err)
+	}
+	act := jwt.NewActivationClaims(importerPublicKey)
+	act.ImportSubject = jwt.Subject(exportSubject)
+	if exportType == "service" {
+		act.ImportType = jwt.Service
+	} else {
+		act.ImportType = jwt.Stream
+	}
+	token, err := act.Encode(exporterKP)
+	if err != nil {
+		return "", fmt.Errorf("failed to encode activation token: %w", err)
+	}
+	return token, nil
 }
 
 // applyAccountImports converts import records to NATS JWT imports and adds them to account claims.

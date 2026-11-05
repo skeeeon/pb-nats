@@ -74,6 +74,9 @@ func (cm *Manager) InitializeCollections() error {
 	if err := cm.createExportsCollection(); err != nil {
 		return fmt.Errorf("failed to create exports collection: %w", err)
 	}
+	if err := cm.ensureExportFields(); err != nil {
+		return fmt.Errorf("failed to ensure export fields: %w", err)
+	}
 	if err := cm.createImportsCollection(); err != nil {
 		return fmt.Errorf("failed to create imports collection: %w", err)
 	}
@@ -388,9 +391,46 @@ func (cm *Manager) createExportsCollection() error {
 	collection.Fields.Add(&core.BoolField{Name: "advertise"})
 	collection.Fields.Add(&core.BoolField{Name: "allow_trace"})
 	collection.Fields.Add(&core.TextField{Name: "description", Max: 500})
+	for _, f := range exportGrantFields() {
+		collection.Fields.Add(f)
+	}
 	collection.Fields.Add(&core.AutodateField{Name: "created", OnCreate: true})
 	collection.Fields.Add(&core.AutodateField{Name: "updated", OnCreate: true, OnUpdate: true})
 
+	return cm.app.Save(collection)
+}
+
+// exportGrantFields are the export fields behind activation tokens pb-nats signs
+// itself: who may import a token_req export, and the cutoffs for keys removed from
+// that list. Shared by createExportsCollection and ensureExportFields, so a fresh
+// install and an upgraded one end up with the same fields.
+func exportGrantFields() []core.Field {
+	return []core.Field{
+		&core.JSONField{Name: "allowed_importers", MaxSize: 50000},
+		&core.JSONField{Name: "revocations", MaxSize: 50000},
+	}
+}
+
+// ensureExportFields adds any exportGrantFields field missing from an existing
+// exports collection. createExportsCollection returns early once the collection
+// exists, and PocketBase discards writes to fields a collection does not declare,
+// so without this an upgraded deployment would accept allowed_importers and
+// silently sign nothing.
+func (cm *Manager) ensureExportFields() error {
+	collection, err := cm.app.FindCollectionByNameOrId(cm.options.ExportCollectionName)
+	if err != nil {
+		return nil // Collection doesn't exist yet; createExportsCollection will handle it
+	}
+	changed := false
+	for _, f := range exportGrantFields() {
+		if collection.Fields.GetByName(f.GetName()) == nil {
+			collection.Fields.Add(f)
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
 	return cm.app.Save(collection)
 }
 

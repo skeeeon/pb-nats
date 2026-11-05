@@ -350,6 +350,16 @@ type AccountExportRecord struct {
 	Description          string    `json:"description"`
 	Created              time.Time `json:"created"`
 	Updated              time.Time `json:"updated"`
+
+	// AllowedImporters lists the account public keys this export grants. For a
+	// token_req export, pb-nats signs the activation token itself when it builds
+	// the JWT of a listed account that imports it, so nobody has to paste one.
+	AllowedImporters []string `json:"allowed_importers"`
+	// Revocations maps an importer public key to a unix-second cutoff, written when
+	// a key leaves AllowedImporters. NATS refuses any activation token for that key
+	// issued at or before the cutoff, which reaches a copy of the importer's JWT
+	// that a republish does not (a leaf node's preloaded resolver).
+	Revocations map[string]int64 `json:"revocations"`
 }
 
 // AccountImportRecord represents a NATS account import for cross-account communication.

@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	natsjwt "github.com/nats-io/jwt/v2"
 	"github.com/pocketbase/dbx"
 	"github.com/pocketbase/pocketbase"
 	"github.com/pocketbase/pocketbase/core"
@@ -466,7 +467,9 @@ func (sm *Manager) setupRoleHooks() {
 }
 
 // setupExportHooks registers hooks for account export changes.
-// When exports change, the owning account's JWT is regenerated and published.
+// When exports change, the owning account's JWT is regenerated and published, and
+// so is every listed importer's, because the activation token pb-nats signs for it
+// lives in the importer's JWT.
 func (sm *Manager) setupExportHooks() {
 	regenerateAccountFromRecord := func(e *core.RecordEvent) error {
 		accountID := e.Record.GetString("account_id")
@@ -474,8 +477,31 @@ func (sm *Manager) setupExportHooks() {
 			return e.Next()
 		}
 		sm.regenerateAndSyncAccount(accountID)
+		sm.regenerateImporters(e.Record)
 		return e.Next()
 	}
+
+	// A key that leaves allowed_importers is revoked on the export, before the save
+	// so the revocation is part of the same write. Republishing the importer drops
+	// its token from the hub, but a leaf node keeps the JWT it preloaded; the
+	// export's revocation list reaches that copy too. A key put back clears its
+	// entry, or a token signed in the same second would stay revoked.
+	sm.app.OnRecordUpdate().BindFunc(func(e *core.RecordEvent) error {
+		if e.Record.Collection().Name != sm.options.ExportCollectionName {
+			return e.Next()
+		}
+		if orig := e.Record.Original(); orig != nil {
+			if revs, changed := exportRevocationsAfter(
+				pbtypes.ExportAllowedImporters(orig),
+				pbtypes.ExportAllowedImporters(e.Record),
+				pbtypes.ExportRevocations(e.Record),
+				time.Now().Unix(),
+			); changed {
+				e.Record.Set("revocations", revs)
+			}
+		}
+		return e.Next()
+	})
 
 	sm.app.OnRecordAfterCreateSuccess().BindFunc(func(e *core.RecordEvent) error {
 		if e.Record.Collection().Name != sm.options.ExportCollectionName {
@@ -871,6 +897,7 @@ func (sm *Manager) generateAccountJWT(record *core.Record) error {
 
 	exports := sm.getAccountExports(record.Id)
 	imports := sm.getAccountImports(record.Id)
+	sm.signActivations(account.PublicKey, imports)
 
 	jwtValue, err := sm.jwtGen.GenerateAccountJWT(account, latestKey.Seed, exports, imports)
 	if err != nil {
@@ -1140,4 +1167,126 @@ func (sm *Manager) scheduleAccountsWithRole(roleID string) error {
 	}
 
 	return nil
+}
+
+// signActivations fills in the activation token of each import that has none,
+// when the exporting account is one of ours and its token_req export lists this
+// importer in allowed_importers. A pasted token is left alone, and so is an import
+// of an account this database does not hold: pb-nats has no key to sign for it.
+//
+// The grant is the EXPORTER's record, which is the NATS model: the exporting
+// account decides who may import. An importer that adds its own import of a
+// private export it was not granted gets no token, and nats-server refuses it.
+func (sm *Manager) signActivations(importerPublicKey string, imports []*pbtypes.AccountImportRecord) {
+	for _, imp := range imports {
+		if imp.Token != "" || imp.Account == "" {
+			continue
+		}
+		exporter, err := sm.app.FindFirstRecordByData(sm.options.AccountCollectionName, "public_key", imp.Account)
+		if err != nil || exporter.Id == sm.systemAccountID {
+			continue
+		}
+		export := grantingExport(sm.getAccountExports(exporter.Id), importerPublicKey, imp)
+		if export == nil {
+			continue
+		}
+		seed := pbtypes.RecordToAccountModel(exporter, sm.options.EncryptionKey).Seed
+		token, err := sm.jwtGen.GenerateActivationToken(seed, importerPublicKey, export.Subject, export.Type)
+		if err != nil {
+			sm.logger.Warning("Failed to sign activation for import %s: %v", imp.Name, err)
+			continue
+		}
+		imp.Token = token
+	}
+}
+
+// grantingExport returns the token_req export that grants importerPublicKey the
+// import imp: same type, the import's subject contained in the export's, and the
+// importer listed.
+func grantingExport(exports []*pbtypes.AccountExportRecord, importerPublicKey string, imp *pbtypes.AccountImportRecord) *pbtypes.AccountExportRecord {
+	impType := imp.Type
+	if impType == "" {
+		impType = "stream"
+	}
+	for _, exp := range exports {
+		expType := exp.Type
+		if expType == "" {
+			expType = "stream"
+		}
+		if !exp.TokenReq || expType != impType || !containsString(exp.AllowedImporters, importerPublicKey) {
+			continue
+		}
+		if natsjwt.Subject(imp.Subject).IsContainedIn(natsjwt.Subject(exp.Subject)) {
+			return exp
+		}
+	}
+	return nil
+}
+
+// regenerateImporters republishes every account an export lists, now or before
+// this write, that imports from the export's account, so each gains or loses the
+// token signActivations signs for it.
+func (sm *Manager) regenerateImporters(export *core.Record) {
+	keys := pbtypes.ExportAllowedImporters(export)
+	if orig := export.Original(); orig != nil {
+		keys = append(keys, pbtypes.ExportAllowedImporters(orig)...)
+	}
+	if len(keys) == 0 {
+		return
+	}
+	exporter, err := sm.app.FindRecordById(sm.options.AccountCollectionName, export.GetString("account_id"))
+	if err != nil {
+		return
+	}
+	exporterKey := exporter.GetString("public_key")
+	seen := map[string]bool{}
+	for _, key := range keys {
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		importer, err := sm.app.FindFirstRecordByData(sm.options.AccountCollectionName, "public_key", key)
+		if err != nil || importer.Id == sm.systemAccountID || importer.Id == exporter.Id {
+			continue
+		}
+		if _, err := sm.app.FindFirstRecordByFilter(sm.options.ImportCollectionName,
+			"account_id = {:acct} && account = {:exp}",
+			dbx.Params{"acct": importer.Id, "exp": exporterKey}); err != nil {
+			continue // no import of this exporter, so nothing to sign
+		}
+		sm.regenerateAndSyncAccount(importer.Id)
+	}
+}
+
+// exportRevocationsAfter returns the export's revocations once a change of
+// allowed_importers from before to after has been applied at now, and whether
+// anything changed: each removed key gets a cutoff, each key put back loses its.
+func exportRevocationsAfter(before, after []string, revs map[string]int64, now int64) (map[string]int64, bool) {
+	changed := false
+	out := map[string]int64{}
+	for k, v := range revs {
+		out[k] = v
+	}
+	for _, k := range before {
+		if !containsString(after, k) {
+			out[k] = now
+			changed = true
+		}
+	}
+	for _, k := range after {
+		if _, ok := out[k]; ok {
+			delete(out, k)
+			changed = true
+		}
+	}
+	return out, changed
+}
+
+func containsString(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }

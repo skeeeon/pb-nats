@@ -483,6 +483,8 @@ func TestRecordToExportModel_Boundary(t *testing.T) {
 	record.Set("advertise", true)
 	record.Set("allow_trace", true)
 	record.Set("description", "boundary export")
+	record.Set("allowed_importers", []string{"AIMPORTERONE", "AIMPORTERTWO"})
+	record.Set("revocations", map[string]int64{"AREVOKED": 1700000000})
 	mustSave(t, app, record)
 
 	got := pbtypes.RecordToExportModel(reload(t, app, opts.ExportCollectionName, record.Id))
@@ -519,6 +521,12 @@ func TestRecordToExportModel_Boundary(t *testing.T) {
 	}
 	if !got.AllowTrace {
 		t.Error("AllowTrace = false, want true")
+	}
+	if len(got.AllowedImporters) != 2 || got.AllowedImporters[1] != "AIMPORTERTWO" {
+		t.Errorf("AllowedImporters = %v; a grant that does not cross the boundary signs no token", got.AllowedImporters)
+	}
+	if got.Revocations["AREVOKED"] != 1700000000 {
+		t.Errorf("Revocations = %v; a revocation that does not cross the boundary leaves a removed importer admitted", got.Revocations)
 	}
 	if got.Description != "boundary export" {
 		t.Errorf("Description = %q", got.Description)
