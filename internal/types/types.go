@@ -273,14 +273,14 @@ func (a *AccountRecord) AllSigningPublicKeys() []string {
 func NewSigningKeyPair(publicKey, privateKey, seed string) (SigningKeyPublic, SigningKeyPrivate) {
 	now := time.Now()
 	return SigningKeyPublic{
-			PublicKey: publicKey,
-			CreatedAt: now,
-		}, SigningKeyPrivate{
-			PublicKey:  publicKey,
-			PrivateKey: privateKey,
-			Seed:       seed,
-			CreatedAt:  now,
-		}
+		PublicKey: publicKey,
+		CreatedAt: now,
+	}, SigningKeyPrivate{
+		PublicKey:  publicKey,
+		PrivateKey: privateKey,
+		Seed:       seed,
+		CreatedAt:  now,
+	}
 }
 
 // MarshalSigningKeys marshals signing key slices to JSON for record storage.

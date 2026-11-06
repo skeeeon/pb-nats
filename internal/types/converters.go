@@ -228,14 +228,14 @@ func signingKeyFromScalarFields(record *core.Record) (*SigningKeyPublic, *Signin
 
 	now := time.Now()
 	return &SigningKeyPublic{
-			PublicKey: pubKey,
-			CreatedAt: now,
-		}, &SigningKeyPrivate{
-			PublicKey:  pubKey,
-			PrivateKey: privKey,
-			Seed:       seed,
-			CreatedAt:  now,
-		}
+		PublicKey: pubKey,
+		CreatedAt: now,
+	}, &SigningKeyPrivate{
+		PublicKey:  pubKey,
+		PrivateKey: privKey,
+		Seed:       seed,
+		CreatedAt:  now,
+	}
 }
 
 // RecordSigningPublicKeys extracts the set of public signing keys from a record's
