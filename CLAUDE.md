@@ -72,6 +72,6 @@ PocketBase CRUD (REST API) → Hooks (sync/) → Generate keys/JWTs (nkey/, jwt/
 
 ## Key Dependencies
 
-- `github.com/pocketbase/pocketbase` — Core framework being extended
+- `ganigeorgiev.com/pocketbase/pocketbase` — Core framework being extended
 - `github.com/nats-io/jwt/v2`, `nats.go`, `nkeys` — NATS JWT generation, client, and key cryptography
 - `github.com/spf13/cobra` — CLI commands

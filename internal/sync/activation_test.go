@@ -3,8 +3,8 @@ package sync
 import (
 	"testing"
 
+	"ganigeorgiev.com/pocketbase/pocketbase/core"
 	natsjwt "github.com/nats-io/jwt/v2"
-	"github.com/pocketbase/pocketbase/core"
 	"github.com/skeeeon/pb-nats/internal/jwt"
 	"github.com/skeeeon/pb-nats/internal/nkey"
 	pbtypes "github.com/skeeeon/pb-nats/internal/types"

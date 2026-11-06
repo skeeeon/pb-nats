@@ -32,7 +32,7 @@ package main
 
 import (
     "log"
-    "github.com/pocketbase/pocketbase"
+    "ganigeorgiev.com/pocketbase/pocketbase"
     pbnats "github.com/skeeeon/pb-nats"
 )
 

@@ -3,8 +3,8 @@ package types
 import (
 	"testing"
 
-	"github.com/pocketbase/pocketbase"
-	"github.com/pocketbase/pocketbase/core"
+	"ganigeorgiev.com/pocketbase/pocketbase"
+	"ganigeorgiev.com/pocketbase/pocketbase/core"
 )
 
 const testEncryptionKey = "0123456789abcdef0123456789abcdef"

@@ -4,7 +4,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/pocketbase/pocketbase"
+	"ganigeorgiev.com/pocketbase/pocketbase"
 	"github.com/skeeeon/pb-nats"
 )
 
