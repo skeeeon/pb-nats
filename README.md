@@ -187,9 +187,9 @@ NATS Server ($SYS.REQ.CLAIMS.UPDATE)
 
 Account JWTs live only in the NATS resolver directory. If that directory is lost, or you rebuild a server, or point pb-nats at a fresh NATS instance, the server has no record of your tenants — and because sync is hook-driven, nothing would republish them until someone happened to edit each account.
 
-On every startup pb-nats queues an upsert for each active account. This runs through the normal publish queue, so it dedupes per account, retries, and waits out bootstrap mode when NATS is down. It's cheap on the server side too: NATS answers `jwt update skipped` when it already holds an equal-or-newer JWT, so accounts that are already in sync cost one no-op request each.
+On every startup pb-nats queues every account. This runs through the normal publish queue, so it dedupes per account, retries, and waits out bootstrap mode when NATS is down. It's cheap on the server side too: NATS answers `jwt update skipped` when it already holds an equal-or-newer JWT, so accounts that are already in sync cost one no-op request each.
 
-Inactive accounts are skipped — they're absent from NATS by design.
+The queue decides what to send from each account's state when it processes it, not from what was queued: an active account is published and an **inactive account is removed**. Removing an account the server does not hold is a no-op. So an inactive account stays off the server whichever change queued it, and startup removes one that reached the server anyway.
 
 Deletions are handled from the other direction. A queued deletion that exhausts its retries is marked failed and would otherwise never be attempted again — and unlike an upsert it cannot be reconstructed, because the account row it refers to is already gone and the queue record's public key snapshot is the only surviving record of the intent. Startup clears that mark so the deletion is retried: whatever was rejecting it has had a whole process lifetime to change. Attempts stay capped afterwards, so this is a bounded retry per boot, not a loop.
 

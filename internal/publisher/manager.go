@@ -369,7 +369,19 @@ func (p *Manager) processQueueRecord(record *core.Record) error {
 		}
 		accountRecord := pbtypes.RecordToAccountModel(account, p.options.EncryptionKey)
 		accountLabel = accountRecord.Name
-		processErr = p.PublishAccount(accountRecord)
+		// The account's state at processing time decides, not the action that
+		// was queued. Every user, export and revocation change queues an
+		// upsert without asking whether the account is active, and a pending
+		// delete is merged into a later upsert (one row per account). So an
+		// inactive account here must be removed, never published: publishing
+		// it would put a suspended account back on the server. Removing an
+		// account the server does not hold is a no-op there.
+		if !accountRecord.Active {
+			action = pbtypes.PublishActionDelete
+			processErr = p.removeAccountJWT(accountRecord.PublicKey, accountRecord.Name)
+		} else {
+			processErr = p.PublishAccount(accountRecord)
+		}
 	case pbtypes.PublishActionDelete:
 		// Deletes use the snapshot taken at enqueue time - the account record
 		// no longer exists by the time the queue is processed.
@@ -557,11 +569,14 @@ func (p *Manager) validateAccount(account *pbtypes.AccountRecord) error {
 	if err := utils.ValidateRequired(account.JWT, "account JWT"); err != nil {
 		return err
 	}
-	// Deliberately no `active` check here. The sync hooks are the single authority
-	// on presence in NATS: deactivating an account enqueues a delete (which replaces
-	// any pending upsert for that account), so an inactive account is never queued
-	// for publishing. Rejecting here instead just burned retries on a queue record
-	// that could never succeed while the account stayed live in NATS.
+	// An inactive account is never published. processQueueRecord turns a queued
+	// upsert for one into a removal before it gets here, because the sync hooks
+	// DO queue upserts for inactive accounts (every user, export and revocation
+	// change does, and a later upsert overwrites a pending delete). This check is
+	// the backstop for any other caller of PublishAccount.
+	if !account.Active {
+		return fmt.Errorf("account %s is inactive and must not be published", account.Name)
+	}
 	if account.NormalizeName() == "" {
 		return fmt.Errorf("account %s has invalid name", account.Name)
 	}

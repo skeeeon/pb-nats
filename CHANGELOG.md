@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.4.1
+
+### Fixed: a change inside a suspended account no longer puts it back on the server
+
+Setting an account `active: false` removes it from the NATS server. But every user, export and revocation change in that account queued an upsert without checking `active`, and the queue published it, so the suspended account came straight back. A pending delete was also overwritten by a later upsert, because the queue keeps one row per account. In a multi-tenant host, any member of a suspended tenant could undo the suspension by rotating their own credentials.
+
+- **The queue now decides from the account's state when it processes it.** An active account is published. An inactive one is removed, which is a no-op if the server does not hold it. `PublishAccount` refuses an inactive account outright.
+- **Startup reconciliation queues inactive accounts too**, so an account that reached the server this way is removed on the first boot after upgrading.
+- **The first end-to-end test**: `TestASuspendedAccountStaysOffTheServer` boots pb-nats, starts a nats-server on the config `nats export` writes, and reads the server's resolver directory. It fails on the previous code with exactly this bug.
+
 ## v0.3.3
 
 ### Added: pb-nats signs activation tokens for exports it grants

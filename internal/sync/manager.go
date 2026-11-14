@@ -47,10 +47,16 @@ func NewManager(app *pocketbase.PocketBase, jwtGen *jwt.Generator, nkeyManager *
 	}
 }
 
-// ReconcileAccounts enqueues a publish for every active account, converging the NATS
-// server's view onto PocketBase's. Account JWTs live only in the NATS resolver
-// directory, so without this a lost or rebuilt resolver leaves every tenant absent
-// from NATS until someone happens to edit each record.
+// ReconcileAccounts enqueues every account, converging the NATS server's view onto
+// PocketBase's. Account JWTs live only in the NATS resolver directory, so without
+// this a lost or rebuilt resolver leaves every tenant absent from NATS until
+// someone happens to edit each record.
+//
+// Inactive accounts are enqueued too. The queue decides from each account's state
+// when it processes it: an active one is published and an inactive one is removed
+// (a no-op if the server does not hold it). That removes an inactive account that
+// reached the server anyway, which happened whenever a user change in a suspended
+// account queued an upsert before the queue checked.
 //
 // This leans entirely on the existing publish queue: operations dedupe per account,
 // retry, and wait out bootstrap mode, so a run while NATS is down costs nothing but a
@@ -65,10 +71,6 @@ func (sm *Manager) ReconcileAccounts() error {
 	queued := 0
 	for _, record := range records {
 		if record.Id == sm.systemAccountID {
-			continue
-		}
-		// Inactive accounts are absent from NATS by design.
-		if !record.GetBool("active") {
 			continue
 		}
 		if err := sm.publisher.QueueAccountUpdate(record.Id, pbtypes.PublishActionUpsert, "", ""); err != nil {
