@@ -24,6 +24,7 @@ func RecordToUserModel(record *core.Record, encryptionKey ...string) *NatsUserRe
 		JWT:          record.GetString("jwt"),
 		CredsFile:    record.GetString("creds_file"),
 		BearerToken:  record.GetBool("bearer_token"),
+		DeviceKey:    record.GetBool("device_key"),
 		Active:       record.GetBool("active"),
 		Regenerate:   record.GetBool("regenerate"),
 	}

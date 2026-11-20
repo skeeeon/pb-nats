@@ -48,6 +48,7 @@ func newUsersCollection(t *testing.T, app *pocketbase.PocketBase) *core.Collecti
 	users.Fields.Add(&core.TextField{Name: "jwt", Max: 5000})
 	users.Fields.Add(&core.DateField{Name: "jwt_expires_at"})
 	users.Fields.Add(&core.BoolField{Name: "active"})
+	users.Fields.Add(&core.BoolField{Name: "device_key"})
 	if err := app.Save(users); err != nil {
 		t.Fatalf("save users collection: %v", err)
 	}
@@ -126,5 +127,31 @@ func TestRecordToUserModelNoExpiry(t *testing.T) {
 	}
 	if user := RecordToUserModel(stored); user.JWTExpiresAt != nil {
 		t.Errorf("JWTExpiresAt after round-trip = %v, want nil", *user.JWTExpiresAt)
+	}
+}
+
+// TestRecordToUserModelDeviceKey pins device_key at the record->model boundary,
+// through a save and reload. A field the converter never reads passes every test
+// that builds the model by hand (see jwt_expires_at above).
+func TestRecordToUserModelDeviceKey(t *testing.T) {
+	app := newTestApp(t)
+	users := newUsersCollection(t, app)
+
+	record := core.NewRecord(users)
+	record.Set("nats_username", "gateway")
+	record.Set("device_key", true)
+	if !RecordToUserModel(record).DeviceKey {
+		t.Fatal("DeviceKey false on the in-flight record, want true")
+	}
+
+	if err := app.Save(record); err != nil {
+		t.Fatalf("save user: %v", err)
+	}
+	stored, err := app.FindRecordById(users.Name, record.Id)
+	if err != nil {
+		t.Fatalf("refetch user: %v", err)
+	}
+	if !RecordToUserModel(stored).DeviceKey {
+		t.Error("DeviceKey false after a round-trip, want true")
 	}
 }

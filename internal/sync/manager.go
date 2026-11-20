@@ -31,6 +31,10 @@ type Manager struct {
 	// Debouncing state
 	timer      *time.Timer
 	timerMutex sync.Mutex
+
+	// Record ids pb-nats itself is saving (see saveInternal). Keyed by id, read
+	// inside the nested update hook, which PocketBase runs synchronously.
+	internalSaves sync.Map
 }
 
 // NewManager creates a new sync manager with all required dependencies.
@@ -306,6 +310,17 @@ func (sm *Manager) setupAccountHooks() {
 
 // setupUserHooks registers hooks for user lifecycle and JWT management operations.
 func (sm *Manager) setupUserHooks() {
+	// Device-key invariants on a new row, before it is inserted (device_keys.go).
+	sm.app.OnRecordCreate().BindFunc(func(e *core.RecordEvent) error {
+		if e.Record.Collection().Name != sm.options.UserCollectionName {
+			return e.Next()
+		}
+		if err := sm.checkUserCreate(e.App, e.Record); err != nil {
+			return err
+		}
+		return e.Next()
+	})
+
 	// User creation
 	sm.app.OnRecordAfterCreateSuccess().BindFunc(func(e *core.RecordEvent) error {
 		if e.Record.Collection().Name != sm.options.UserCollectionName {
@@ -318,7 +333,7 @@ func (sm *Manager) setupUserHooks() {
 		}
 
 		if e.Record.GetString("public_key") != "" {
-			if err := sm.app.Save(e.Record); err != nil {
+			if err := sm.saveInternal(e.Record); err != nil {
 				sm.logger.Warning("Failed to save user keys for %s: %v", e.Record.Id, err)
 				return e.Next()
 			}
@@ -345,6 +360,12 @@ func (sm *Manager) setupUserHooks() {
 			return e.Next()
 		}
 
+		// First, before revoke rotates or empties public_key below: the check
+		// compares what the caller wrote with Original() (device_keys.go).
+		if err := sm.checkUserUpdate(e.App, e.Record); err != nil {
+			return err
+		}
+
 		// `revoke` is the imperative "these credentials leaked" button: it kills the
 		// credentials currently in the wild and immediately issues replacements. The
 		// user stays active. Because the leaked material includes the user's seed,
@@ -353,6 +374,14 @@ func (sm *Manager) setupUserHooks() {
 		// JWT is bound to a public key that no revocation covers.
 		if e.Record.GetBool("revoke") {
 			e.Record.Set("revoke", false)
+			if e.Record.GetBool("device_key") {
+				if err := sm.revokeDeviceKey(e.Record); err != nil {
+					return utils.WrapError(err, "failed to revoke device key")
+				}
+				sm.logger.Info("Device key revoked for user %s — the device must enroll a new key",
+					e.Record.GetString("nats_username"))
+				return e.Next()
+			}
 			if err := sm.rotateUserCredentials(e.Record); err != nil {
 				return utils.WrapError(err, "failed to revoke user credentials")
 			}
@@ -819,6 +848,10 @@ func (sm *Manager) scheduleDelete(record *core.Record) {
 
 // enqueue queues an account operation and (re)arms the debounce timer.
 func (sm *Manager) enqueue(accountID, action, publicKey, accountName string) {
+	if sm.publisher == nil {
+		return // a Manager built without one (tests) queues nothing
+	}
+
 	sm.timerMutex.Lock()
 	defer sm.timerMutex.Unlock()
 
@@ -938,6 +971,11 @@ func (sm *Manager) getAccountImports(accountID string) []*pbtypes.AccountImportR
 
 // generateUserKeys generates key pairs and JWT for a new user record.
 func (sm *Manager) generateUserKeys(record *core.Record) error {
+	// The device made the pair. Sign its key if it has sent one; the guard in
+	// generateUserJWT decides.
+	if record.GetBool("device_key") {
+		return sm.generateUserJWT(record)
+	}
 	if record.GetString("public_key") != "" {
 		return nil
 	}
@@ -965,6 +1003,20 @@ func (sm *Manager) generateUserKeys(record *core.Record) error {
 
 // generateUserJWT creates a user JWT based on account context and role permissions.
 func (sm *Manager) generateUserJWT(record *core.Record) error {
+	// THE DEVICE-KEY GUARD. Every path that signs a user JWT comes through here:
+	// create, a key arriving, field edits, regenerate, reactivation, and the
+	// bulk reissues (regenerateUsersWithRole, regenerateUsersInAccount). So one
+	// rule here covers them all: a device_key row with no public_key, or that is
+	// inactive, gets no JWT, and that is not an error. Without it a waiting row
+	// failed every save (the update hook reissues whenever jwt is empty), and a
+	// key arriving on an inactive row minted a working credential.
+	deviceKey := record.GetBool("device_key")
+	if deviceKey && (record.GetString("public_key") == "" || !record.GetBool("active")) {
+		record.Set("jwt", "")
+		record.Set("creds_file", "")
+		return nil
+	}
+
 	account, err := sm.app.FindRecordById(sm.options.AccountCollectionName, record.GetString("account_id"))
 	if err != nil {
 		return utils.WrapErrorf(err, "failed to find account %s", record.GetString("account_id"))
@@ -987,6 +1039,13 @@ func (sm *Manager) generateUserJWT(record *core.Record) error {
 	record.Set("jwt", jwtValue)
 	user.JWT = jwtValue
 
+	// No creds_file for a device-held key: it needs the seed, which only the
+	// device has. The device builds its own from the JWT.
+	if deviceKey {
+		record.Set("creds_file", "")
+		return nil
+	}
+
 	credsFile, err := sm.jwtGen.GenerateCredsFile(user)
 	if err != nil {
 		return utils.WrapError(err, "failed to generate creds file")
@@ -1008,7 +1067,7 @@ func (sm *Manager) regenerateUserJWT(record *core.Record) error {
 func userJWTFieldsChanged(record *core.Record) bool {
 	original := record.Original()
 	jwtFields := []string{
-		"nats_username", "account_id", "role_id", "bearer_token", "jwt_expires_at",
+		"nats_username", "account_id", "role_id", "bearer_token", "jwt_expires_at", "public_key",
 		"publish_permissions", "subscribe_permissions",
 		"publish_deny_permissions", "subscribe_deny_permissions",
 	}

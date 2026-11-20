@@ -49,6 +49,9 @@ func (cm *Manager) InitializeCollections() error {
 	if err := cm.ensureUserRevokeField(); err != nil {
 		return fmt.Errorf("failed to ensure user revoke field: %w", err)
 	}
+	if err := cm.ensureUserDeviceKeyFields(); err != nil {
+		return fmt.Errorf("failed to ensure user device key fields: %w", err)
+	}
 	if err := cm.ensureSystemOperatorFields(); err != nil {
 		return fmt.Errorf("failed to ensure system operator fields: %w", err)
 	}
@@ -329,6 +332,7 @@ func (cm *Manager) createUsersCollection() error {
 	// and is the only secret deliberately exposed through the API.
 	collection.Fields.Add(&core.TextField{Name: "creds_file", Max: 10000})
 	collection.Fields.Add(&core.BoolField{Name: "bearer_token"})
+	collection.Fields.Add(deviceKeyField())
 	collection.Fields.Add(&core.DateField{Name: "jwt_expires_at"})
 	collection.Fields.Add(&core.BoolField{Name: "regenerate"})
 	// revoke: set true to invalidate this user's currently distributed credentials
@@ -341,6 +345,7 @@ func (cm *Manager) createUsersCollection() error {
 	collection.Fields.Add(&core.JSONField{Name: "subscribe_permissions", Required: false, MaxSize: 5000})
 	collection.Fields.Add(&core.JSONField{Name: "publish_deny_permissions", Required: false, MaxSize: 5000})
 	collection.Fields.Add(&core.JSONField{Name: "subscribe_deny_permissions", Required: false, MaxSize: 5000})
+	addPublicKeyIndex(collection)
 
 	return cm.app.Save(collection)
 }
@@ -597,6 +602,60 @@ func (cm *Manager) ensureUserRevokeField() error {
 
 	collection.Fields.Add(&core.BoolField{Name: "revoke"})
 	return cm.app.Save(collection)
+}
+
+// deviceKeyField is nats_users.device_key: true when the device made the key
+// pair and sent only the public key. Set at create, never changed (the sync
+// hooks refuse a change). Shared by createUsersCollection and
+// ensureUserDeviceKeyFields.
+func deviceKeyField() core.Field {
+	return &core.BoolField{Name: "device_key"}
+}
+
+// publicKeyIndexName names the unique index on nats_users.public_key.
+func publicKeyIndexName(collection *core.Collection) string {
+	return "idx_" + collection.Name + "_public_key"
+}
+
+// addPublicKeyIndex makes a non-empty public_key unique in the collection.
+//
+// Keys pb-nats generates never collide. A key a device sent, or an admin
+// pasted, can: and a revocation is per key in the account, so revoking one of
+// two rows sharing a key would cut off both. Partial, because a device_key row
+// waiting for its device has an empty public_key, and so may many rows.
+func addPublicKeyIndex(collection *core.Collection) {
+	collection.AddIndex(publicKeyIndexName(collection), true, "`public_key`", "`public_key` != ''")
+}
+
+// ensureUserDeviceKeyFields adds device_key and the public_key unique index to
+// an existing nats_users collection. Migration for deployments created before
+// device-held keys. Each half is checked by name, so a consumer's own schema
+// that already declares one of them gets only the other.
+func (cm *Manager) ensureUserDeviceKeyFields() error {
+	collection, err := cm.app.FindCollectionByNameOrId(cm.options.UserCollectionName)
+	if err != nil {
+		return nil // Collection doesn't exist yet; createUsersCollection will handle it
+	}
+
+	changed := false
+	if collection.Fields.GetByName("device_key") == nil {
+		collection.Fields.Add(deviceKeyField())
+		changed = true
+	}
+	if collection.GetIndex(publicKeyIndexName(collection)) == "" {
+		addPublicKeyIndex(collection)
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	if err := cm.app.Save(collection); err != nil {
+		// The only way the index fails is two rows already sharing a public
+		// key, which pb-nats never generates. Say so rather than fail opaquely.
+		return fmt.Errorf("add device_key and the unique public_key index (are two %s rows sharing a public_key?): %w",
+			collection.Name, err)
+	}
+	return nil
 }
 
 // ensureAccountRevocationsField adds the revocations field to existing accounts

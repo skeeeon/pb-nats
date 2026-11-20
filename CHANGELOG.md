@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.5.0
+
+### Added: device-held keys
+
+A user created with `device_key: true` holds its own key pair. The device sends only its public key, as `nk -gen user -pubout` prints it, and pb-nats signs a JWT for it. pb-nats never stores the seed, the private key or a `creds_file` for that user, so a stolen database holds no working credential for it. See "Device-Held Keys" in the README.
+
+- **A new bool field, `device_key`, and a partial unique index on `public_key`,** both added to existing users collections on boot. A host that defines `nats_users` in its own schema should add both there too. The index is named `idx_<collection>_public_key`.
+- **One guard in the JWT generator covers every path.** A device-key row with no key, or that is inactive, gets no JWT, and that is not an error. So a row waiting for its device can be edited, deactivated and reactivated, and role edits and signing-key changes reissue an enrolled row.
+- **`revoke` on a device-key row** revokes the key and empties `public_key` and `jwt`. The device enrolls a new key, and the revoked one is refused.
+- **Typed errors,** exported from the root package, for each refused write.
+
+### Changed (breaking): `public_key` on a platform-held key changes only through `revoke`
+
+Before, a REST update could overwrite `public_key` on any user. `revoke` then revoked the overwritten key, not the one in the client's hands. Such a write is now refused with `ErrPublicKeyImmutable`. A create that sets `public_key` without its `seed` is refused with `ErrPublicKeyWithoutSeed`: before, it skipped key generation and left a user with no JWT, ever.
+
+
 ## v0.4.1
 
 ### Fixed: a change inside a suspended account no longer puts it back on the server

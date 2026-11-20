@@ -331,12 +331,13 @@ PocketBase auth collection with NATS integration. Each user belongs to one accou
 | `description` | Text | | User description |
 | `account_id` | Relation | | Link to account |
 | `role_id` | Relation | | Link to role |
-| `public_key` | Text | | User public key |
+| `public_key` | Text | | User public key (unique when not empty) |
 | `private_key` | Text | Yes | User private key |
 | `seed` | Text | Yes | User seed |
 | `jwt` | Text | | User JWT |
 | `creds_file` | Text | | Complete NATS .creds file for client connection |
 | `bearer_token` | Bool | | Enable bearer token auth |
+| `device_key` | Bool | | The device holds the key: pb-nats signs `public_key` and stores no seed or `creds_file`. Set at create, never changed. See [Device-Held Keys](#device-held-keys) |
 | `jwt_expires_at` | Date | | JWT expiration timestamp (renewal is the client's job — see [JWT Expiry](#jwt-expiry-and-renewal)) |
 | `regenerate` | Bool | | Trigger: regenerate JWT |
 | `revoke` | Bool | | Trigger: rotate credentials, killing the leaked ones (user stays active) |
@@ -566,6 +567,31 @@ A fresh JWT is issued automatically. It carries a later issue time than the revo
 > **`active` governs transitions, not creation.** A user created with `active: false` still gets a working JWT and `creds_file` — there is nothing distributed yet to revoke, and PocketBase bool fields default to `false`, so treating creation as a suspend would break every caller that simply omits the field. To provision a user without usable credentials, create them and then clear `active`. (Accounts differ: an account created inactive is never published to NATS at all, because presence there is a single yes-or-no fact about the account.)
 
 > **Note:** Because the cutoff has one-second resolution, a JWT reissued in the *same second* as a revocation is also treated as revoked. This is a non-issue for human-driven actions, which are always well over a second apart — and `revoke` avoids the question entirely by issuing against a new public key that no cutoff covers.
+
+### Device-Held Keys
+
+By default pb-nats generates every user's key pair and keeps the seed, so a stolen database holds a working credential for every user. A user created with `device_key: true` is the other way round, the way NATS was built: the device runs `nk -gen user -pubout`, keeps the seed, and sends only the public key. pb-nats signs a JWT for that key and never stores a seed, a private key or a `creds_file`. The device builds its own `.creds` from the record's `jwt` (`jwt.FormatUserConfig`).
+
+- **An empty `public_key` means "waiting for the device".** Such a row has no JWT, and every save on it works.
+- **The key arrives in an ordinary update** (or on create): `{"public_key": "UAB..."}`. pb-nats checks it is a user nkey, not on the account's revocation list and not held by another row, and signs a JWT if the user is active.
+- **A device-key row needs `active: true` to get a JWT.** Unlike a platform-held key (see the note in [Revoking Users](#revoking-users)), an inactive device-key row is issued nothing, at creation too, so a key arriving on a suspended row cannot hand it a credential.
+- **`revoke` revokes the key and empties `public_key` and `jwt`.** pb-nats cannot replace a key it never had, so the device enrolls a new one. The revoked key is refused if sent again: a revocation is a cutoff time, and a fresh JWT for the same key would pass it.
+- **Every other reissue** (role edits, signing-key changes, `regenerate`, reactivation) re-signs the same key.
+
+Invariants, refused with a 400 that matches the exported errors through `errors.Is`:
+
+| Error | Refused |
+|---|---|
+| `ErrDeviceKeyFrozen` | changing `device_key` after create |
+| `ErrDeviceKeyEnrolled` | changing a device key once set (only `revoke` empties it) |
+| `ErrInvalidDeviceKey` | a `public_key` that is not a user nkey |
+| `ErrDeviceKeyRevoked` | a key on the account's revocation list |
+| `ErrDeviceKeyBearer` | `device_key` and `bearer_token` together |
+| `ErrDeviceKeyHasSecret` | a `seed` or `private_key` on a device-key row |
+| `ErrPublicKeyImmutable` | writing `public_key` on a platform-held key (use `revoke`) |
+| `ErrPublicKeyWithoutSeed` | creating a platform-held row with a `public_key` and no `seed` |
+
+A second row with the same `public_key` is refused by the unique index (`idx_nats_users_public_key`), because a revocation is per key in the account and would cut off both. There is no proof of possession: enrolling a key you do not hold gets you a JWT you cannot use. Trust in enrollment is whatever authorizes the update, as it is today for reading `creds_file`.
 
 ### JWT Expiry and Renewal
 

@@ -127,6 +127,7 @@ type NatsUserRecord struct {
 	JWT          string     `json:"jwt"`
 	CredsFile    string     `json:"creds_file"`
 	BearerToken  bool       `json:"bearer_token"`
+	DeviceKey    bool       `json:"device_key"` // the device holds the seed; Seed, PrivateKey and CredsFile stay empty
 	JWTExpiresAt *time.Time `json:"jwt_expires_at"`
 	Regenerate   bool       `json:"regenerate"`
 	Active       bool       `json:"active"`

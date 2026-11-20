@@ -3,6 +3,8 @@ package pbnats
 import (
 	"errors"
 	"strings"
+
+	pbtypes "github.com/skeeeon/pb-nats/internal/types"
 )
 
 // Common errors returned by the library organized by operational category.
@@ -46,6 +48,19 @@ var (
 	ErrInvalidOptions       = errors.New("invalid options provided")  // Configuration validation failed
 	ErrMissingOperator      = errors.New("system operator not found") // Operator initialization missing
 	ErrMissingSystemAccount = errors.New("system account not found")  // System account missing
+)
+
+// Device-held key errors, returned (wrapped in a 400) by a save that breaks a
+// device_key invariant. Match with errors.Is. See internal/types/errors.go.
+var (
+	ErrDeviceKeyFrozen      = pbtypes.ErrDeviceKeyFrozen
+	ErrDeviceKeyBearer      = pbtypes.ErrDeviceKeyBearer
+	ErrDeviceKeyHasSecret   = pbtypes.ErrDeviceKeyHasSecret
+	ErrDeviceKeyEnrolled    = pbtypes.ErrDeviceKeyEnrolled
+	ErrInvalidDeviceKey     = pbtypes.ErrInvalidDeviceKey
+	ErrDeviceKeyRevoked     = pbtypes.ErrDeviceKeyRevoked
+	ErrPublicKeyImmutable   = pbtypes.ErrPublicKeyImmutable
+	ErrPublicKeyWithoutSeed = pbtypes.ErrPublicKeyWithoutSeed
 )
 
 // IsTemporaryError determines if an error represents a temporary condition that
